@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>LLM Configurations Help</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="help_style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>Configuring Language Models (LLMs)</h1>
+        <p>To use Unlock's AI features, you'll need to configure one or more Large Language Models (LLMs). Unlock allows you to connect to various cloud-based LLM providers and also supports on-device models available through Chrome.</p>
+
+        <h2>General Steps for Cloud-Based LLMs:</h2>
+        <ol>
+            <li><strong>Choose a Provider:</strong> Select an LLM provider you wish to use (e.g., OpenAI, Google, Anthropic, etc.).</li>
+            <li><strong>Get an API Key:</strong> Visit the provider's website, sign up or log in, and navigate to the API keys section to generate a new key. Copy it securely.</li>
+            <li><strong>Find Model Details:</strong> Note the specific **Model Name/ID** and the **API Endpoint Base URL** from the provider's documentation.</li>
+            <li><strong>Enable Billing:</strong> Ensure you have set up billing with the provider, as API usage typically incurs costs.</li>
+            <li><strong>Enter Details in Unlock:</strong>
+                <ul>
+                    <li>Open the Unlock sidebar, go to Settings, and click "Add New LLM Configuration."</li>
+                    <li>Fill in the details you've gathered. See provider-specific notes below.</li>
+                    <li>Save the configuration and select it as "Active".</li>
+                </ul>
+            </li>
+        </ol>
+
+        <hr>
+
+        <h2>OpenAI</h2>
+        <ul>
+            <li><strong>Provider Type:</strong> `OpenAI`</li>
+            <li><strong>Model Name/ID:</strong> e.g., `gpt-4o`, `gpt-4-turbo`, `gpt-3.5-turbo`</li>
+            <li><strong>API Endpoint Base URL:</strong> `https://api.openai.com/v1/chat/completions`</li>
+        </ul>
+
+        <h2>Google Gemini</h2>
+        <ul>
+            <li><strong>Provider Type:</strong> `Google Gemini`</li>
+            <li><strong>Model Name/ID:</strong> e.g., `gemini-1.5-pro-latest`, `gemini-1.0-pro`</li>
+            <li><strong>API Endpoint Base URL:</strong> `https://generativelanguage.googleapis.com/v1beta/models/`</li>
+            <li class="note">The extension appends the model name and `:generateContent` to the endpoint automatically.</li>
+        </ul>
+
+        <h2>Anthropic Claude</h2>
+        <ul>
+            <li><strong>Provider Type:</strong> `Anthropic Claude`</li>
+            <li><strong>Model Name/ID:</strong> e.g., `claude-3-5-sonnet-20240620`, `claude-3-opus-20240229`, `claude-3-haiku-20240307`</li>
+            <li><strong>API Endpoint Base URL:</strong> `https://api.anthropic.com/v1/messages`</li>
+        </ul>
+        
+        <h2>Meta Llama</h2>
+        <ul>
+            <li><strong>Provider Type:</strong> `Llama (Meta)`</li>
+            <li><strong>Model Name/ID:</strong> e.g., `meta-llama/Llama-3-8b-chat-hf`, `meta-llama/Llama-3-70b-chat-hf`</li>
+            <li><strong>API Endpoint Base URL:</strong> `https://api.llama.com/v1/chat/completions`</li>
+        </ul>
+
+        <h2>DeepSeek</h2>
+        <ul>
+            <li><strong>Provider Type:</strong> `DeepSeek`</li>
+            <li><strong>Model Name/ID:</strong> e.g., `deepseek-chat`, `deepseek-coder`</li>
+            <li><strong>API Endpoint Base URL:</strong> `https://api.deepseek.com/chat/completions`</li>
+        </ul>
+
+        <h2>Grok (xAI)</h2>
+        <ul>
+            <li><strong>Provider Type:</strong> `Grok (xAI)`</li>
+            <li><strong>Model Name/ID:</strong> e.g., `grok-1`, `l3-mini`</li>
+            <li><strong>API Endpoint Base URL:</strong> `https://api.x.ai/v1/chat/completions`</li>
+        </ul>
+        
+        <h2>Perplexity</h2>
+        <ul>
+            <li><strong>Provider Type:</strong> `Perplexity`</li>
+            <li><strong>Model Name/ID:</strong> e.g., `llama-3-sonar-large-32k-online`, `llama-3-8b-instruct`</li>
+            <li><strong>API Endpoint Base URL:</strong> `https://api.perplexity.ai/chat/completions`</li>
+        </ul>
+        
+        <h2>OpenAI-Compatible APIs</h2>
+        <p>For self-hosted models or other services that mimic the OpenAI API (like Groq, Together AI, etc.).</p>
+        <ul>
+            <li><strong>Provider Type:</strong> `OpenAI-Compatible API`</li>
+            <li><strong>API Key:</strong> Provided by the service.</li>
+            <li><strong>Model Name/ID:</strong> The specific model name provided by the service.</li>
+            <li><strong>API Endpoint Base URL:</strong> The full endpoint URL provided by the service.</li>
+        </ul>
+
+        <h2>On-Device: Chrome AI (Gemini Nano)</h2>
+        <p>This option uses a model built into Chrome. It does not require an API key or internet access for processing but is less powerful than cloud models.</p>
+        <ul>
+            <li><strong>Provider Type:</strong> `Chrome AI (Gemini Nano)`</li>
+            <li><strong>Note:</strong> Availability depends on your browser version and hardware. You might need to enable flags like `chrome://flags/#prompt-api-for-gemini-nano`.</li>
+        </ul>
+
+        <p class="note">
+            <strong>Important:</strong> API details (endpoints, model names) can change. Always refer to the official documentation of your chosen LLM provider for the most up-to-date information.
+        </p>
+
+    </div>
+</body>
+</html>

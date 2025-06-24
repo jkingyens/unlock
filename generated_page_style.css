@@ -1,0 +1,198 @@
+/* ext/generated_page_style.css */
+:root {
+  /* Import or redefine from sidebar.css - Light Mode Defaults */
+  --generated-bg-primary: #ffffff;
+  --generated-bg-secondary: #f8f8f8;
+  --generated-text-primary: #202124;
+  --generated-text-secondary: #5f6368;
+  --generated-text-accent: #1a73e8; /* Google Blue */
+  --generated-border-primary: #dadce0;
+  --generated-border-secondary: #e0e0e0;
+  --generated-link-color: #1a73e8;
+  --generated-link-hover-color: #185abc;
+
+  --generated-button-bg: #1a73e8;
+  --generated-button-text: #ffffff;
+  --generated-button-hover-bg: #185abc;
+
+  /* Add specific vars for quiz elements if needed */
+  --quiz-question-text: var(--generated-text-primary);
+  --quiz-option-bg: var(--generated-bg-secondary);
+  --quiz-option-border: var(--generated-border-secondary);
+  --quiz-feedback-correct-bg: #e6f4ea;
+  --quiz-feedback-correct-text: #1e8e3e;
+  --quiz-feedback-incorrect-bg: #fce8e6;
+  --quiz-feedback-incorrect-text: #d93025;
+}
+
+@media (prefers-color-scheme: dark) {
+  body:not(.light-mode) { /* Matches sidebar's dark mode trigger */
+    --generated-bg-primary: #202124;
+    --generated-bg-secondary: #2d2e31;
+    --generated-text-primary: #e8eaed;
+    --generated-text-secondary: #bdc1c6;
+    --generated-text-accent: #8ab4f8; /* Light blue */
+    --generated-border-primary: #5f6368;
+    --generated-border-secondary: #3c4043;
+    --generated-link-color: #8ab4f8;
+    --generated-link-hover-color: #aecbfa;
+
+    --generated-button-bg: #8ab4f8;
+    --generated-button-text: #202124;
+    --generated-button-hover-bg: #aecbfa;
+
+    --quiz-question-text: var(--generated-text-primary);
+    --quiz-option-bg: var(--generated-bg-secondary);
+    --quiz-option-border: var(--generated-border-secondary);
+    --quiz-feedback-correct-bg: #2a3a2e;
+    --quiz-feedback-correct-text: #81c995;
+    --quiz-feedback-incorrect-bg: #4d322f;
+    --quiz-feedback-incorrect-text: #f28b82;
+  }
+}
+
+/* Apply to body if dark-mode class is explicitly set */
+body.dark-mode {
+    --generated-bg-primary: #202124;
+    --generated-bg-secondary: #2d2e31;
+    --generated-text-primary: #e8eaed;
+    --generated-text-secondary: #bdc1c6;
+    --generated-text-accent: #8ab4f8;
+    --generated-border-primary: #5f6368;
+    --generated-border-secondary: #3c4043;
+    --generated-link-color: #8ab4f8;
+    --generated-link-hover-color: #aecbfa;
+    --generated-button-bg: #8ab4f8;
+    --generated-button-text: #202124;
+    --generated-button-hover-bg: #aecbfa;
+    /* ... other dark mode specific vars from above ... */
+}
+
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  line-height: 1.65;
+  margin: 0;
+  padding: 0; /* Remove padding from body, apply to container */
+  background-color: var(--generated-bg-primary);
+  color: var(--generated-text-primary);
+  transition: background-color 0.2s ease-in-out, color 0.2s ease-in-out;
+}
+
+.page-container { /* New container for content */
+  max-width: 800px; /* Or similar to sidebar's content width */
+  margin: 0 auto;
+  padding: 20px;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  color: var(--generated-text-primary); /* Use a slightly more prominent header text if desired */
+  margin-top: 1.8em;
+  margin-bottom: 0.8em;
+  line-height: 1.3;
+}
+h1 { font-size: 2em; border-bottom: 1px solid var(--generated-border-secondary); padding-bottom: 0.4em; }
+h2 { font-size: 1.6em; border-bottom: 1px solid var(--generated-border-secondary); padding-bottom: 0.3em;}
+h3 { font-size: 1.3em; }
+
+p { margin-bottom: 1.2em; }
+a { color: var(--generated-link-color); text-decoration: none; }
+a:hover, a:focus { color: var(--generated-link-hover-color); text-decoration: underline; }
+
+ul, ol { padding-left: 1.5em; margin-bottom: 1.2em; }
+li { margin-bottom: 0.5em; }
+
+/* Basic button style */
+.button, button {
+  display: inline-block;
+  padding: 10px 15px;
+  margin: 5px 0;
+  font-size: 1em;
+  font-weight: 500;
+  color: var(--generated-button-text);
+  background-color: var(--generated-button-bg);
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  text-align: center;
+  text-decoration: none;
+  transition: background-color 0.2s ease;
+}
+.button:hover, button:hover {
+  background-color: var(--generated-button-hover-bg);
+}
+
+/* Quiz specific styles (examples) */
+.quiz-container {
+  /* Styles for the overall quiz area if needed */
+}
+
+.question-container {
+  margin-bottom: 25px;
+  padding: 15px;
+  border: 1px solid var(--generated-border-primary);
+  border-radius: 5px;
+  background-color: var(--generated-bg-secondary);
+}
+
+.question-text {
+  font-size: 1.1em;
+  font-weight: bold;
+  margin-bottom: 15px;
+  color: var(--quiz-question-text);
+}
+
+.options-list {
+  list-style: none;
+  padding: 0;
+}
+
+.options-list li {
+  margin-bottom: 10px;
+  padding: 10px;
+  border: 1px solid var(--quiz-option-border);
+  border-radius: 4px;
+  background-color: var(--quiz-option-bg);
+  cursor: pointer;
+  transition: background-color 0.2s, border-color 0.2s;
+}
+
+.options-list li:hover {
+  border-color: var(--generated-text-accent);
+  background-color: var(--generated-bg-primary); /* Slightly different hover */
+}
+
+.options-list input[type="radio"] {
+  margin-right: 10px;
+  accent-color: var(--generated-text-accent);
+}
+
+.feedback-area {
+  margin-top: 10px;
+  padding: 8px;
+  border-radius: 4px;
+  font-size: 0.9em;
+}
+
+.feedback-area.correct {
+  background-color: var(--quiz-feedback-correct-bg);
+  color: var(--quiz-feedback-correct-text);
+  border: 1px solid var(--quiz-feedback-correct-text);
+}
+
+.feedback-area.incorrect {
+  background-color: var(--quiz-feedback-incorrect-bg);
+  color: var(--quiz-feedback-incorrect-text);
+  border: 1px solid var(--quiz-feedback-incorrect-text);
+}
+
+/* Mobile Friendliness */
+@media (max-width: 768px) {
+  .page-container {
+    padding: 15px;
+  }
+  h1 { font-size: 1.8em; }
+  h2 { font-size: 1.4em; }
+  h3 { font-size: 1.2em; }
+  .button, button { width: 100%; /* Full width buttons on mobile */ }
+}
