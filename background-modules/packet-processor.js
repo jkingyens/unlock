@@ -403,35 +403,41 @@ export async function instantiatePacket(imageId, preGeneratedInstanceId, initiat
     logger.log('PacketProcessor:instantiatePacket', 'Starting INSTANCE finalization', { imageId, instanceId });
 
     try {
-        const activeCloudConfig = await storage.getActiveCloudStorageConfig();
-        if (!activeCloudConfig) {
-            throw new Error("No active cloud storage configuration found for publishing.");
-        }
-
         const packetImage = await storage.getPacketImage(imageId);
         if (!packetImage) throw new Error(`Packet Image ${imageId} not found.`);
 
-        // A stencil instance is no longer assumed to exist. We create it from the image.
+        const hasGeneratedContent = packetImage.sourceContent.some(item => item.type === 'generated');
+        let activeCloudConfig = null;
+
+        if (hasGeneratedContent) {
+            logger.log('PacketProcessor:instantiatePacket', 'Packet contains generated content, checking cloud storage...');
+            activeCloudConfig = await storage.getActiveCloudStorageConfig();
+            if (!activeCloudConfig) {
+                throw new Error("This packet contains generated pages, but no active cloud storage is configured for publishing.");
+            }
+            if (!(await cloudStorage.initialize())) {
+                throw new Error("Cloud storage failed to initialize for publishing.");
+            }
+        } else {
+            logger.log('PacketProcessor:instantiatePacket', 'Packet contains only external links. Skipping cloud storage checks.');
+        }
+
         let packetInstance = {
             instanceId: instanceId,
             imageId: imageId,
             topic: packetImage.topic,
-            created: packetImage.created, // Inherit image creation time
-            instantiated: new Date().toISOString(), // Set new instantiation time
-            contents: [], // Will be populated below
+            created: packetImage.created,
+            instantiated: new Date().toISOString(),
+            contents: [],
             visitedUrls: [],
             visitedGeneratedPageIds: [],
         };
-
-
-        if (!(await cloudStorage.initialize())) {
-            throw new Error("Cloud storage failed to initialize for publishing.");
-        }
 
         for (const sourceItem of packetImage.sourceContent) {
             let instanceItem = { ...sourceItem };
 
             if (instanceItem.type === 'generated') {
+                // This block will only be entered if hasGeneratedContent was true
                 const { pageId, contentB64, contentType } = instanceItem;
                 if (!contentB64) {
                     logger.warn('PacketProcessor:instantiate', `Generated item ${pageId} is missing Base64 content. Cannot publish.`);
@@ -467,6 +473,8 @@ export async function instantiatePacket(imageId, preGeneratedInstanceId, initiat
         }
         
         await storage.savePacketBrowserState({ instanceId: instanceId, tabGroupId: null, activeTabIds: [], lastActiveUrl: null });
+        
+        // This will correctly do nothing if there are no generated items to create rules for
         await ruleManager.addOrUpdatePacketRules(packetInstance);
         
         logger.log('PacketProcessor:instantiatePacket', 'Final Packet Instance and BrowserState saved.', { instanceId });
