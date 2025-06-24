@@ -36,17 +36,6 @@ import { checkAndPromptForCompletion } from './navigation-handler.js';
 
 const PENDING_VIEW_KEY = 'pendingSidebarView';
 
-// --- Helper to parse metadata from HTML text ---
-function parseMetadataFromHTML(htmlText) {
-    const titleMatch = htmlText.match(/<title[^>]*>([^<]+)<\/title>/i);
-    const descriptionMatch = htmlText.match(/<meta\s+name=["']description["']\s+content=["']([^"']*)["']/i);
-    
-    return {
-        title: titleMatch ? titleMatch[1] : 'No Title Found',
-        description: descriptionMatch ? descriptionMatch[1] : 'No description available.'
-    };
-}
-
 
 // --- Context Request Handlers ---
 async function handleGetContextForTab(data, sender, sendResponse) {
@@ -105,6 +94,39 @@ async function handleGetCurrentTabContext(data, sender, sendResponse) {
           logger.error('MessageHandler:handleGetCurrentTabContext', 'Error getting current tab context', error);
           sendResponse({ success: false, error: error.message });
      }
+}
+
+async function handleGetPageDetailsFromDOM(sender, sendResponse) {
+    try {
+        const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (!activeTab || typeof activeTab.id !== 'number') {
+            throw new Error("Could not find the current active tab.");
+        }
+
+        if (!activeTab.url || activeTab.url.startsWith('chrome://') || activeTab.url.startsWith('chrome-extension://')) {
+             throw new Error("Cannot access content of special browser pages.");
+        }
+
+        const injectionResults = await chrome.scripting.executeScript({
+            target: { tabId: activeTab.id },
+            func: () => {
+                const title = document.title;
+                const descriptionMeta = document.querySelector("meta[name='description']");
+                const description = descriptionMeta ? descriptionMeta.content : '';
+                return { title, description };
+            },
+        });
+
+        if (!injectionResults || injectionResults.length === 0) {
+            throw new Error("Script injection failed or returned no results.");
+        }
+        
+        sendResponse({ success: true, ...injectionResults[0].result });
+
+    } catch (error) {
+        logger.error('MessageHandler:handleGetPageDetailsFromDOM', 'Error injecting script or getting page details', error);
+        sendResponse({ success: false, title: '', description: '', error: error.message });
+    }
 }
 
 async function handleOpenContent(data, sender, sendResponse) {
@@ -273,32 +295,14 @@ async function handleSidebarReady(sender, sendResponse) {
 // --- Main Message Router ---
 export function handleMessage(message, sender, sendResponse) {
     let isAsync = false;
-    const noisyActions = ['get_context_for_tab', 'get_current_tab_context', 'fetch_page_metadata'];
+    const noisyActions = ['get_context_for_tab', 'get_current_tab_context', 'get_page_details_from_dom'];
     if (!noisyActions.includes(message.action)) {
         logger.log('MessageHandler', `Received action: ${message.action}`, { data: message.data, senderTab: sender.tab?.id, senderUrl: sender.url, senderId: sender.id });
     }
 
     switch (message.action) {
-        case 'fetch_page_metadata':
-            (async () => {
-                const url = message.data?.url;
-                if (!url) {
-                    sendResponse({ success: false, error: 'URL is required.' });
-                    return;
-                }
-                try {
-                    const response = await fetch(url);
-                    if (!response.ok) {
-                        throw new Error(`HTTP error! status: ${response.status}`);
-                    }
-                    const htmlText = await response.text();
-                    const metadata = parseMetadataFromHTML(htmlText);
-                    sendResponse({ success: true, ...metadata });
-                } catch (error) {
-                    logger.error('MessageHandler', `Failed to fetch metadata for ${url}`, error);
-                    sendResponse({ success: false, error: error.message });
-                }
-            })();
+        case 'get_page_details_from_dom':
+            handleGetPageDetailsFromDOM(sender, sendResponse);
             isAsync = true;
             break;
         case 'generate_custom_page':
@@ -463,7 +467,7 @@ export function handleMessage(message, sender, sendResponse) {
              importImageFromUrl(message.data?.url)
                  .then(sendResponse).catch(err => sendResponse({success: false, error: err.message}));
              isAsync = true;
-             break;
+            break;
         default:
             logger.log('MessageHandler', 'Unknown action received', message.action);
             sendResponse({success: false, error: `Unknown action: ${message.action}`})

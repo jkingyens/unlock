@@ -291,7 +291,7 @@ async function handleAddCurrentPageToDraft() {
         const tabInfo = await sendMessageToBackground({ action: 'get_current_tab_context' });
         if (!tabInfo?.success || !tabInfo.currentUrl) throw new Error("Could not get current tab info.");
         
-        const { currentUrl, title } = tabInfo;
+        const { currentUrl, title: tabTitle } = tabInfo;
         if (currentUrl.startsWith('chrome://') || currentUrl.startsWith('chrome-extension://')) {
             throw new Error("Cannot add special browser pages to a packet.");
         }
@@ -299,13 +299,13 @@ async function handleAddCurrentPageToDraft() {
             throw new Error("This page is already in the draft.");
         }
 
-        const metadataResponse = await sendMessageToBackground({ action: 'fetch_page_metadata', data: { url: currentUrl } });
+        const pageDetails = await sendMessageToBackground({ action: 'get_page_details_from_dom' });
         
         draftPacket.sourceContent.push({
             type: 'external',
             url: currentUrl,
-            title: metadataResponse?.title || title,
-            relevance: metadataResponse?.description || ''
+            title: pageDetails?.success && pageDetails.title ? pageDetails.title : tabTitle,
+            relevance: pageDetails?.success && pageDetails.description ? pageDetails.description : ''
         });
         
         renderDraftContentList();
