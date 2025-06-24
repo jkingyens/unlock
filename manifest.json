@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Unlock",
-  "version": "1.95",
+  "version": "1.97",
   "description": "Unlock your web browser",
   "action": {
     "default_popup": "popup.html",
