@@ -305,6 +305,10 @@ export function handleMessage(message, sender, sendResponse) {
             handleGetPageDetailsFromDOM(sender, sendResponse);
             isAsync = true;
             break;
+        case 'navigate_to_view':
+            // This is handled by the sidebar's listener, but we can acknowledge it here.
+            sendResponse({ success: true });
+            break;
         case 'generate_custom_page':
             processGenerateCustomPageRequest(message.data)
                 .then(sendResponse)

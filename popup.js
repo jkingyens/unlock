@@ -102,16 +102,25 @@ document.addEventListener('DOMContentLoaded', async () => {
             openSidebarBtnPopup.disabled = false;
             openSidebarBtnPopup.addEventListener('click', async () => {
                  try {
-                     logger.log('Popup', 'Open Sidebar for Settings button clicked. Sending prepare_sidebar_navigation.');
+                     // 1. Tell background to store the target view. This handles the case where the sidebar is closed.
                      await sendMessageToBackground({
                          action: 'prepare_sidebar_navigation',
-                         data: { targetView: 'settings' } 
+                         data: { targetView: 'settings' }
                      });
-                     logger.log('Popup', 'Prepare message sent. Now opening sidebar.');
+
+                     // 2. Ensure the sidebar is open.
                      await handleOpenSidebar();
+
+                     // 3. Send a direct message to navigate. This handles the case where the sidebar is already open.
+                     await sendMessageToBackground({
+                         action: 'navigate_to_view',
+                         data: { viewName: 'settings' }
+                     });
+
+                     // 4. Close the popup.
                      window.close();
                  } catch (err) {
-                      logger.error("Popup", "Failed to prepare or open sidebar for settings", err);
+                      logger.error("Popup", "Failed to open or navigate sidebar for settings", err);
                  }
             });
         } else {
