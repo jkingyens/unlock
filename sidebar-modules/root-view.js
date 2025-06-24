@@ -400,11 +400,22 @@ async function handleDeletePacketImage(imageId) {
 }
 
 
-function showLibraryActionDialog(imageId, topic) {
+async function showLibraryActionDialog(imageId, topic) {
     currentActionImageId = imageId;
     const dialog = document.getElementById('library-action-dialog');
     if (dialog) {
         dialog.querySelector('#library-action-title').textContent = topic;
+
+        // Check if cloud storage is enabled and update the export button
+        const exportBtn = dialog.querySelector('#lib-action-export-btn');
+        if (exportBtn) {
+            const cloudStorageEnabled = await storage.isCloudStorageEnabled();
+            exportBtn.disabled = !cloudStorageEnabled;
+            exportBtn.title = cloudStorageEnabled
+                ? 'Export this packet as a shareable link'
+                : 'Cloud Storage must be configured in Settings to export.';
+        }
+
         dialog.style.display = 'flex';
         setTimeout(() => dialog.classList.add('visible'), 10);
     }

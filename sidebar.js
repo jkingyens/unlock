@@ -196,6 +196,12 @@ async function handleBackgroundMessage(message) {
     const { action, data } = message;
 
     switch (action) {
+        case 'navigate_to_view':
+            if (data?.viewName) {
+                logger.log('Sidebar', `Received navigation request to view: ${data.viewName}`);
+                navigateTo(data.viewName);
+            }
+            break;
         case 'update_sidebar_context':
             await updateSidebarContext(data);
             break;
