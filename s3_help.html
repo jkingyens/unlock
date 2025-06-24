@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Cloud Storage Credentials Help</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="help_style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>Getting S3-Compatible Cloud Storage Credentials</h1>
+        <p>Unlock requires S3-compatible cloud storage to save generated packet content, like summaries and quizzes. This allows your packets to be self-contained and shareable. Unlock supports AWS S3, DigitalOcean Spaces, and Google Cloud Storage.</p>
+
+        <h2>General Steps:</h2>
+        <ol>
+            <li><strong>Choose a Provider:</strong> Decide which provider you want to use.</li>
+            <li><strong>Create a Bucket/Space:</strong>
+                <ul>
+                    <li>In your provider's console, create a new **Bucket** (AWS/Google) or **Space** (DigitalOcean).</li>
+                    <li>Choose a globally unique name (e.g., `unlock-data-yourname`).</li>
+                    <li>Select a **Region** (e.g., `us-east-1`, `nyc3`). Remember this name.</li>
+                    <li>**Crucially, disable "Block all public access"** (for AWS/Google) or ensure files can be made public. Unlock needs this permission to create shareable links for your generated content.</li>
+                </ul>
+            </li>
+            <li><strong>Generate Access Keys:</strong>
+                <ul>
+                    <li>Find the section for managing access keys. For S3 compatibility, these are often called **HMAC keys** in Google Cloud.</li>
+                    <li>Generate a new set of keys. This will give you an **Access Key ID** and a **Secret Access Key**.</li>
+                    <li>Copy both keys immediately and store them securely, as the secret key is often shown only once.</li>
+                </ul>
+            </li>
+            <li><strong>Enter Credentials in Unlock:</strong>
+                <ul>
+                    <li>Go to the Unlock sidebar Settings.</li>
+                    <li>Add or edit a Storage Configuration.</li>
+                    <li>Enter the **Access Key ID**, **Secret AccessKey**, **Bucket/Space Name**, and **Region**.</li>
+                </ul>
+            </li>
+        </ol>
+        <hr>
+        <h2>Provider-Specific Notes</h2>
+
+        <h3>AWS S3</h3>
+        <ul>
+            <li>Go to the <a href="https://aws.amazon.com/s3/" target="_blank" rel="noopener noreferrer">AWS S3 Console</a>.</li>
+            <li>Create your bucket and uncheck "Block all public access" under the bucket's permissions.</li>
+            <li>Generate keys in the **IAM** (Identity and Access Management) service. Create a new user with programmatic access and attach the `AmazonS3FullAccess` policy, or a more restrictive custom policy that allows `s3:GetObject`, `s3:PutObject`, `s3:DeleteObject`, and `s3:ListBucket` for your specific bucket.</li>
+        </ul>
+
+        <h3>DigitalOcean Spaces</h3>
+        <ul>
+            <li>Go to the <a href="https://cloud.digitalocean.com/spaces" target="_blank" rel="noopener noreferrer">Spaces</a> section in your DigitalOcean account.</li>
+            <li>Create a Space. File listing should be public if you intend to share widely, but files themselves are private by default.</li>
+            <li>Generate keys under the **API** section in your account, under "Spaces access keys".</li>
+            <li>The region will be like `nyc3`, `sfo3`, etc.</li>
+        </ul>
+
+        <h3>Google Cloud Storage</h3>
+        <ul>
+            <li>Go to the <a href="https://console.cloud.google.com/storage" target="_blank" rel="noopener noreferrer">Cloud Storage</a> section in your Google Cloud project.</li>
+            <li>Create a bucket. During creation, under "Choose how to control access to objects", select **"Fine-grained"**.</li>
+            <li>After creation, go to the bucket's "Settings" tab, then the "Interoperability" sub-tab.</li>
+            <li>Under "Access keys for service accounts", create a key for a user or service account. This will generate your S3-compatible **HMAC keys** (Access Key and Secret).</li>
+             <li>The region for Google Cloud Storage is typically `auto` or a specific location like `US-EAST1`. For global access, you can often use `global`.</li>
+        </ul>
+
+        <p class="note">
+            <strong>Note:</strong> Cloud provider interfaces change. Always consult the official documentation for your chosen provider for the most up-to-date instructions.
+        </p>
+
+    </div>
+</body>
+</html>
