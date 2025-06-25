@@ -91,7 +91,8 @@ const CONFIG = {
     // --- END REVISION ---
     themePreference: 'auto',
     confettiEnabled: true,
-    tabGroupsEnabled: true
+    tabGroupsEnabled: true,
+    visitThresholdSeconds: 5
   },
   INDEXED_DB: {
     NAME: 'UnlockDB', VERSION: 1, STORE_GENERATED_CONTENT: 'generatedContent'

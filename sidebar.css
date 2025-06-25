@@ -529,3 +529,19 @@ body.dark-mode #detail-cards-container .card.active.visited { border-color: var(
         transform: translateX(300%);
     }
 }
+
+#settings-view .setting-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+#settings-view .setting-row > label {
+  margin-bottom: 0; /* Override default margin for labels inside this container */
+}
+
+/* Specifically target the number input for dwell time */
+#settings-view #visit-threshold-seconds {
+  width: 75px; /* Give it a smaller, fixed width */
+  flex-shrink: 0; /* Prevent it from shrinking if the label text is long */
+}

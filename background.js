@@ -21,7 +21,7 @@ import {
 } from './utils.js';
 import * as msgHandler from './background-modules/message-handlers.js';
 import * as ruleManager from './background-modules/rule-manager.js';
-import { onCommitted, onHistoryStateUpdated, checkAndPromptForCompletion } from './background-modules/navigation-handler.js';
+import { onCommitted, onHistoryStateUpdated, checkAndPromptForCompletion, clearPendingVisitTimer } from './background-modules/navigation-handler.js';
 import * as tabGroupHandler from './background-modules/tab-group-handler.js';
 import * as sidebarHandler from './background-modules/sidebar-handler.js';
 import cloudStorage from './cloud-storage.js';
@@ -513,6 +513,10 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
 chrome.tabs.onRemoved.addListener(async (tabId, removeInfo) => {
     const logPrefix = `[Unpack Background:onRemoved Tab ${tabId}]`;
     logger.log(logPrefix, 'Tab removed');
+    
+    // Clear any pending visit timers for the closed tab
+    clearPendingVisitTimer(tabId);
+
     if (interimContextMap.has(tabId)) {
         interimContextMap.delete(tabId);
         logger.log(logPrefix, `Removed interim context from MAP for closed tab ${tabId}.`);

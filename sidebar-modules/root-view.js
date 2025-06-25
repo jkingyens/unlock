@@ -266,17 +266,36 @@ export function updateInstanceRowUI(instance) {
     if (!targetList) return;
 
     const existingRow = sourceList?.querySelector(`tr[data-instance-id="${instance.instanceId}"]`);
+
+    // If the row exists and isn't moving to a different list, update it non-destructively.
+    if (existingRow && sourceList === targetList) {
+        const progressData = calculateInstanceProgress(instance);
+        const progressBar = existingRow.querySelector('.progress-bar');
+        const progressBarContainer = existingRow.querySelector('.progress-bar-container');
+        
+        if (progressBar) {
+            progressBar.style.width = `${progressData.progressPercentage}%`;
+        }
+        if (progressBarContainer) {
+            progressBarContainer.title = `${progressData.progressPercentage}% Complete`;
+        }
+        
+        if (isCompleted) {
+            existingRow.style.opacity = '0.8';
+            existingRow.title = "Packet completed!";
+        }
+        return; // Done with the non-destructive update.
+    }
+
+    // --- Fallback to destructive update if the row is new or moving lists ---
     const newRow = createInstanceRow(instance);
     newRow.dataset.created = instance.created || instance.instantiated || new Date(0).toISOString();
 
     if (existingRow) {
-        if (sourceList !== targetList) {
-            existingRow.remove();
-            insertRowSorted(newRow, targetList);
-            checkAndRenderEmptyState(sourceList, sourceList === domRefs.inProgressList ? "No packets Started." : "No completed packets yet.");
-        } else {
-            targetList.replaceChild(newRow, existingRow);
-        }
+        // This path is now only for moving between lists (e.g., In Progress -> Completed)
+        existingRow.remove();
+        insertRowSorted(newRow, targetList);
+        checkAndRenderEmptyState(sourceList, sourceList === domRefs.inProgressList ? "No packets Started." : "No completed packets yet.");
     } else {
         insertRowSorted(newRow, targetList);
     }

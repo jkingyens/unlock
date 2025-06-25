@@ -85,6 +85,12 @@ export async function navigateTo(viewName, instanceId = null, data = null) {
         nextNavigationRequest = { viewName, instanceId, data };
         return;
     }
+
+    // Before leaving the settings view, trigger an immediate save of any pending changes.
+    if (currentView === 'settings' && viewName !== 'settings') {
+        settingsView.triggerPendingSave();
+    }
+
     isNavigating = true;
 
     [domRefs.rootView, domRefs.createView, domRefs.packetDetailView, domRefs.settingsView].forEach(v => v?.classList.add('hidden'));
@@ -141,7 +147,6 @@ export async function navigateTo(viewName, instanceId = null, data = null) {
         }
     }
 }
-
 
 // --- State & Context Updates ---
 

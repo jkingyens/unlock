@@ -95,6 +95,7 @@ export function cacheDomReferences() {
         // Other Settings Refs
         tabGroupsEnabledCheckbox: document.getElementById('tab-groups-enabled'),
         confettiEnabledCheckbox: document.getElementById('confetti-enabled'),
+        visitThresholdSecondsInput: document.getElementById('visit-threshold-seconds'),
         themeAutoRadio: document.getElementById('theme-auto'),
         themeLightRadio: document.getElementById('theme-light'),
         themeDarkRadio: document.getElementById('theme-dark'),
