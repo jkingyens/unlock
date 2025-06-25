@@ -3,7 +3,7 @@
 // by adding the current page or generating new pages from prompts.
 
 import { domRefs } from './dom-references.js';
-import { logger, storage, base64Decode } from '../utils.js';
+import { logger, storage, base64Decode, shouldUseTabGroups } from '../utils.js';
 import { showConfirmDialog, showTitlePromptDialog } from './dialog-handler.js';
 
 // --- Module-specific State & Dependencies ---
@@ -11,6 +11,8 @@ let draftPacket = null;
 let isEditing = false; // Flag to know if we are in edit mode
 let draggedItemIndex = null; // To track the item being dragged
 let initialDraftState = null; // To track if changes have been made
+let draftTabGroupId = null; // To hold the ID of the builder's tab group
+let isTabGroupSyncing = false; // To prevent concurrent sync operations
 
 // Functions to be imported from the new, lean sidebar.js
 let navigateTo;
@@ -47,7 +49,6 @@ export function setupCreateViewListeners() {
         }
     });
 
-    // Add drag-and-drop listeners to the list container
     const listEl = domRefs.createViewContentList;
     if (listEl) {
         listEl.addEventListener('dragstart', handleDragStart);
@@ -56,6 +57,26 @@ export function setupCreateViewListeners() {
         listEl.addEventListener('drop', handleDrop);
         listEl.addEventListener('dragend', handleDragEnd);
     }
+    
+    // Add a listener to serve content to the preview page
+    chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+        if (message.action === 'get_draft_item_for_preview' && sender.tab) {
+            const pageId = message.data.pageId;
+            const item = draftPacket?.sourceContent?.find(i => i.pageId === pageId);
+            if (item?.type === 'generated' && item.contentB64) {
+                const htmlContent = base64Decode(item.contentB64);
+                // Send the HTML content and title back to the specific preview tab
+                chrome.tabs.sendMessage(sender.tab.id, {
+                    action: 'draft_item_content_response',
+                    data: { 
+                        pageId: pageId, 
+                        htmlContent,
+                        title: item.title || 'Preview'
+                    }
+                });
+            }
+        }
+    });
 }
 
 /**
@@ -65,35 +86,75 @@ export function setupCreateViewListeners() {
 export async function prepareCreateView(imageToEdit = null) {
     if (imageToEdit) {
         isEditing = true;
-        draftPacket = JSON.parse(JSON.stringify(imageToEdit)); // Deep copy to avoid modifying the original
+        draftPacket = JSON.parse(JSON.stringify(imageToEdit));
         domRefs.createViewSaveBtn.textContent = 'Save Changes';
     } else {
         isEditing = false;
         draftPacket = { topic: '', sourceContent: [] };
         domRefs.createViewSaveBtn.textContent = 'Save';
     }
-    // Store the initial state as a string for easy comparison
     initialDraftState = JSON.stringify(draftPacket.sourceContent);
     renderDraftContentList();
+    syncDraftGroup();
 }
 
 
+// --- Helper for URL generation ---
+function getUrlForItem(item, index) {
+    if (item.type === 'external') {
+        return item.url;
+    }
+    if (item.type === 'generated' && item.pageId) {
+        return chrome.runtime.getURL(`preview.html?pageId=${item.pageId}`);
+    }
+    return null;
+}
+
+// --- Tab Group Management for Drafts ---
+
+async function syncDraftGroup() {
+    if (!(await shouldUseTabGroups()) || isTabGroupSyncing) {
+        return;
+    }
+    isTabGroupSyncing = true;
+    try {
+        const desiredUrls = draftPacket.sourceContent
+            .map((item, index) => getUrlForItem(item, index))
+            .filter(Boolean);
+
+        const response = await sendMessageToBackground({
+            action: 'sync_draft_group',
+            data: { desiredUrls }
+        });
+        if (response.success) {
+            draftTabGroupId = response.groupId;
+        }
+    } catch (error) {
+        logger.error('CreateView', 'Error syncing draft group', error);
+    } finally {
+        isTabGroupSyncing = false;
+    }
+}
+
+async function cleanupDraftGroup() {
+    if (draftTabGroupId !== null && (await shouldUseTabGroups())) {
+        await sendMessageToBackground({ action: 'cleanup_draft_group' });
+        draftTabGroupId = null;
+    }
+}
+
 // --- UI Rendering ---
 
-/**
- * Renders the list of content items currently in the draft packet.
- */
 function renderDraftContentList() {
     const listEl = domRefs.createViewContentList;
     if (!listEl) return;
-    listEl.innerHTML = ''; // Clear previous content
+    listEl.innerHTML = '';
 
     const listFragment = document.createDocumentFragment();
 
-    // 1. Render all the existing content cards in the draft
-    if (draftPacket && draftPacket.sourceContent && draftPacket.sourceContent.length > 0) {
+    if (draftPacket?.sourceContent?.length > 0) {
         draftPacket.sourceContent.forEach((item, index) => {
-            const card = createDraftContentCard(item, index); // Pass index to card creator
+            const card = createDraftContentCard(item, index);
             if (card) {
                 const removeBtn = document.createElement('button');
                 removeBtn.className = 'delete-draft-item-btn';
@@ -102,7 +163,8 @@ function renderDraftContentList() {
                 removeBtn.addEventListener('click', (e) => {
                     e.stopPropagation();
                     draftPacket.sourceContent.splice(index, 1);
-                    renderDraftContentList(); // Re-render the entire list
+                    renderDraftContentList();
+                    syncDraftGroup();
                 });
                 card.appendChild(removeBtn);
                 listFragment.appendChild(card);
@@ -110,101 +172,71 @@ function renderDraftContentList() {
         });
     }
 
-    // 2. Always append the new placeholder card at the end
     const placeholder = document.createElement('div');
     placeholder.className = 'placeholder-card';
-
     const addPageBtn = document.createElement('button');
-    addPageBtn.id = 'create-view-add-page-btn'; // Keep ID for potential future use
     addPageBtn.className = 'sidebar-action-button';
     addPageBtn.textContent = 'Add Current Tab';
     addPageBtn.addEventListener('click', handleAddCurrentPageToDraft);
-
     const makePageBtn = document.createElement('button');
-    makePageBtn.id = 'create-view-make-page-btn'; // Keep ID
     makePageBtn.className = 'sidebar-action-button';
     makePageBtn.textContent = 'Create New Page';
     makePageBtn.addEventListener('click', showMakePageDialog);
-    
-    // Logic to disable 'Generate New Page' if LLM isn't configured (moved from prepareCreateView)
     storage.getActiveModelConfig().then(activeModelConfig => {
         const llmReady = activeModelConfig && (activeModelConfig.providerType === 'chrome-ai-gemini-nano' || activeModelConfig.apiKey);
         makePageBtn.disabled = !llmReady;
-        makePageBtn.title = llmReady
-            ? "Generate a new page from a prompt"
-            : "An active LLM must be configured in Settings to use this feature.";
+        makePageBtn.title = llmReady ? "Generate a new page from a prompt" : "An active LLM must be configured in Settings.";
     });
-
     placeholder.innerHTML = `<p>Add a new page to your packet:</p>`;
     const placeholderActions = document.createElement('div');
     placeholderActions.className = 'placeholder-card-actions';
     placeholderActions.append(addPageBtn, makePageBtn);
     placeholder.appendChild(placeholderActions);
-
     listFragment.appendChild(placeholder);
-
-    // 3. Append the complete fragment to the DOM
     listEl.appendChild(listFragment);
 }
 
-/**
- * Creates a card element for a content item in the draft list.
- * @param {object} contentItem - The content item to render.
- * @param {number} index - The index of the item in the draft array.
- * @returns {HTMLElement}
- */
 function createDraftContentCard(contentItem, index) {
     const card = document.createElement('div');
-    card.className = 'card';
+    card.className = 'card clickable';
     card.setAttribute('draggable', 'true');
     card.dataset.index = index;
 
-    const { title = 'Untitled', url, type, relevance = '' } = contentItem;
+    const { title = 'Untitled', type } = contentItem;
     let iconHTML = '?';
-    let displayUrl;
+    let displayUrl = '';
+    const itemUrl = getUrlForItem(contentItem, index);
 
     if (type === 'external') {
         iconHTML = '🔗';
         try {
-            const parsedUrl = new URL(url);
-            displayUrl = parsedUrl.hostname.replace(/^www\./, '');
+            displayUrl = new URL(itemUrl).hostname.replace(/^www\./, '');
         } catch (e) {
-            displayUrl = url ? url.substring(0, 40) + '...' : 'Invalid URL';
+            displayUrl = itemUrl ? itemUrl.substring(0, 40) + '...' : 'Invalid URL';
         }
-        // Make the card clickable to open the external URL
-        card.classList.add('clickable');
-        card.title = `Click to open ${url} in a new tab`;
-        card.addEventListener('click', (e) => {
-            // Prevent action if clicking on the delete or drag handle buttons
-            if (e.target.classList.contains('delete-draft-item-btn') || e.target.classList.contains('drag-handle')) return;
-            if (url) {
-                chrome.tabs.create({ url: url });
-            }
-        });
     } else if (type === 'generated') {
         iconHTML = '📄';
-        displayUrl = title;
-        if (contentItem.contentB64) {
-            card.classList.add('clickable');
-            card.title = "Click to preview this generated page";
-            card.addEventListener('click', (e) => {
-                if (e.target.classList.contains('delete-draft-item-btn') || e.target.classList.contains('drag-handle')) return;
-                const decodedHtml = base64Decode(contentItem.contentB64);
-                if (decodedHtml) {
-                    const dataUrl = 'data:text/html;charset=utf-8,' + encodeURIComponent(decodedHtml);
-                    chrome.tabs.create({ url: dataUrl });
-                }
-            });
-        }
+        displayUrl = "Preview (Generated)";
     }
+
+    card.title = `Click to open or focus tab: ${title}`;
+    card.addEventListener('click', async (e) => {
+        if (e.target.classList.contains('delete-draft-item-btn') || e.target.classList.contains('drag-handle')) return;
+        if (itemUrl) {
+            if (await shouldUseTabGroups()) {
+                sendMessageToBackground({ action: 'focus_or_create_draft_tab', data: { url: itemUrl } });
+            } else {
+                chrome.tabs.create({ url: itemUrl });
+            }
+        }
+    });
 
     card.innerHTML = `
         <div class="drag-handle" title="Drag to reorder">⠿</div>
         <div class="card-icon">${iconHTML}</div>
         <div class="card-text">
             <div class="card-title">${title}</div>
-            <div class="card-url">${displayUrl || ''}</div>
-            ${relevance ? `<div class="card-relevance">${relevance}</div>` : ''}
+            <div class="card-url">${displayUrl}</div>
         </div>`;
     return card;
 }
@@ -222,56 +254,50 @@ function isDraftDirty() {
 // --- Action Handlers ---
 
 export async function handleDiscardDraftPacket() {
-    // Check if the draft is dirty before discarding
     if (isDraftDirty()) {
         const confirmed = await showConfirmDialog(
             'You have unsaved changes. Are you sure you want to discard them?',
             'Discard Changes',
             'Cancel',
-            true // isDangerAction = true
+            true
         );
-        if (!confirmed) {
-            return; // User clicked "Cancel", so we stop here.
-        }
+        if (!confirmed) return;
     }
-
-    // If we reach here, either the draft wasn't dirty or the user confirmed.
+    await cleanupDraftGroup();
     draftPacket = null;
     isEditing = false;
-    initialDraftState = null; // Clear the tracked state
+    initialDraftState = null;
     navigateTo('root');
 }
 
 async function handleSaveDraftPacket() {
-    if (!draftPacket || !draftPacket.sourceContent || draftPacket.sourceContent.length === 0) {
+    if (!draftPacket || !draftPacket.sourceContent || !draftPacket.sourceContent.length === 0) {
         showRootViewStatus("Please add at least one page to the packet.", "error");
         return;
     }
+    
+    await cleanupDraftGroup();
 
     let packetToSave = { ...draftPacket };
 
     if (!isEditing) {
-        // For new packets, prompt for a title and create a new ID
         const topic = await showTitlePromptDialog();
-        if (!topic) return; // User cancelled
-        
+        if (!topic) return;
         packetToSave.topic = topic;
         packetToSave.id = `img_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
         packetToSave.created = new Date().toISOString();
     }
-    // For existing packets, we just use the existing topic and ID
 
     try {
         const response = await sendMessageToBackground({
             action: 'save_packet_image',
             data: { image: packetToSave }
         });
-
         if (response && response.success) {
             showRootViewStatus(`Packet "${packetToSave.topic}" saved.`, 'success');
             draftPacket = null;
             isEditing = false;
-            initialDraftState = null; // Also clear state on successful save
+            initialDraftState = null;
             navigateTo('root');
         } else {
             throw new Error(response?.error || "Failed to save the packet.");
@@ -298,6 +324,9 @@ async function handleAddCurrentPageToDraft() {
             throw new Error("Cannot add special browser pages to a packet.");
         }
         if (draftPacket.sourceContent.some(item => item.url === currentUrl)) {
+            if (await shouldUseTabGroups()) {
+                sendMessageToBackground({ action: 'focus_or_create_draft_tab', data: { url: currentUrl } });
+            }
             throw new Error("This page is already in the draft.");
         }
         
@@ -305,10 +334,11 @@ async function handleAddCurrentPageToDraft() {
             type: 'external',
             url: currentUrl,
             title: title,
-            relevance: '' // No description is available with this method
+            relevance: ''
         });
         
         renderDraftContentList();
+        await syncDraftGroup();
         showRootViewStatus('Page added to draft.', 'success');
 
     } catch (error) {
@@ -343,10 +373,9 @@ async function handleConfirmMakePage() {
     if (!prompt) return;
 
     const btn = domRefs.confirmMakePageBtn;
-    const progressContainer = domRefs.makePageProgressContainer; // Get ref
+    const progressContainer = domRefs.makePageProgressContainer;
     const originalText = btn.textContent;
 
-    // Disable button and show progress bar
     btn.disabled = true;
     btn.textContent = 'Creating...';
     progressContainer.classList.remove('hidden');
@@ -366,16 +395,11 @@ async function handleConfirmMakePage() {
             draftPacket.sourceContent.push(newContentItem);
             renderDraftContentList();
             hideMakePageDialog();
-
-            // Open the new page in a tab immediately
-            if (newContentItem.contentB64) {
-                const decodedHtml = base64Decode(newContentItem.contentB64);
-                if (decodedHtml) {
-                    const dataUrl = 'data:text/html;charset=utf-8,' + encodeURIComponent(decodedHtml);
-                    chrome.tabs.create({ url: dataUrl });
-                } else {
-                    logger.warn("CreateView", "Could not decode Base64 content for new page preview.");
-                }
+            
+            await syncDraftGroup();
+            const previewUrl = getUrlForItem(newContentItem, draftPacket.sourceContent.length - 1);
+            if (previewUrl && (await shouldUseTabGroups())) {
+                await sendMessageToBackground({ action: 'focus_or_create_draft_tab', data: { url: previewUrl } });
             }
         } else {
             throw new Error(response.error || 'Failed to generate page.');
@@ -384,7 +408,6 @@ async function handleConfirmMakePage() {
         logger.error("CreateView", "handleConfirmMakePage failed", error);
         showRootViewStatus(error.message, "error");
     } finally {
-        // Always re-enable button and hide progress bar
         btn.disabled = false;
         btn.textContent = originalText;
         progressContainer.classList.add('hidden');
@@ -420,7 +443,7 @@ function handleDragLeave(e) {
     }
 }
 
-function handleDrop(e) {
+async function handleDrop(e) {
     e.preventDefault();
     const dropTargetCard = e.target.closest('.card[draggable="true"]');
     
@@ -431,6 +454,7 @@ function handleDrop(e) {
             const [draggedItem] = draftPacket.sourceContent.splice(draggedItemIndex, 1);
             draftPacket.sourceContent.splice(droppedOnIndex, 0, draggedItem);
             renderDraftContentList();
+            await syncDraftGroup();
         }
     }
     dropTargetCard?.classList.remove('drag-over-indicator');

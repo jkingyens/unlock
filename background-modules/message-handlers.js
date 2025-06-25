@@ -10,7 +10,7 @@ import {
     clearPacketContext,
     MPI_PARAMS,
     CONFIG,
-    base64Encode // This is the fix
+    base64Encode
 } from '../utils.js';
 import * as tabGroupHandler from './tab-group-handler.js';
 import * as sidebarHandler from './sidebar-handler.js';
@@ -21,7 +21,7 @@ import llmService from '../llm_service.js';
 import {
     processCreatePacketRequest,
     processCreatePacketRequestFromTab,
-    processGenerateCustomPageRequest, // New Import
+    processGenerateCustomPageRequest,
     processRepublishRequest,
     processDeletePacketsRequest,
     publishImageForSharing,
@@ -35,7 +35,6 @@ import { interimContextMap } from '../background.js';
 import { checkAndPromptForCompletion } from './navigation-handler.js';
 
 const PENDING_VIEW_KEY = 'pendingSidebarView';
-
 
 // --- Context Request Handlers ---
 async function handleGetContextForTab(data, sender, sendResponse) {
@@ -305,6 +304,20 @@ export function handleMessage(message, sender, sendResponse) {
             handleGetPageDetailsFromDOM(sender, sendResponse);
             isAsync = true;
             break;
+        case 'sync_draft_group':
+            tabGroupHandler.syncDraftGroup(message.data.desiredUrls)
+                .then(sendResponse)
+                .catch(err => sendResponse({ success: false, error: err.message }));
+            isAsync = true;
+            break;
+        case 'focus_or_create_draft_tab':
+            tabGroupHandler.focusOrCreateDraftTab(message.data.url).then(sendResponse);
+            isAsync = true;
+            break;
+        case 'cleanup_draft_group':
+            tabGroupHandler.cleanupDraftGroup().then(sendResponse);
+            isAsync = true;
+            break;
         case 'navigate_to_view':
             // This is handled by the sidebar's listener, but we can acknowledge it here.
             sendResponse({ success: true });
@@ -470,7 +483,7 @@ export function handleMessage(message, sender, sendResponse) {
         case 'import_image_from_url':
              importImageFromUrl(message.data?.url)
                  .then(sendResponse).catch(err => sendResponse({success: false, error: err.message}));
-             isAsync = true;
+            isAsync = true;
             break;
         default:
             logger.log('MessageHandler', 'Unknown action received', message.action);

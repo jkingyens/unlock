@@ -17,6 +17,7 @@ import {
 
 const TAB_REORDER_INTERVAL = 5 * 60 * 1000; // 5 minutes
 let tabReorderIntervalId = null;
+const DRAFT_GROUP_TITLE = "Packet Builder";
 
 // --- Helper Functions (Internal - create/update/get group) ---
 function createTabGroupHelper(tabId) {
@@ -37,8 +38,6 @@ export async function ungroupTabIfUrlExternalToPacket(tabId, groupId, targetUrl,
         return;
     }
 
-    // packetUtils.isUrlInPacket (from utils.js) should now correctly handle
-    // targetUrl being a pre-signed URL and packetInstance.contents[n].url being an S3 key.
     if (!packetUtils.isUrlInPacket(targetUrl, packetInstance)) {
         logger.log('TabGroupHandler:ungroupTabIfUrlExternalToPacket', `URL ${targetUrl} is outside packet ${packetInstance.instanceId}. Ungrouping tab ${tabId} from group ${groupId}.`);
         try {
@@ -69,31 +68,28 @@ export async function deduplicateUrlInGroup(groupId, instanceId, activeTabId) {
     logger.log('TabGroupHandler:deduplicateUrlInGroup', `Checking for duplicate canonical URLs in group ${groupId} for instance ${instanceId}. Active tab hint: ${activeTabId}`);
 
     const tabsInGroup = await getTabsInGroupHelper(groupId);
-    if (tabsInGroup.length < 2) return; // No duplicates possible if fewer than 2 tabs
+    if (tabsInGroup.length < 2) return; 
 
     const activeTabPacketContext = await getPacketContext(activeTabId);
     if (!activeTabPacketContext || activeTabPacketContext.instanceId !== instanceId || !activeTabPacketContext.packetUrl) {
         logger.warn('TabGroupHandler:deduplicateUrlInGroup', 'Active tab context is invalid or does not match instance, or missing canonical packetUrl.', { activeTabId, instanceId, activeTabPacketContext });
         return;
     }
-    const activeTabCanonicalUrl = activeTabPacketContext.packetUrl; // This is the S3 key or canonical external URL
+    const activeTabCanonicalUrl = activeTabPacketContext.packetUrl; 
 
     for (const otherTab of tabsInGroup) {
-        if (otherTab.id === activeTabId) { // Skip the active tab itself
+        if (otherTab.id === activeTabId) { 
             continue;
         }
 
         const otherTabPacketContext = await getPacketContext(otherTab.id);
-        // Ensure the other tab also belongs to the same instance and has a canonical packetUrl
         if (otherTabPacketContext && otherTabPacketContext.instanceId === instanceId && otherTabPacketContext.packetUrl) {
             const otherTabCanonicalUrl = otherTabPacketContext.packetUrl;
 
             if (otherTabCanonicalUrl === activeTabCanonicalUrl) {
-                // Found a duplicate canonical URL (S3 key or external URL) in the same group and instance context
-                logger.log('TabGroupHandler:deduplicateUrlInGroup', `Duplicate canonical URL ${activeTabCanonicalUrl} found. Closing tab ${otherTab.id} (current URL: ${otherTab.url}). Active tab: ${activeTabId}.`);
+                logger.log('TabGroupHandler:deduplicateUrlInGroup', `Duplicate canonical URL ${activeTabCanonicalUrl} found. Closing tab ${otherTab.id}.`);
                 await chrome.tabs.remove(otherTab.id).catch(e => logger.error('TabGroupHandler:deduplicateUrlInGroup', `Error closing duplicate tab ${otherTab.id}`, e));
 
-                // Update PacketBrowserState by removing the closed tab's ID
                 try {
                     const browserState = await storage.getPacketBrowserState(instanceId);
                     if (browserState && browserState.activeTabIds && browserState.activeTabIds.includes(otherTab.id)) {
@@ -106,13 +102,12 @@ export async function deduplicateUrlInGroup(groupId, instanceId, activeTabId) {
                 }
             }
         } else {
-            // *** This is the corrected line ***
             logger.log('TabGroupHandler:deduplicateUrlInGroup', `Skipping tab ${otherTab.id} for deduplication check: context missing, mismatched instance, or no packetUrl.`, { otherTabPacketContext });
         }
     }
 }
 
-async function updateTabGroupAppearanceHelper(groupId, instanceId, instanceTopic /* for color */) {
+async function updateTabGroupAppearanceHelper(groupId, instanceId, instanceTopic) {
     return new Promise(async (resolve) => { 
         const identifier = getIdentifierForGroupTitle(instanceId); 
 
@@ -241,12 +236,11 @@ export async function ensureTabInGroup(tabId, instanceId) {
                 logger.log('TabGroupHandler:ensureTabInGroup', `Found existing group by title query: ID ${targetGroupId}`);
             } else if (matchingGroups.length > 1) {
                 logger.warn('TabGroupHandler:ensureTabInGroup', `Found ${matchingGroups.length} groups with title "${expectedGroupTitle}". Choosing the first group (ID: ${matchingGroups[0].id}) as canonical and will attempt to merge later if necessary.`);
-                targetGroupId = matchingGroups[0].id; // *** FIX: Just pick the first one ***
+                targetGroupId = matchingGroups[0].id;
             } else {
                 logger.log('TabGroupHandler:ensureTabInGroup', `No group found with title "${expectedGroupTitle}". Will create new.`);
             }
             
-            // If we found a group by querying, update the state to match.
             if (targetGroupId && currentBrowserState.tabGroupId !== targetGroupId) {
                 currentBrowserState.tabGroupId = targetGroupId;
                 stateNeedsSaving = true;
@@ -273,8 +267,6 @@ export async function ensureTabInGroup(tabId, instanceId) {
 
     try {
         logger.log('TabGroupHandler:ensureTabInGroup', `Adding tab ${tabId} to group ${targetGroupId}.`);
-        // --- Start of FIX ---
-        // Use a promise wrapper with a callback to safely handle the API call
         await new Promise((resolve, reject) => {
             chrome.tabs.group({ tabIds: [tabId], groupId: targetGroupId }, () => {
                 if (chrome.runtime.lastError) {
@@ -283,14 +275,12 @@ export async function ensureTabInGroup(tabId, instanceId) {
                 resolve();
             });
         });
-        // --- End of FIX ---
 
         if (!currentBrowserState.activeTabIds.includes(tabId)) {
             currentBrowserState.activeTabIds.push(tabId);
             stateNeedsSaving = true;
         }
     } catch (groupingError) {
-        // The error object will now have a useful .message property
         logger.error('TabGroupHandler:ensureTabInGroup', `Failed to add tab ${tabId} to group ${targetGroupId}: ${groupingError.message}`, { groupingError });
         return null;
     }
@@ -316,7 +306,7 @@ export async function orderTabsInGroup(groupId, instance) {
 
     try {
         let initialTabsInGroup = await getTabsInGroupHelper(groupId);
-        if (initialTabsInGroup.length <= 1) { logger.log('TabGroupHandler:orderTabsInGroup', `Ordering skipped: <= 1 tab in group.`); return true; }
+        if (initialTabsInGroup.length <= 1) { return true; }
 
         const contextChecks = await Promise.allSettled( initialTabsInGroup.map(tab => getPacketContext(tab.id)) );
         const tabsToMoveOutOfGroup = [];
@@ -325,46 +315,40 @@ export async function orderTabsInGroup(groupId, instance) {
         initialTabsInGroup.forEach((tab, index) => {
             const contextResult = contextChecks[index];
             let belongsToInstance = false;
-            let packetUrl = null; // This will be the S3 key from context
+            let packetUrl = null;
             if (contextResult.status === 'fulfilled' && contextResult.value?.instanceId === instanceId) {
                  belongsToInstance = true;
-                 packetUrl = contextResult.value?.packetUrl; // This is the S3 key
+                 packetUrl = contextResult.value?.packetUrl;
             } else if (contextResult.status === 'rejected') { logger.error('TabGroupHandler:orderTabsInGroup', `Failed to get context for tab ${tab.id} during check`, contextResult.reason); }
 
             if (!belongsToInstance) {
-                logger.log('TabGroupHandler:orderTabsInGroup', `Marking tab ${tab.id} (${tab.url}) for ejection (context mismatch/missing).`);
                 tabsToMoveOutOfGroup.push({ id: tab.id, windowId: tab.windowId });
                 updateBrowserStateActiveTabs(instanceId, tab.id, 'remove').catch(e => logger.error('TabGroupHandler:orderTabsInGroup', 'Failed background update of activeTabIds on ejection', e));
-            } else if (packetUrl) { // Ensure packetUrl (S3 key) exists for ordering
-                validTabsForOrdering.push({ ...tab, packetUrl: packetUrl }); // Store S3 key as packetUrl
+            } else if (packetUrl) {
+                validTabsForOrdering.push({ ...tab, packetUrl: packetUrl });
             } else {
-                 logger.warn('TabGroupHandler:orderTabsInGroup', `Tab ${tab.id} belongs to instance ${instanceId} but context lacks packetUrl (S3 key). Cannot order this tab.`);
+                 logger.warn('TabGroupHandler:orderTabsInGroup', `Tab ${tab.id} belongs to instance ${instanceId} but context lacks packetUrl. Cannot order this tab.`);
             }
         });
 
        if (tabsToMoveOutOfGroup.length > 0) {
-            logger.log('TabGroupHandler:orderTabsInGroup', `Processing ${tabsToMoveOutOfGroup.length} unrelated tabs for ejection.`);
             let windowTabs = []; let isGroupRightmost = false;
             try { if (tabsToMoveOutOfGroup[0]?.windowId) { const winInfo = await chrome.windows.get(tabsToMoveOutOfGroup[0].windowId, { populate: true }); windowTabs = winInfo?.tabs || []; } } catch (winError) { logger.error('TabGroupHandler:orderTabsInGroup', 'Failed get window info for ejection', winError); }
             if (windowTabs.length > 0) { const groupIndices = windowTabs.filter(t => t.groupId === groupId).map(t => t.index); if (groupIndices.length > 0) { isGroupRightmost = (Math.max(...groupIndices) === windowTabs.length - 1); } }
             for (const tabInfo of tabsToMoveOutOfGroup) { let moveIndex = isGroupRightmost ? 0 : -1; try { await chrome.tabs.move(tabInfo.id, { index: moveIndex, windowId: tabInfo.windowId }); } catch (ejectError) { logger.error('TabGroupHandler:orderTabsInGroup', `Error moving unrelated tab ${tabInfo.id}`, { error: ejectError }); } }
-            logger.log('TabGroupHandler:orderTabsInGroup', `Finished ejection attempts.`);
        }
 
         const tabPositions = [];
         validTabsForOrdering.forEach(tab => {
-             // tab.packetUrl is the S3 key from context. instance.contents[n].url is also S3 key.
              const contentIndex = instance.contents.findIndex(c => c.url === tab.packetUrl);
              if (contentIndex !== -1) {
                   tabPositions.push({ tabId: tab.id, currentIndex: tab.index, contentIndex: contentIndex });
              } else {
-                  logger.warn('TabGroupHandler:orderTabsInGroup', `Tab ${tab.id}'s context packetUrl (S3 key: ${tab.packetUrl}) not found in instance contents! Placing at end for ordering.`);
                   tabPositions.push({ tabId: tab.id, currentIndex: tab.index, contentIndex: Infinity });
              }
         });
 
         if (tabPositions.length <= 1) {
-            logger.log('TabGroupHandler:orderTabsInGroup', `Ordering skipped: ${tabPositions.length} or fewer orderable tabs remain.`);
             return true;
         }
         tabPositions.sort((a, b) => a.contentIndex - b.contentIndex);
@@ -376,7 +360,6 @@ export async function orderTabsInGroup(groupId, instance) {
         }, Infinity);
 
         if (minCurrentIndex === Infinity) {
-            logger.warn('TabGroupHandler:orderTabsInGroup', 'Cannot determine start index for ordering (no valid tabs found?)', { groupId, instanceId });
             return false;
         }
         let targetIndex = minCurrentIndex;
@@ -384,7 +367,6 @@ export async function orderTabsInGroup(groupId, instance) {
         for (const pos of tabPositions) {
             const currentActualIndex = currentIndicesMap.get(pos.tabId);
             if (currentActualIndex === undefined) {
-                logger.warn('TabGroupHandler:orderTabsInGroup', `Tab ${pos.tabId} disappeared before move calculation, skipping.`);
                 continue;
             }
             if (currentActualIndex !== targetIndex) {
@@ -393,26 +375,22 @@ export async function orderTabsInGroup(groupId, instance) {
             targetIndex++;
         }
         if (moves.length === 0) {
-             logger.log('TabGroupHandler:orderTabsInGroup', 'No tabs needed moving for order.', { groupId, instanceId });
              return true;
         }
-        logger.log('TabGroupHandler:orderTabsInGroup', `Moving ${moves.length} tabs for order`, { groupId, instanceId, moves });
         for (const move of moves) {
             try {
-                 await chrome.tabs.get(move.tabId); // Check if tab still exists before moving
+                 await chrome.tabs.get(move.tabId);
                  await chrome.tabs.move(move.tabId, { index: move.index });
             } catch (moveError) {
                  logger.error('TabGroupHandler:orderTabsInGroup', `Move failed for tab ${move.tabId} to index ${move.index}`, moveError);
             }
         }
-        logger.log('TabGroupHandler:orderTabsInGroup', 'Finished ordering moves.');
         return true;
     } catch (error) {
       logger.error('TabGroupHandler:orderTabsInGroup', `Error ordering/ungrouping tabs in Group ${groupId} for Instance ${instanceId}`, error);
       return false;
     }
 }
-
 
 export async function handleRemoveTabGroups(data, sendResponse) {
     const { groupIds } = data;
@@ -424,12 +402,6 @@ export async function handleRemoveTabGroups(data, sendResponse) {
     try { const allStates = await storage.getAllPacketBrowserStates(); for (const instanceId in allStates) { const stateGroupId = allStates[instanceId]?.tabGroupId; if (stateGroupId && typeof stateGroupId === 'number' && stateGroupId > 0) { groupIdToInstanceIdMap.set(stateGroupId, instanceId); } } }
     catch (stateError) { logger.error('TabGroupHandler:handleRemoveTabGroups', 'Failed to fetch browser states for cleanup', stateError); errors.push('Failed to fetch browser states for cleanup.'); }
     for (const groupId of groupIds) { if (typeof groupId !== 'number' || groupId <= 0) continue; let instanceIdToClean = groupIdToInstanceIdMap.get(groupId); try { const tabsInGroup = await getTabsInGroupHelper(groupId); if (tabsInGroup.length > 0) { await chrome.tabs.remove(tabsInGroup.map(t => t.id)); logger.log('TabGroupHandler:handleRemoveTabGroups', `Removed ${tabsInGroup.length} tabs in group ${groupId}`); } else { logger.log('TabGroupHandler:handleRemoveTabGroups', `Group ${groupId} was already empty.`); try { await chrome.tabGroups.get(groupId); /* Check if group exists before removing */ await chrome.tabGroups.remove(groupId); logger.log('TabGroupHandler:handleRemoveTabGroups', `Removed empty group ${groupId}.`); } catch { /* Ignore if group doesn't exist */ } } if (instanceIdToClean) { logger.log('TabGroupHandler:handleRemoveTabGroups', `Cleaning up browser state for instance ${instanceIdToClean} associated with group ${groupId}`); try { const state = await storage.getPacketBrowserState(instanceIdToClean); if (state && state.tabGroupId === groupId) { state.tabGroupId = null; state.activeTabIds = []; await storage.savePacketBrowserState(state); logger.log('TabGroupHandler:handleRemoveTabGroups', `Nullified tabGroupId and cleared activeTabs in browser state for ${instanceIdToClean}.`); } else { logger.log('TabGroupHandler:handleRemoveTabGroups', `Browser state for ${instanceIdToClean} already clean or doesn't match group ${groupId}.`); } } catch (stateUpdateError) { logger.error('TabGroupHandler:handleRemoveTabGroups', `Error cleaning browser state for instance ${instanceIdToClean}`, stateUpdateError); errors.push(`Browser state cleanup failed for group ${groupId}: ${stateUpdateError.message}`); } } else { logger.log('TabGroupHandler:handleRemoveTabGroups', `No instance found associated with group ${groupId} in browser states map.`); } } catch (error) { logger.error('TabGroupHandler:handleRemoveTabGroups', `Error removing group ${groupId} or its tabs`, error); allSucceeded = false; errors.push(`Group ${groupId}: ${error.message || 'Unknown error'}`); } } sendResponse({ success: allSucceeded, errors: errors });
-}
-
-export function handleReorderAllTabs(sendResponse) {
-    reorderAllInstanceTabs()
-        .then(results => sendResponse({ success: true, results }))
-        .catch(error => sendResponse({ success: false, error: error.message }));
 }
 
 export async function handleTabRemovalCleanup(tabId, removeInfo) {
@@ -444,7 +416,7 @@ export async function handleTabRemovalCleanup(tabId, removeInfo) {
             const initialActiveCount = state.activeTabIds?.length || 0; state.activeTabIds = (state.activeTabIds || []).filter(id => id !== tabId); if (state.activeTabIds.length !== initialActiveCount) { logger.log('TabGroupHandler:handleTabRemovalCleanup', `Removed closed tab ${tabId} from active list for instance ${instanceId}`); stateModified = true; }
             if (state.tabGroupId && useTabGroups) {
                 try {
-                    await chrome.tabGroups.get(state.tabGroupId); // Check if group still exists
+                    await chrome.tabGroups.get(state.tabGroupId);
                     const tabs = await getTabsInGroupHelper(state.tabGroupId);
                     const groupStillHasActiveInstanceTabs = tabs.some(t => state.activeTabIds.includes(t.id));
                      if (!groupStillHasActiveInstanceTabs && tabs.length === 0) { logger.log('TabGroupHandler:handleTabRemovalCleanup', `Group ${state.tabGroupId} for instance ${instanceId} became empty. Nullifying groupId.`); state.tabGroupId = null; stateModified = true;
@@ -457,7 +429,12 @@ export async function handleTabRemovalCleanup(tabId, removeInfo) {
     } catch (error) { logger.error('TabGroupHandler:handleTabRemovalCleanup', 'Error during cleanup check', error); }
 }
 
-// --- NEW FOCUS FUNCTION ---
+export function handleReorderAllTabs(sendResponse) {
+    reorderAllInstanceTabs()
+        .then(results => sendResponse({ success: true, results }))
+        .catch(error => sendResponse({ success: false, error: error.message }));
+}
+
 export async function handleFocusTabGroup(data) {
     const { focusedGroupId } = data;
     if (typeof focusedGroupId !== 'number') {
@@ -477,7 +454,6 @@ export async function handleFocusTabGroup(data) {
                 const isFocused = state.tabGroupId === focusedGroupId;
                 const promise = chrome.tabGroups.update(state.tabGroupId, { collapsed: !isFocused })
                     .catch(e => {
-                        // Ignore errors for groups that no longer exist
                         if (!e.message.toLowerCase().includes('no tab group with id')) {
                             logger.warn('TabGroupHandler:handleFocusTabGroup', `Error updating group ${state.tabGroupId}`, e);
                         }
@@ -518,4 +494,164 @@ export function startTabReorderingChecks() {
 }
 export function stopTabReorderingChecks() {
      if (tabReorderIntervalId) { clearInterval(tabReorderIntervalId); tabReorderIntervalId = null; logger.log('TabGroupHandler', 'Stopped periodic reorder/cleanup checks.'); }
+}
+
+export async function syncDraftGroup(desiredUrls) {
+    if (!(await shouldUseTabGroups())) {
+        return { success: true, groupId: null };
+    }
+
+    const logPrefix = '[TabGroupHandler:syncDraftGroup]';
+    try {
+        const [existingGroup] = await chrome.tabGroups.query({ title: DRAFT_GROUP_TITLE });
+        let groupId = existingGroup?.id || null;
+
+        // 1. Get current state, mapping tabs to their ORIGINAL URLs from session storage
+        let tabsInGroup = groupId ? await getTabsInGroupHelper(groupId) : [];
+        const tabIds = tabsInGroup.map(t => t.id);
+        const sessionKeys = tabIds.map(id => `draft_tab_${id}`);
+        const sessionData = await storage.getSession(sessionKeys);
+        
+        const currentUrlMap = new Map(); // Map<originalUrl, tabObject>
+        tabsInGroup.forEach(tab => {
+            const originalUrl = sessionData[`draft_tab_${tab.id}`] || tab.url;
+            currentUrlMap.set(originalUrl, tab);
+        });
+
+        // 2. Calculate diff
+        const desiredUrlsSet = new Set(desiredUrls);
+        const tabsToClose = [];
+        const sessionKeysToRemove = [];
+
+        for (const [originalUrl, tab] of currentUrlMap.entries()) {
+            if (!desiredUrlsSet.has(originalUrl)) {
+                tabsToClose.push(tab.id);
+                sessionKeysToRemove.push(`draft_tab_${tab.id}`);
+            }
+        }
+        
+        const urlsToOpen = desiredUrls.filter(url => !currentUrlMap.has(url));
+
+        // 3. Perform actions
+        if (tabsToClose.length > 0) {
+            await chrome.tabs.remove(tabsToClose);
+            await storage.removeSession(sessionKeysToRemove);
+        }
+
+        if (urlsToOpen.length > 0) {
+            const newTabs = await Promise.all(urlsToOpen.map(url => chrome.tabs.create({ url, active: false })));
+            const newSessionData = {};
+            const newTabIds = [];
+            for (let i = 0; i < newTabs.length; i++) {
+                const tab = newTabs[i];
+                const originalUrl = urlsToOpen[i];
+                newSessionData[`draft_tab_${tab.id}`] = originalUrl;
+                newTabIds.push(tab.id);
+            }
+            await storage.setSession(newSessionData);
+            
+            if (!groupId) {
+                groupId = await chrome.tabs.group({ tabIds: newTabIds });
+                await chrome.tabGroups.update(groupId, { title: DRAFT_GROUP_TITLE, color: 'grey' });
+            } else {
+                await chrome.tabs.group({ tabIds: newTabIds, groupId });
+            }
+        }
+        
+        const [finalGroup] = await chrome.tabGroups.query({ title: DRAFT_GROUP_TITLE });
+        groupId = finalGroup?.id || null;
+        if (!groupId) return { success: true, groupId: null };
+
+        // 4. Re-query and Reorder
+        const finalTabsInGroup = await getTabsInGroupHelper(groupId);
+        if (finalTabsInGroup.length > 1) {
+            const finalSessionKeys = finalTabsInGroup.map(t => `draft_tab_${t.id}`);
+            const finalSessionData = await storage.getSession(finalSessionKeys);
+
+            const urlToTabIdMap = new Map();
+            finalTabsInGroup.forEach(tab => {
+                const originalUrl = finalSessionData[`draft_tab_${tab.id}`] || tab.url;
+                urlToTabIdMap.set(originalUrl, tab.id);
+            });
+            
+            const orderedTabIds = desiredUrls.map(url => urlToTabIdMap.get(url)).filter(Boolean);
+            
+            if (orderedTabIds.length === finalTabsInGroup.length) {
+                const minIndex = finalTabsInGroup.reduce((min, tab) => Math.min(min, tab.index), Infinity);
+                if (minIndex !== Infinity) {
+                    await chrome.tabs.move(orderedTabIds, { index: minIndex });
+                }
+            }
+        }
+        
+        return { success: true, groupId };
+    } catch (error) {
+        logger.error(logPrefix, 'Error during sync of draft group', error);
+        return { success: false, groupId: null, error: error.message };
+    }
+}
+
+export async function focusOrCreateDraftTab(url) {
+    if (!url || !(await shouldUseTabGroups())) return { success: false };
+    
+    try {
+        const [draftGroup] = await chrome.tabGroups.query({ title: DRAFT_GROUP_TITLE });
+        let existingTab = null;
+
+        if (draftGroup) {
+            const tabsInGroup = await getTabsInGroupHelper(draftGroup.id);
+            const sessionKeys = tabsInGroup.map(t => `draft_tab_${t.id}`);
+            const sessionData = await storage.getSession(sessionKeys);
+            
+            for (const tab of tabsInGroup) {
+                const originalUrl = sessionData[`draft_tab_${tab.id}`] || tab.url;
+                if (originalUrl === url) {
+                    existingTab = tab;
+                    break;
+                }
+            }
+        }
+        
+        if (existingTab) {
+            await chrome.tabs.update(existingTab.id, { active: true });
+            await chrome.windows.update(existingTab.windowId, { focused: true });
+        } else {
+            let groupIdToUse = draftGroup?.id;
+            const newTab = await chrome.tabs.create({ url, active: true });
+            await storage.setSession({ [`draft_tab_${newTab.id}`]: url });
+
+            if (!groupIdToUse) {
+                groupIdToUse = await chrome.tabs.group({ tabIds: [newTab.id] });
+                await chrome.tabGroups.update(groupIdToUse, { title: DRAFT_GROUP_TITLE, color: 'grey' });
+            } else {
+                await chrome.tabs.group({ tabIds: [newTab.id], groupId: groupIdToUse });
+            }
+            
+            await chrome.windows.update(newTab.windowId, { focused: true });
+        }
+        return { success: true };
+    } catch (error) {
+        logger.error('TabGroupHandler:focusOrCreateDraftTab', 'Error focusing or creating draft tab', error);
+        return { success: false, error: error.message };
+    }
+}
+
+export async function cleanupDraftGroup() {
+    if (!(await shouldUseTabGroups())) return { success: true };
+
+    try {
+        const [existingGroup] = await chrome.tabGroups.query({ title: DRAFT_GROUP_TITLE });
+        if (existingGroup) {
+            const tabs = await getTabsInGroupHelper(existingGroup.id);
+            if (tabs.length > 0) {
+                await chrome.tabs.remove(tabs.map(t => t.id));
+            }
+        }
+        return { success: true };
+    } catch (error) {
+        if (!error.message.toLowerCase().includes('no tab group')) {
+            logger.error('TabGroupHandler:cleanupDraftGroup', 'Error cleaning up draft group', { error });
+        }
+        return { success: true };
+    }
 }
