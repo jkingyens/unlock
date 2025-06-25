@@ -511,12 +511,17 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
 
 
 chrome.tabs.onRemoved.addListener(async (tabId, removeInfo) => {
-    logger.log('Background:onRemoved', 'Tab removed', { tabId });
+    const logPrefix = `[Unpack Background:onRemoved Tab ${tabId}]`;
+    logger.log(logPrefix, 'Tab removed');
     if (interimContextMap.has(tabId)) {
         interimContextMap.delete(tabId);
-        logger.log(`Background:onRemoved`, `Removed interim context from MAP for closed tab ${tabId}.`);
+        logger.log(logPrefix, `Removed interim context from MAP for closed tab ${tabId}.`);
     }
     await clearPacketContext(tabId);
+    // Also clean up any draft tab tags from session storage
+    await storage.removeSession(`draft_tab_${tabId}`);
+    logger.log(logPrefix, `Cleaned up draft tag for tab ${tabId}.`);
+    
     await tabGroupHandler.handleTabRemovalCleanup(tabId, removeInfo);
 });
 
@@ -530,6 +535,16 @@ chrome.tabs.onReplaced.addListener(async (addedTabId, removedTabId) => {
     try { oldContext = await getPacketContext(removedTabId); }
     catch (e) { logger.warn('Background:onReplaced', 'Could not get context for removed tab', e); }
     await clearPacketContext(removedTabId);
+    
+    // Transfer draft tab tag as well
+    const draftTagKey = `draft_tab_${removedTabId}`;
+    const sessionData = await storage.getSession(draftTagKey);
+    if (sessionData[draftTagKey]) {
+        await storage.setSession({ [`draft_tab_${addedTabId}`]: sessionData[draftTagKey] });
+        await storage.removeSession(draftTagKey);
+        logger.log('Background:onReplaced', `Transferred draft tag from tab ${removedTabId} to ${addedTabId}.`);
+    }
+
     try {
         if (oldContext && oldContext.instanceId && oldContext.packetUrl && oldContext.currentUrl) {
              logger.log('Background:onReplaced', `Attempting to apply old context to new tab ${addedTabId}`);
