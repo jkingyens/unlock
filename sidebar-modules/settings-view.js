@@ -36,11 +36,29 @@ export function init(dependencies) {
 }
 
 /**
+ * Triggers an immediate save if one is scheduled.
+ */
+export function triggerPendingSave() {
+    if (settingsSaveTimeout) {
+        clearTimeout(settingsSaveTimeout);
+        settingsSaveTimeout = null;
+        gatherAndSaveSettings();
+        logger.log('SettingsView', 'Pending settings save triggered immediately by navigation.');
+    }
+}
+
+/**
  * Attaches event listeners specific to the settings view.
  */
 export function setupSettingsListeners() {
     const s = domRefs;
     if (!s.settingsView) return;
+
+    // --- Helper to request a debounced save ---
+    function requestSave() {
+        clearTimeout(settingsSaveTimeout);
+        settingsSaveTimeout = setTimeout(gatherAndSaveSettings, DEBOUNCE_DELAY);
+    }
 
     // LLM Listeners
     s.llmAddNewModelBtn?.addEventListener('click', () => showLlmEditForm(null));
@@ -57,7 +75,7 @@ export function setupSettingsListeners() {
         else if (event.target.classList.contains('delete-llm-model-btn')) deleteLlmModel(modelId);
         else if (event.target.name === 'activeLlmModelRadio' && event.target.checked) {
             currentSelectedModelIdSetting = event.target.value;
-            debounceSaveSettings();
+            requestSave();
         }
     });
 
@@ -76,16 +94,16 @@ export function setupSettingsListeners() {
         else if (event.target.classList.contains('delete-s3-config-btn')) deleteStorageConfig(configId);
         else if (event.target.name === 'activeStorageRadio' && event.target.checked) {
             currentActiveStorageIdSetting = event.target.value;
-            debounceSaveSettings();
+            requestSave();
         }
     });
 
     // Other Settings
-    s.themeRadios?.forEach(radio => radio.addEventListener('change', debounceSaveSettings));
-    s.tabGroupsEnabledCheckbox?.addEventListener('change', debounceSaveSettings);
+    s.themeRadios?.forEach(radio => radio.addEventListener('change', requestSave));
+    s.tabGroupsEnabledCheckbox?.addEventListener('change', requestSave);
+    s.visitThresholdSecondsInput?.addEventListener('change', requestSave);
     s.confettiEnabledCheckbox?.addEventListener('change', (event) => {
-        debounceSaveSettings();
-        // Trigger confetti preview only when it's being enabled
+        requestSave();
         if (event.target.checked && typeof showConfetti === 'function') {
             showConfetti('Settings Preview');
         }
@@ -114,7 +132,6 @@ async function loadSettings() {
     try {
         const loadedSettings = await storage.getSettings();
         
-        // LLM
         currentLlmModelsSetting = loadedSettings.llmModels || [];
         currentSelectedModelIdSetting = loadedSettings.selectedModelId;
         if (!chromeAiAvailable) {
@@ -127,19 +144,18 @@ async function loadSettings() {
         renderLlmModelsList();
         hideLlmEditForm();
         
-        // Storage
         currentStorageConfigsSetting = loadedSettings.storageConfigs || [];
         currentActiveStorageIdSetting = loadedSettings.activeStorageId || null;
         renderStorageConfigsList();
         hideStorageEditForm();
 
-        // Features & Theme
         domRefs.tabGroupsEnabledCheckbox.checked = loadedSettings.tabGroupsEnabled ?? true;
         domRefs.tabGroupsEnabledCheckbox.disabled = !isTabGroupsAvailable();
         domRefs.tabGroupsEnabledCheckbox.parentElement.style.opacity = isTabGroupsAvailable() ? '1' : '0.6';
         domRefs.tabGroupsEnabledCheckbox.parentElement.title = isTabGroupsAvailable() ? '' : 'Tab Groups API not available in this browser version.';
 
         domRefs.confettiEnabledCheckbox.checked = loadedSettings.confettiEnabled ?? true;
+        domRefs.visitThresholdSecondsInput.value = loadedSettings.visitThresholdSeconds ?? 5;
 
         const theme = loadedSettings.themePreference || 'auto';
         if (domRefs.themeAutoRadio) domRefs.themeAutoRadio.checked = theme === 'auto';
@@ -217,6 +233,11 @@ function debounceSaveSettings() {
 async function gatherAndSaveSettings() {
     showSettingsStatus('Saving...', 'info', false);
     try {
+        let visitThreshold = parseInt(domRefs.visitThresholdSecondsInput.value, 10);
+        if (isNaN(visitThreshold) || visitThreshold < 1) {
+            visitThreshold = 5; // Fallback to default if input is invalid
+        }
+
         const settingsToSave = {
             llmModels: currentLlmModelsSetting,
             selectedModelId: currentSelectedModelIdSetting,
@@ -224,7 +245,8 @@ async function gatherAndSaveSettings() {
             activeStorageId: currentActiveStorageIdSetting,
             themePreference: domRefs.themeLightRadio.checked ? 'light' : (domRefs.themeDarkRadio.checked ? 'dark' : 'auto'),
             tabGroupsEnabled: domRefs.tabGroupsEnabledCheckbox.checked,
-            confettiEnabled: domRefs.confettiEnabledCheckbox.checked
+            confettiEnabled: domRefs.confettiEnabledCheckbox.checked,
+            visitThresholdSeconds: visitThreshold
         };
         await storage.saveSettings(settingsToSave);
         showSettingsStatus('Settings saved.', 'success');

@@ -40,28 +40,57 @@ export async function displayPacketContent(instance, currentPacketUrl) {
     if (!instance || !instance.instanceId || !container) {
         if (container) container.innerHTML = '<div class="empty-state">Packet data unavailable.</div>';
         logger.warn(`DetailView[${uniqueCallId}]`, 'Cannot display packet content: Missing instance or container.');
-        // Finalize this display attempt before processing queue
         isDisplayingPacketContent = false; 
         processQueuedDisplayRequest();
         return;
     }
 
     try {
-        const colorName = packetUtils.getColorForTopic(instance.topic);
-        const colors = { grey: { accent: '#90a4ae', progress: '#78909c' }, blue: { accent: '#64b5f6', progress: '#42a5f5' }, red: { accent: '#e57373', progress: '#ef5350' }, yellow: { accent: '#fff176', progress: '#ffee58' }, green: { accent: '#81c784', progress: '#66bb6a' }, pink: { accent: '#f06292', progress: '#ec407a' }, purple: { accent: '#ba68c8', progress: '#ab47bc' }, cyan: { accent: '#4dd0e1', progress: '#26c6da' }, orange: { accent: '#ffb74d', progress: '#ffa726' } }[colorName] || { accent: '#90a4ae', progress: '#78909c' };
-        
-        container.style.setProperty('--packet-color-accent', colors.accent);
-        container.style.setProperty('--packet-color-progress-fill', colors.progress);
-        
-        const fragment = document.createDocumentFragment();
-        fragment.appendChild(createProgressSection(instance));
-        fragment.appendChild(await createActionButtons(instance));
-        fragment.appendChild(createCardsSection(instance));
-        
-        container.innerHTML = ''; // Clear previous content
-        container.appendChild(fragment);
+        const isAlreadyRendered = container.querySelector(`#detail-cards-container[data-instance-id="${instance.instanceId}"]`);
 
-        updateActiveCardHighlight(currentPacketUrl);
+        if (isAlreadyRendered) {
+            // --- Non-destructive update path ---
+            logger.log(`DetailView[${uniqueCallId}]`, 'Updating existing detail view non-destructively.');
+            
+            // Update Progress Bar
+            const { progressPercentage } = calculateInstanceProgress(instance);
+            const progressBar = container.querySelector('#detail-progress-container .progress-bar');
+            if (progressBar) progressBar.style.width = `${progressPercentage}%`;
+            const progressBarContainer = container.querySelector('#detail-progress-container .progress-bar-container');
+            if(progressBarContainer) progressBarContainer.title = `${progressPercentage}% Complete`;
+
+            // Update visited status on cards
+            const visitedUrlsSet = new Set(instance.visitedUrls || []);
+            const visitedGeneratedIds = new Set(instance.visitedGeneratedPageIds || []);
+            container.querySelectorAll('.card').forEach(card => {
+                const isVisited = (card.dataset.pageId && visitedGeneratedIds.has(card.dataset.pageId)) ||
+                                  (card.dataset.url && visitedUrlsSet.has(card.dataset.url));
+                card.classList.toggle('visited', isVisited);
+            });
+            
+            updateActiveCardHighlight(currentPacketUrl);
+
+        } else {
+            // --- Full render path (for initial load) ---
+            logger.log(`DetailView[${uniqueCallId}]`, 'Performing full render of detail view.');
+            const colorName = packetUtils.getColorForTopic(instance.topic);
+            const colors = { grey: { accent: '#90a4ae', progress: '#78909c' }, blue: { accent: '#64b5f6', progress: '#42a5f5' }, red: { accent: '#e57373', progress: '#ef5350' }, yellow: { accent: '#fff176', progress: '#ffee58' }, green: { accent: '#81c784', progress: '#66bb6a' }, pink: { accent: '#f06292', progress: '#ec407a' }, purple: { accent: '#ba68c8', progress: '#ab47bc' }, cyan: { accent: '#4dd0e1', progress: '#26c6da' }, orange: { accent: '#ffb74d', progress: '#ffa726' } }[colorName] || { accent: '#90a4ae', progress: '#78909c' };
+            
+            container.style.setProperty('--packet-color-accent', colors.accent);
+            container.style.setProperty('--packet-color-progress-fill', colors.progress);
+            
+            const fragment = document.createDocumentFragment();
+            fragment.appendChild(createProgressSection(instance));
+            fragment.appendChild(await createActionButtons(instance));
+            const cardsWrapper = createCardsSection(instance);
+            cardsWrapper.dataset.instanceId = instance.instanceId; // Tag the container for future updates
+            fragment.appendChild(cardsWrapper);
+
+            container.innerHTML = ''; // Clear previous content
+            container.appendChild(fragment);
+
+            updateActiveCardHighlight(currentPacketUrl);
+        }
     } catch (error) {
         logger.error(`DetailView[${uniqueCallId}]`, 'Error during detail view rendering', { instanceId: instance?.instanceId, error });
         container.innerHTML = '<div class="empty-state">Error displaying packet details.</div>';
