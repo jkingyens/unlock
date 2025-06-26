@@ -55,9 +55,14 @@ export async function displayPacketContent(instance, currentPacketUrl) {
             // Update Progress Bar
             const { progressPercentage } = calculateInstanceProgress(instance);
             const progressBar = container.querySelector('#detail-progress-container .progress-bar');
-            if (progressBar) progressBar.style.width = `${progressPercentage}%`;
+            // FIX: Check if progressBar exists before trying to access its style property.
+            if (progressBar) {
+                progressBar.style.width = `${progressPercentage}%`;
+            }
             const progressBarContainer = container.querySelector('#detail-progress-container .progress-bar-container');
-            if(progressBarContainer) progressBarContainer.title = `${progressPercentage}% Complete`;
+            if(progressBarContainer) {
+                progressBarContainer.title = `${progressPercentage}% Complete`;
+            }
 
             // Update visited status on cards
             const visitedUrlsSet = new Set(instance.visitedUrls || []);

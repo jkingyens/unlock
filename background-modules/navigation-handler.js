@@ -83,7 +83,7 @@ export async function checkAndPromptForCompletion(logPrefix, visitResult, instan
     }
 }
 
-// --- Core Processing Logic ---
+// --- REVISED Core Processing Logic ---
 async function processNavigationEvent(tabId, finalUrl, sourceEventName, details = {}) {
     const logPrefix = `[Unpack NavigationHandler ${sourceEventName} Tab ${tabId}]`;
     
@@ -91,6 +91,7 @@ async function processNavigationEvent(tabId, finalUrl, sourceEventName, details 
     clearPendingVisitTimer(tabId);
 
     let packetContext = await getPacketContext(tabId);
+    // FIX: Keep the full URL, do not strip the hash here.
     const decodedFinalUrl = decodeURIComponent(finalUrl);
 
     if ((!packetContext || !packetContext.instanceId) && interimContextMap.has(tabId)) {
@@ -125,41 +126,40 @@ async function processNavigationEvent(tabId, finalUrl, sourceEventName, details 
     
     let packetUrlForSidebar = originalPacketUrl;
     
-    if (sourceEventName === 'HistoryStateUpdated') {
-        logger.log(logPrefix, `HistoryStateUpdated event. Updating currentUrl but preserving original packetUrl.`);
+    if (sourceEventName === 'HistoryStateUpdated' || transitionType === 'client_redirect') {
+        logger.log(logPrefix, `Non-breaking navigation event ('${sourceEventName}', type: '${transitionType}'). Updating currentUrl only.`);
         await setPacketContext(tabId, instanceId, originalPacketUrl, decodedFinalUrl);
+        const matchedItem = packetUtils.isUrlInPacket(decodedFinalUrl, instance, { returnItem: true });
+        if (matchedItem) {
+            packetUrlForSidebar = matchedItem.url;
+        }
+
     } else if (sourceEventName === 'Committed') {
-        
         const clearlyNavigatingAwayTypes = ['typed', 'auto_bookmark', 'generated', 'keyword', 'form_submit'];
         
-        if (clearlyNavigatingAwayTypes.includes(transitionType)) {
-            const isReloadingPacketUrl = packetUtils.isUrlInPacket(decodedFinalUrl, instance);
-            if (!isReloadingPacketUrl) {
-                logger.log(logPrefix, `Context-breaking transition type: '${transitionType}'. Clearing context.`);
+        if (clearlyNavigatingAwayTypes.includes(transitionType) || (transitionType === 'link' && !transitionQualifiers.includes('client_redirect'))) {
+            // FIX: Pass the full URL to isUrlInPacket
+            const isNewUrlInPacket = packetUtils.isUrlInPacket(decodedFinalUrl, instance);
+            
+            if (!isNewUrlInPacket) {
+                logger.log(logPrefix, `Context-breaking user transition: '${transitionType}'. URL is not in packet. Clearing context.`);
                 await clearPacketContext(tabId);
                 await sidebarHandler.updateActionForTab(tabId);
                 if (sidebarHandler.isSidePanelAvailable()) sidebarHandler.notifySidebar('update_sidebar_context', { tabId: tabId, instanceId: null });
-                return;
+                return; 
+            } else {
+                // FIX: Pass the full URL to isUrlInPacket
+                const matchedContentItem = packetUtils.isUrlInPacket(decodedFinalUrl, instance, { returnItem: true });
+                if (matchedContentItem) {
+                    packetUrlForSidebar = matchedContentItem.url;
+                    logger.log(logPrefix, `User-driven navigation matches a packet item. New canonical packetUrl -> ${packetUrlForSidebar}`);
+                    await setPacketContext(tabId, instanceId, packetUrlForSidebar, decodedFinalUrl);
+                    await sidebarHandler.updateActionForTab(tabId);
+                }
             }
-        }
-
-        const matchedContentItem = packetUtils.isUrlInPacket(decodedFinalUrl, instance, { returnItem: true });
-
-        if (matchedContentItem) {
-            packetUrlForSidebar = matchedContentItem.url;
-            logger.log(logPrefix, `Navigation matches a packet item. New canonical packetUrl -> ${packetUrlForSidebar}`);
-            await setPacketContext(tabId, instanceId, packetUrlForSidebar, decodedFinalUrl);
-            await sidebarHandler.updateActionForTab(tabId);
-        } else {
-            logger.log(logPrefix, `URL external to packet: ${decodedFinalUrl}. Clearing context.`);
-            await clearPacketContext(tabId);
-            await sidebarHandler.updateActionForTab(tabId);
-            if (sidebarHandler.isSidePanelAvailable()) sidebarHandler.notifySidebar('update_sidebar_context', { tabId: tabId, instanceId: null });
-            return;
         }
     }
 
-    // This is the initial update to highlight the card.
     await updateBrowserStateAndGroups(tabId, instanceId, instance, decodedFinalUrl, packetUrlForSidebar);
     if (sidebarHandler.isSidePanelAvailable()) {
         sidebarHandler.notifySidebar('update_sidebar_context', {
@@ -167,7 +167,6 @@ async function processNavigationEvent(tabId, finalUrl, sourceEventName, details 
         });
     }
 
-    // Now, schedule the "mark as visited" logic after a delay.
     const canonicalUrlToVisit = packetUrlForSidebar;
     const itemToVisit = instance.contents.find(item => item.url && decodeURIComponent(item.url) === decodeURIComponent(canonicalUrlToVisit));
 
@@ -176,11 +175,11 @@ async function processNavigationEvent(tabId, finalUrl, sourceEventName, details 
         const settings = await storage.getSettings();
         const visitThresholdMs = (settings.visitThresholdSeconds ?? 5) * 1000;
         const visitTimer = setTimeout(async () => {
-            pendingVisitTimers.delete(tabId); // Clean up self from map
+            pendingVisitTimers.delete(tabId); 
             try {
                 const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
                 if (activeTab && activeTab.id === tabId) {
-                    logger.log(logPrefix, `Tab ${tabId} still active after 5s. Marking '${canonicalUrlToVisit}' as visited.`);
+                    logger.log(logPrefix, `Tab ${tabId} still active after ${visitThresholdMs}ms. Marking '${canonicalUrlToVisit}' as visited.`);
                     const visitResult = await packetUtils.markUrlAsVisited(instanceId, canonicalUrlToVisit);
                     if (visitResult.success && visitResult.modified) {
                         const updatedInstance = visitResult.instance || await storage.getPacketInstance(instanceId);
@@ -197,15 +196,15 @@ async function processNavigationEvent(tabId, finalUrl, sourceEventName, details 
             } catch (error) {
                 logger.error(logPrefix, 'Error in delayed visit marking.', error);
             }
-        }, visitThresholdMs); // 5-second delay
+        }, visitThresholdMs);
 
         pendingVisitTimers.set(tabId, visitTimer);
-        logger.log(logPrefix, `Scheduled visit check for tab ${tabId} in 5 seconds.`);
+        logger.log(logPrefix, `Scheduled visit check for tab ${tabId} in ${visitThresholdMs}ms.`);
     }
 }
 
+
 async function updateBrowserStateAndGroups(tabId, instanceId, instance, currentBrowserUrl, currentPacketUrl) {
-    // ... This function's internal logic remains the same ...
     if (!instance) return; 
     const logPrefix = `[Unpack NavigationHandler UpdateState Tab ${tabId}]`;
     let browserState = null;

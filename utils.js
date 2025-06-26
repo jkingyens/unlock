@@ -529,56 +529,33 @@ const packetUtils = {
         return options.returnItem ? null : false;
     }
 
-    const urlWithoutHash = loadedUrl.split('#')[0];
+    const urlToCompare = decodeURIComponent(loadedUrl);
 
     for (const item of instance.contents) {
         if (!item.url) continue;
-        const itemCanonicalReference = item.url.split('#')[0];
 
         if (item.type === 'external') {
-            try {
-                // For external links, a simple path and host comparison is usually enough
-                const loadedUrlObj = new URL(urlWithoutHash);
-                const itemUrlObj = new URL(itemCanonicalReference);
-                if (loadedUrlObj.hostname === itemUrlObj.hostname && decodeURIComponent(loadedUrlObj.pathname) === decodeURIComponent(itemUrlObj.pathname)) {
-                    return options.returnItem ? item : true;
-                }
-            } catch (e) {
-                // Fallback for non-URL strings or parsing errors
-                if (decodeURIComponent(urlWithoutHash) === decodeURIComponent(itemCanonicalReference)) {
-                    return options.returnItem ? item : true;
-                }
+            const itemCanonicalReference = decodeURIComponent(item.url);
+            if (urlToCompare === itemCanonicalReference) {
+                return options.returnItem ? item : true;
             }
         } else if (item.type === 'generated') {
             try {
-                const loadedUrlObj = new URL(urlWithoutHash);
+                const loadedUrlObj = new URL(urlToCompare);
                 const { publishContext } = item;
 
                 if (publishContext) {
-                    // Path-style provider (Google Cloud Storage)
+                    let expectedUrl;
                     if (publishContext.provider === 'google') {
-                        const expectedHostname = 'storage.googleapis.com';
-                        const expectedPath = `/${publishContext.bucket}/${item.url}`;
-                        if (loadedUrlObj.hostname === expectedHostname && decodeURIComponent(loadedUrlObj.pathname) === decodeURIComponent(expectedPath)) {
-                            return options.returnItem ? item : true;
-                        }
-                    } 
-                    // Virtual-hosted providers (AWS, DigitalOcean)
-                    else if (publishContext.provider === 's3' || publishContext.provider === 'digitalocean') {
-                        const expectedHostname = publishContext.provider === 'digitalocean'
+                        expectedUrl = `https://storage.googleapis.com/${publishContext.bucket}/${item.url}`;
+                    } else if (publishContext.provider === 's3' || publishContext.provider === 'digitalocean') {
+                        const domain = publishContext.provider === 'digitalocean'
                             ? `${publishContext.bucket}.${publishContext.region}.digitaloceanspaces.com`
                             : `${publishContext.bucket}.s3.${publishContext.region}.amazonaws.com`;
-                        const expectedPath = `/${item.url}`;
-                        if (loadedUrlObj.hostname === expectedHostname && decodeURIComponent(loadedUrlObj.pathname) === decodeURIComponent(expectedPath)) {
-                            return options.returnItem ? item : true;
-                        }
+                        expectedUrl = `https://${domain}/${item.url}`;
                     }
-                } else {
-                    // Legacy support for old packets without publishContext. This is a best-effort guess.
-                    const normalizedLoadedPath = loadedUrlObj.pathname.startsWith('/') ? loadedUrlObj.pathname.substring(1) : loadedUrlObj.pathname;
-                    const normalizedS3Key = item.url.startsWith('/') ? item.url.substring(1) : item.url;
-                    if (normalizedLoadedPath === normalizedS3Key) {
-                        logger.warn('PacketUtils:isUrlInPacket', 'Matched generated content by path, but item is missing publishContext. This may be an old packet.');
+
+                    if (expectedUrl && loadedUrlObj.origin === new URL(expectedUrl).origin && loadedUrlObj.pathname === new URL(expectedUrl).pathname) {
                         return options.returnItem ? item : true;
                     }
                 }
@@ -623,7 +600,7 @@ const packetUtils = {
                  isTrackable = false;
              }
         } else {
-            logger.log('PacketUtils:markUrlAsVisited', 'URL/S3 Key not found in instance contents when trying to mark visit.', { urlToMark: url, instanceId });
+            logger.log('PacketUtils:markUrlAsVisited', 'URL not found in instance contents when trying to mark visit.', { urlToMark: url, instanceId });
         }
 
         if (!isTrackable) {
