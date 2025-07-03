@@ -2,12 +2,13 @@
 // Manages the packet detail view, including rendering content cards and progress.
 
 import { domRefs } from './dom-references.js';
-import { logger, storage, packetUtils } from '../utils.js';
+import { logger, storage, packetUtils, indexedDbStorage } from '../utils.js';
 import { calculateInstanceProgress } from './root-view.js'; // We can reuse this from the root view module
 
 // --- Module-specific State & Dependencies ---
 let isDisplayingPacketContent = false;
 let queuedDisplayRequest = null;
+let activeAudioElement = null;
 
 // Functions to be imported from the new, lean sidebar.js
 let sendMessageToBackground;
@@ -40,62 +41,32 @@ export async function displayPacketContent(instance, currentPacketUrl) {
     if (!instance || !instance.instanceId || !container) {
         if (container) container.innerHTML = '<div class="empty-state">Packet data unavailable.</div>';
         logger.warn(`DetailView[${uniqueCallId}]`, 'Cannot display packet content: Missing instance or container.');
-        isDisplayingPacketContent = false; 
+        isDisplayingPacketContent = false;
         processQueuedDisplayRequest();
         return;
     }
 
     try {
-        const isAlreadyRendered = container.querySelector(`#detail-cards-container[data-instance-id="${instance.instanceId}"]`);
+        // --- Always do a full render ---
+        logger.log(`DetailView[${uniqueCallId}]`, 'Performing full render of detail view.');
+        const colorName = packetUtils.getColorForTopic(instance.topic);
+        const colors = { grey: { accent: '#90a4ae', progress: '#78909c' }, blue: { accent: '#64b5f6', progress: '#42a5f5' }, red: { accent: '#e57373', progress: '#ef5350' }, yellow: { accent: '#fff176', progress: '#ffee58' }, green: { accent: '#81c784', progress: '#66bb6a' }, pink: { accent: '#f06292', progress: '#ec407a' }, purple: { accent: '#ba68c8', progress: '#ab47bc' }, cyan: { accent: '#4dd0e1', progress: '#26c6da' }, orange: { accent: '#ffb74d', progress: '#ffa726' } }[colorName] || { accent: '#90a4ae', progress: '#78909c' };
 
-        if (isAlreadyRendered) {
-            // --- Non-destructive update path ---
-            logger.log(`DetailView[${uniqueCallId}]`, 'Updating existing detail view non-destructively.');
-            
-            // Update Progress Bar
-            const { progressPercentage } = calculateInstanceProgress(instance);
-            const progressBar = container.querySelector('#detail-progress-container .progress-bar');
-            // FIX: Check if progressBar exists before trying to access its style property.
-            if (progressBar) {
-                progressBar.style.width = `${progressPercentage}%`;
-            }
-            const progressBarContainer = container.querySelector('#detail-progress-container .progress-bar-container');
-            if(progressBarContainer) {
-                progressBarContainer.title = `${progressPercentage}% Complete`;
-            }
+        container.style.setProperty('--packet-color-accent', colors.accent);
+        container.style.setProperty('--packet-color-progress-fill', colors.progress);
 
-            // Update visited status on cards
-            const visitedUrlsSet = new Set(instance.visitedUrls || []);
-            const visitedGeneratedIds = new Set(instance.visitedGeneratedPageIds || []);
-            container.querySelectorAll('.card').forEach(card => {
-                const isVisited = (card.dataset.pageId && visitedGeneratedIds.has(card.dataset.pageId)) ||
-                                  (card.dataset.url && visitedUrlsSet.has(card.dataset.url));
-                card.classList.toggle('visited', isVisited);
-            });
-            
-            updateActiveCardHighlight(currentPacketUrl);
+        const fragment = document.createDocumentFragment();
+        fragment.appendChild(createProgressSection(instance));
+        fragment.appendChild(await createActionButtons(instance));
+        const cardsWrapper = createCardsSection(instance);
+        cardsWrapper.dataset.instanceId = instance.instanceId; // Tag the container for future updates
+        fragment.appendChild(cardsWrapper);
 
-        } else {
-            // --- Full render path (for initial load) ---
-            logger.log(`DetailView[${uniqueCallId}]`, 'Performing full render of detail view.');
-            const colorName = packetUtils.getColorForTopic(instance.topic);
-            const colors = { grey: { accent: '#90a4ae', progress: '#78909c' }, blue: { accent: '#64b5f6', progress: '#42a5f5' }, red: { accent: '#e57373', progress: '#ef5350' }, yellow: { accent: '#fff176', progress: '#ffee58' }, green: { accent: '#81c784', progress: '#66bb6a' }, pink: { accent: '#f06292', progress: '#ec407a' }, purple: { accent: '#ba68c8', progress: '#ab47bc' }, cyan: { accent: '#4dd0e1', progress: '#26c6da' }, orange: { accent: '#ffb74d', progress: '#ffa726' } }[colorName] || { accent: '#90a4ae', progress: '#78909c' };
-            
-            container.style.setProperty('--packet-color-accent', colors.accent);
-            container.style.setProperty('--packet-color-progress-fill', colors.progress);
-            
-            const fragment = document.createDocumentFragment();
-            fragment.appendChild(createProgressSection(instance));
-            fragment.appendChild(await createActionButtons(instance));
-            const cardsWrapper = createCardsSection(instance);
-            cardsWrapper.dataset.instanceId = instance.instanceId; // Tag the container for future updates
-            fragment.appendChild(cardsWrapper);
+        container.innerHTML = ''; // Clear previous content
+        container.appendChild(fragment);
 
-            container.innerHTML = ''; // Clear previous content
-            container.appendChild(fragment);
+        updateActiveCardHighlight(currentPacketUrl);
 
-            updateActiveCardHighlight(currentPacketUrl);
-        }
     } catch (error) {
         logger.error(`DetailView[${uniqueCallId}]`, 'Error during detail view rendering', { instanceId: instance?.instanceId, error });
         container.innerHTML = '<div class="empty-state">Error displaying packet details.</div>';
@@ -162,7 +133,7 @@ function createCardsSection(instance) {
 
     if (instance.contents && instance.contents.length > 0) {
         instance.contents.forEach(item => {
-            const card = createContentCard(item, visitedUrlsSet, visitedGeneratedIds, instance.instanceId);
+            const card = createContentCard(item, visitedUrlsSet, visitedGeneratedIds, instance);
             if (card) cardsWrapper.appendChild(card);
         });
     } else {
@@ -173,7 +144,7 @@ function createCardsSection(instance) {
     return cardsWrapper;
 }
 
-function createContentCard(contentItem, visitedUrlsSet, visitedGeneratedIds, instanceId) {
+function createContentCard(contentItem, visitedUrlsSet, visitedGeneratedIds, instance) {
     if (!contentItem || !contentItem.type) return null;
 
     const card = document.createElement('div');
@@ -200,13 +171,35 @@ function createContentCard(contentItem, visitedUrlsSet, visitedGeneratedIds, ins
             card.style.opacity = '0.7';
             displayUrl = contentItem.published ? '(Error: URL missing)' : '(Not Published)';
         }
+    } else if (type === 'media') {
+        iconHTML = '▶️';
+        if (contentItem.published) {
+            isClickable = true;
+            isVisited = visitedGeneratedIds.has(contentItem.pageId);
+            displayUrl = title;
+        } else {
+            card.style.opacity = '0.7';
+            displayUrl = '(Not Published)';
+        }
     }
+
 
     card.innerHTML = `<div class="card-icon">${iconHTML}</div><div class="card-text"><div class="card-title">${title}</div><div class="card-url">${displayUrl}</div>${relevance ? `<div class="card-relevance">${relevance}</div>` : ''}</div>`;
     
     if (isClickable) {
         card.classList.add('clickable');
-        card.addEventListener('click', () => openUrl(urlToOpen, instanceId));
+        if (type === 'media') {
+            const playerButton = document.createElement('button');
+            playerButton.className = 'media-player-button';
+            playerButton.textContent = '▶️';
+            playerButton.onclick = (e) => {
+                e.stopPropagation();
+                playMediaInCard(card, contentItem, instance);
+            };
+            card.appendChild(playerButton);
+        } else {
+            card.addEventListener('click', () => openUrl(urlToOpen, instance.instanceId));
+        }
     }
     if (isVisited) card.classList.add('visited');
     
@@ -248,4 +241,74 @@ function handleCloseTabGroup(tabGroupId) {
         action: 'remove_tab_groups',
         data: { groupIds: [tabGroupId] }
     }).catch(err => logger.error("DetailView", `Error closing group: ${err.message}`));
+}
+
+async function playMediaInCard(card, contentItem, instance) {
+    if (activeAudioElement && !activeAudioElement.paused && activeAudioElement.dataset.pageId === contentItem.pageId) {
+        activeAudioElement.pause();
+        return;
+    }
+    if (activeAudioElement) {
+        activeAudioElement.pause();
+    }
+
+    const playerButton = card.querySelector('.media-player-button');
+    if (!playerButton) return;
+
+    const audio = new Audio();
+    audio.dataset.pageId = contentItem.pageId;
+    activeAudioElement = audio;
+
+    const cachedAudio = await indexedDbStorage.getGeneratedContent(instance.instanceId, contentItem.pageId);
+    if (cachedAudio) {
+        const blob = new Blob([cachedAudio[0].content], { type: contentItem.mimeType });
+        audio.src = URL.createObjectURL(blob);
+    } else {
+        const response = await sendMessageToBackground({
+            action: 'get_presigned_url',
+            data: { s3Key: contentItem.url, instanceId: instance.instanceId }
+        });
+        if (response.success) {
+            audio.src = response.url;
+        } else {
+            logger.error("DetailView", "Failed to get presigned URL for media", response.error);
+            return;
+        }
+    }
+    
+    audio.onplay = () => {
+        playerButton.textContent = '⏸️';
+    };
+
+    audio.onpause = () => {
+        playerButton.textContent = '▶️';
+    };
+
+    audio.ontimeupdate = () => {
+        // Guard against NaN duration at the start of playback
+        if (!audio.duration || isNaN(audio.duration)) {
+            return;
+        }
+        const percentage = (audio.currentTime / audio.duration) * 100;
+        playerButton.style.setProperty('--p', percentage);
+        const { progressPercentage } = calculateInstanceProgress(instance, { [contentItem.pageId]: percentage / 100 });
+        const progressBar = document.querySelector('#detail-progress-container .progress-bar');
+        if (progressBar) {
+            progressBar.style.width = `${progressPercentage}%`;
+        }
+    };
+
+    audio.onended = async () => {
+        playerButton.textContent = '▶️';
+        playerButton.style.setProperty('--p', 100);
+        await sendMessageToBackground({
+            action: 'media_playback_complete',
+            data: {
+                instanceId: instance.instanceId,
+                pageId: contentItem.pageId
+            }
+        });
+    };
+
+    audio.play();
 }

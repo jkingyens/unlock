@@ -10,7 +10,7 @@ import {
     clearPacketContext,
     MPI_PARAMS,
     CONFIG,
-    base64Encode
+    arrayBufferToBase64
 } from '../utils.js';
 import * as tabGroupHandler from './tab-group-handler.js';
 import * as sidebarHandler from './sidebar-handler.js';
@@ -300,6 +300,20 @@ export function handleMessage(message, sender, sendResponse) {
     }
 
     switch (message.action) {
+        case 'get_presigned_url':
+            (async () => {
+                const { s3Key, instanceId } = message.data;
+                const instance = await storage.getPacketInstance(instanceId);
+                const contentItem = instance.contents.find(item => item.url === s3Key);
+                if (contentItem && contentItem.publishContext) {
+                    const url = await cloudStorage.generatePresignedGetUrl(s3Key, 3600, contentItem.publishContext);
+                    sendResponse({ success: true, url });
+                } else {
+                    sendResponse({ success: false, error: 'Could not find content item or publish context.' });
+                }
+            })();
+            isAsync = true;
+            break;
         case 'get_page_details_from_dom':
             handleGetPageDetailsFromDOM(sender, sendResponse);
             isAsync = true;
@@ -399,6 +413,26 @@ export function handleMessage(message, sender, sendResponse) {
             isAsync = true;
             break;
         case 'mark_url_visited': handleMarkUrlVisited(message.data, sendResponse); isAsync = true; break;
+        case 'media_playback_complete':
+            (async () => {
+                const { instanceId, pageId } = message.data;
+                if (!instanceId || !pageId) {
+                    sendResponse({ success: false, error: 'Missing instanceId or pageId' });
+                    return;
+                }
+                const visitResult = await packetUtils.markPageIdAsVisited(instanceId, pageId);
+
+                if (visitResult.success && visitResult.modified) {
+                    const updatedInstance = visitResult.instance || await storage.getPacketInstance(instanceId);
+                    if (updatedInstance) {
+                        sidebarHandler.notifySidebar('packet_instance_updated', { instance: updatedInstance, source: 'media_playback_complete' });
+                    }
+                    await checkAndPromptForCompletion('MessageHandler:media_playback_complete', visitResult, instanceId);
+                }
+                sendResponse({ success: visitResult.success, error: visitResult.error });
+            })();
+            isAsync = true;
+            break;
         case "open_content": handleOpenContent(message.data, sender, sendResponse); isAsync = true; break;
         case "get_context_for_tab": handleGetContextForTab(message.data, sender, sendResponse); isAsync = true; break;
         case "get_current_tab_context": handleGetCurrentTabContext(message.data, sender, sendResponse); isAsync = true; break;

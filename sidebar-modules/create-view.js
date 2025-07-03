@@ -3,7 +3,7 @@
 // by adding the current page or generating new pages from prompts.
 
 import { domRefs } from './dom-references.js';
-import { logger, storage, base64Decode, shouldUseTabGroups } from '../utils.js';
+import { logger, storage, base64Decode, shouldUseTabGroups, arrayBufferToBase64 } from '../utils.js';
 import { showConfirmDialog, showTitlePromptDialog } from './dialog-handler.js';
 
 // --- Module-specific State & Dependencies ---
@@ -77,6 +77,26 @@ export function setupCreateViewListeners() {
             }
         }
     });
+
+    const dropZone = document.getElementById('drop-zone');
+    if (dropZone) {
+        dropZone.addEventListener('dragenter', (e) => {
+            e.preventDefault();
+            dropZone.classList.add('drag-over');
+        });
+        dropZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            dropZone.classList.add('drag-over');
+        });
+        dropZone.addEventListener('dragleave', (e) => {
+            e.preventDefault();
+            dropZone.classList.remove('drag-over');
+        });
+        dropZone.addEventListener('drop', handleFileDrop);
+    }
+    
+    domRefs.addCurrentTabBtn?.addEventListener('click', handleAddCurrentPageToDraft);
+    domRefs.createNewPageBtn?.addEventListener('click', showMakePageDialog);
 }
 
 /**
@@ -148,7 +168,9 @@ async function cleanupDraftGroup() {
 function renderDraftContentList() {
     const listEl = domRefs.createViewContentList;
     if (!listEl) return;
-    listEl.innerHTML = '';
+
+    // Clear only the cards, not the entire container
+    listEl.querySelectorAll('.card').forEach(card => card.remove());
 
     const listFragment = document.createDocumentFragment();
 
@@ -172,28 +194,7 @@ function renderDraftContentList() {
         });
     }
 
-    const placeholder = document.createElement('div');
-    placeholder.className = 'placeholder-card';
-    const addPageBtn = document.createElement('button');
-    addPageBtn.className = 'sidebar-action-button';
-    addPageBtn.textContent = 'Add Current Tab';
-    addPageBtn.addEventListener('click', handleAddCurrentPageToDraft);
-    const makePageBtn = document.createElement('button');
-    makePageBtn.className = 'sidebar-action-button';
-    makePageBtn.textContent = 'Create New Page';
-    makePageBtn.addEventListener('click', showMakePageDialog);
-    storage.getActiveModelConfig().then(activeModelConfig => {
-        const llmReady = activeModelConfig && (activeModelConfig.providerType === 'chrome-ai-gemini-nano' || activeModelConfig.apiKey);
-        makePageBtn.disabled = !llmReady;
-        makePageBtn.title = llmReady ? "Generate a new page from a prompt" : "An active LLM must be configured in Settings.";
-    });
-    placeholder.innerHTML = `<p>Add a new page to your packet:</p>`;
-    const placeholderActions = document.createElement('div');
-    placeholderActions.className = 'placeholder-card-actions';
-    placeholderActions.append(addPageBtn, makePageBtn);
-    placeholder.appendChild(placeholderActions);
-    listFragment.appendChild(placeholder);
-    listEl.appendChild(listFragment);
+    listEl.prepend(listFragment);
 }
 
 function createDraftContentCard(contentItem, index) {
@@ -217,6 +218,9 @@ function createDraftContentCard(contentItem, index) {
     } else if (type === 'generated') {
         iconHTML = '📄';
         displayUrl = "Preview (Generated)";
+    } else if (type === 'media') {
+        iconHTML = '🎵';
+        displayUrl = "Media File";
     }
 
     card.title = `Click to open or focus tab: ${title}`;
@@ -309,7 +313,7 @@ async function handleSaveDraftPacket() {
 }
 
 async function handleAddCurrentPageToDraft() {
-    const btn = document.getElementById('create-view-add-page-btn');
+    const btn = document.getElementById('add-current-tab-btn');
     if (btn) btn.disabled = true;
     showRootViewStatus('Fetching page details...', 'info', false);
 
@@ -463,4 +467,28 @@ async function handleDrop(e) {
 function handleDragEnd(e) {
     document.querySelectorAll('.dragging').forEach(el => el.classList.remove('dragging'));
     draggedItemIndex = null;
+}
+
+function handleFileDrop(e) {
+    e.preventDefault();
+    const dropZone = document.getElementById('drop-zone');
+    dropZone.classList.remove('drag-over');
+
+    if (e.dataTransfer.files) {
+        for (const file of e.dataTransfer.files) {
+            const reader = new FileReader();
+            reader.onload = (event) => {
+                const newMediaItem = {
+                    type: 'media',
+                    pageId: `media_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+                    title: file.name,
+                    mimeType: file.type,
+                    contentB64: arrayBufferToBase64(event.target.result),
+                };
+                draftPacket.sourceContent.push(newMediaItem);
+                renderDraftContentList();
+            };
+            reader.readAsArrayBuffer(file);
+        }
+    }
 }

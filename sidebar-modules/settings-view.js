@@ -110,6 +110,17 @@ export function setupSettingsListeners() {
     });
     s.llmHelpLink?.addEventListener('click', (e) => { e.preventDefault(); openHelpPage('llm_help.html'); });
     s.s3HelpLink?.addEventListener('click', (e) => { e.preventDefault(); openHelpPage('s3_help.html'); });
+    
+    // ElevenLabs API Key
+    const elevenLabsApiKeyInput = document.getElementById('elevenlabs-api-key');
+    const toggleElevenlabsApiKeyVisibilityBtn = document.getElementById('toggle-elevenlabs-api-key-visibility');
+
+    if (elevenLabsApiKeyInput) {
+        elevenLabsApiKeyInput.addEventListener('change', requestSave);
+    }
+    if (toggleElevenlabsApiKeyVisibilityBtn) {
+        toggleElevenlabsApiKeyVisibilityBtn.addEventListener('click', () => toggleVisibility(elevenLabsApiKeyInput, toggleElevenlabsApiKeyVisibilityBtn));
+    }
 }
 
 /**
@@ -161,6 +172,11 @@ async function loadSettings() {
         if (domRefs.themeAutoRadio) domRefs.themeAutoRadio.checked = theme === 'auto';
         if (domRefs.themeLightRadio) domRefs.themeLightRadio.checked = theme === 'light';
         if (domRefs.themeDarkRadio) domRefs.themeDarkRadio.checked = theme === 'dark';
+        
+        const elevenLabsApiKeyInput = document.getElementById('elevenlabs-api-key');
+        if (elevenLabsApiKeyInput) {
+            elevenLabsApiKeyInput.value = loadedSettings.elevenlabsApiKey || '';
+        }
 
     } catch (error) {
         logger.error('SettingsView', 'Error loading settings into UI:', error);
@@ -246,7 +262,8 @@ async function gatherAndSaveSettings() {
             themePreference: domRefs.themeLightRadio.checked ? 'light' : (domRefs.themeDarkRadio.checked ? 'dark' : 'auto'),
             tabGroupsEnabled: domRefs.tabGroupsEnabledCheckbox.checked,
             confettiEnabled: domRefs.confettiEnabledCheckbox.checked,
-            visitThresholdSeconds: visitThreshold
+            visitThresholdSeconds: visitThreshold,
+            elevenlabsApiKey: document.getElementById('elevenlabs-api-key').value.trim()
         };
         await storage.saveSettings(settingsToSave);
         showSettingsStatus('Settings saved.', 'success');

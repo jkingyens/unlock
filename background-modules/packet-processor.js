@@ -10,7 +10,7 @@ import {
     indexedDbStorage,
     shouldUseTabGroups,
     CONFIG,
-    base64Encode,
+    arrayBufferToBase64,
     base64Decode,
     MPI_PARAMS
 } from '../utils.js';
@@ -18,6 +18,7 @@ import llmService from '../llm_service.js';
 import cloudStorage from '../cloud-storage.js';
 import * as tabGroupHandler from './tab-group-handler.js';
 import * as ruleManager from './rule-manager.js';
+import ttsService from '../tts_service.js';
 
 // --- Offscreen Document Management ---
 let creatingOffscreenDocument; // A Promise that resolves when the offscreen document is created
@@ -136,7 +137,7 @@ ul, ol { padding-left: 1.5em; margin-bottom: 1.2em; } li { margin-bottom: 0.5em;
 .question-text { font-size: 1.1em; font-weight: bold; margin-bottom: 15px; color: var(--quiz-question-text); }
 .options-list { list-style: none; padding: 0; } .options-list li { margin-bottom: 10px; padding: 10px; border: 1px solid var(--quiz-option-border); border-radius: 4px; background-color: var(--quiz-option-bg); cursor: pointer; transition: background-color 0.2s, border-color 0.2s; }
 .options-list li:hover { border-color: var(--generated-text-accent); background-color: var(--generated-bg-primary); }
-.options-list input[type="radio"] { margin-right: 10px; accent-color: var(--generated-text-accent); }
+.options-list input[type="radio"] { margin-right: 10px; accent-color: var(--text-accent); }
 .feedback-area { margin-top: 10px; padding: 8px; border-radius: 4px; font-size: 0.9em; }
 .feedback-area.correct { background-color: var(--quiz-feedback-correct-bg); color: var(--quiz-feedback-correct-text); border: 1px solid var(--quiz-feedback-correct-text); }
 .feedback-area.incorrect { background-color: var(--fce8e6); color: var(--quiz-feedback-incorrect-text); border: 1px solid var(--quiz-feedback-incorrect-text); }
@@ -190,7 +191,7 @@ export async function processGenerateCustomPageRequest(data) {
         const finalHtml = modificationResult.data || initialHtml;
         
         // --- Finalize and package the result ---
-        const contentB64 = base64Encode(finalHtml);
+        const contentB64 = arrayBufferToBase64(new TextEncoder().encode(finalHtml));
         const titleMatch = finalHtml.match(/<title[^>]*>([^<]+)<\/title>/i);
         const pageTitle = titleMatch ? titleMatch[1] : (prompt.substring(0, 50) + (prompt.length > 50 ? '...' : ''));
 
@@ -266,7 +267,7 @@ export async function processCreatePacketRequestFromTab(initiatorTabId) {
         logger.log('PacketProcessor:FromTab', 'LLM analysis complete', { topic: topic });
         sendStencilProgressNotification(imageId, 'analyze', 'completed', 'Topic identified', 20, topic);
 
-        // Step 3: Find related articles
+        // Step 3: Find related articles and media
         sendStencilProgressNotification(imageId, 'articles', 'active', 'Finding articles...', 25, topic);
         const externalContentResponse = await llmService.callLLM('article_suggestions', { topic: topic, contentSummary: analysisResult.contentSummary });
         if (!externalContentResponse.success || !externalContentResponse.data?.contents) {
@@ -279,30 +280,85 @@ export async function processCreatePacketRequestFromTab(initiatorTabId) {
         if (validatedExternalLinks.length === 0) {
             logger.warn('PacketProcessor:FromTab', `LLM returned no valid Wikipedia articles for "${topic}". Packet will be created without them.`);
         }
-        sendStencilProgressNotification(imageId, 'articles', 'completed', `Found ${validatedExternalLinks.length} articles`, 40, topic);
+
+        sendStencilProgressNotification(imageId, 'media', 'active', 'Finding media...', 35, topic);
+        const mediaResponse = await llmService.callLLM('extract_media', { htmlContent: pageTextContent });
+        let mediaContentItems = [];
+        if (mediaResponse.success && Array.isArray(mediaResponse.data?.media)) {
+            const pageUrl = new URL(tab.url); // The base URL of the page
+
+            for (const media of mediaResponse.data.media) {
+                if (media.url && media.title) {
+                    let absoluteUrl;
+                    try {
+                        // Create a new URL object, which will handle both absolute and relative URLs
+                        absoluteUrl = new URL(media.url, pageUrl.href).href;
+                    } catch (e) {
+                        logger.warn('PacketProcessor:FromTab', `Could not create a valid URL for media: "${media.url}"`, e);
+                        continue; // Skip this media item if the URL is invalid
+                    }
+
+                    const mediaHtml = `<h1>${media.title}</h1><p><a href="${absoluteUrl}" target="_blank" rel="noopener noreferrer">View media</a></p>`;
+                    const enhancedMediaHtml = enhanceHtml(mediaHtml, topic, media.title);
+                    mediaContentItems.push({
+                        type: 'generated',
+                        pageId: `media_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+                        title: media.title,
+                        contentType: 'text/html',
+                        contentB64: arrayBufferToBase64(new TextEncoder().encode(enhancedMediaHtml))
+                    });
+                }
+            }
+        }
+        sendStencilProgressNotification(imageId, 'articles_media', 'completed', `Found ${validatedExternalLinks.length} articles and ${mediaContentItems.length} media files`, 40, topic);
+
         
         // Step 4: Generate summary and quiz
         const summaryPageDef = { type: "generated", pageId: "summary-page", title: `${topic} Summary`, contentType: "text/html" };
         const quizPageDef = { type: "generated", pageId: "quiz-page", title: `${topic} Quiz`, contentType: "text/html", interactionBasedCompletion: true };
         
-        const contentForSummaryPrompt = [sourcePageContentItem, ...validatedExternalLinks, quizPageDef];
+        const contentForSummaryPrompt = [sourcePageContentItem, ...validatedExternalLinks, ...mediaContentItems, quizPageDef];
 
         sendStencilProgressNotification(imageId, 'generate_summary', 'active', 'Generating summary...', 50, topic);
-        const summaryResponse = await llmService.callLLM('summary_page', { topic: topic, allPacketContents: contentForSummaryPrompt });
+        let summaryResponse = await llmService.callLLM('summary_page', { topic: topic, allPacketContents: contentForSummaryPrompt });
         if (!summaryResponse.success || !summaryResponse.data) throw new Error(summaryResponse.error || 'LLM failed to generate summary.');
-        const summaryHtmlBody = await processHtmlViaOffscreen(String(summaryResponse.data).trim(), imageId);
-        summaryPageDef.contentB64 = base64Encode(enhanceHtml(summaryHtmlBody, topic, summaryPageDef.title));
+        
+        // Generate audio for the summary
+        const summaryTextForTTS = await getAndParseHtml(summaryResponse.data);
+        const ttsResponse = await ttsService.textToSpeech(summaryTextForTTS);
+        let summaryHtmlBody = await processHtmlViaOffscreen(String(summaryResponse.data).trim(), imageId);
+        
+        if (ttsResponse.success) {
+            const audioFileName = `audio/summary-audio-${Date.now()}.mp3`;
+            const uploadResult = await cloudStorage.uploadFile(audioFileName, ttsResponse.audioBlob, 'audio/mpeg', 'private');
+            if (uploadResult.success) {
+                const audioUrl = await cloudStorage.generatePresignedGetUrl(uploadResult.fileName, 3600, {
+                    storageConfigId: (await storage.getActiveCloudStorageConfig()).id,
+                    provider: (await storage.getActiveCloudStorageConfig()).provider,
+                    region: (await storage.getActiveCloudStorageConfig()).region,
+                    bucket: (await storage.getActiveCloudStorageConfig()).bucket
+                });
+                const audioPlayerHtml = `<audio controls src="${audioUrl}">Your browser does not support the audio element.</audio>`;
+                summaryHtmlBody = audioPlayerHtml + summaryHtmlBody;
+            } else {
+                logger.warn('PacketProcessor:FromTab', 'Failed to upload generated audio to S3.', uploadResult.error);
+            }
+        } else {
+            logger.warn('PacketProcessor:FromTab', 'Failed to generate audio from ElevenLabs.', ttsResponse.error);
+        }
+
+        summaryPageDef.contentB64 = arrayBufferToBase64(new TextEncoder().encode(enhanceHtml(summaryHtmlBody, topic, summaryPageDef.title)));
         sendStencilProgressNotification(imageId, 'generate_summary', 'completed', 'Summary generated', 70, topic);
 
         sendStencilProgressNotification(imageId, 'generate_quiz', 'active', 'Generating quiz...', 75, topic);
         const quizResponse = await llmService.callLLM('quiz_page', { topic: topic, articlesData: validatedExternalLinks });
         if (!quizResponse.success || !quizResponse.data) throw new Error(quizResponse.error || 'LLM failed to generate quiz.');
         const quizHtmlBody = await processHtmlViaOffscreen(String(quizResponse.data).trim(), imageId);
-        quizPageDef.contentB64 = base64Encode(enhanceHtml(quizHtmlBody, topic, quizPageDef.title));
+        quizPageDef.contentB64 = arrayBufferToBase64(new TextEncoder().encode(enhanceHtml(quizHtmlBody, topic, quizPageDef.title)));
         sendStencilProgressNotification(imageId, 'generate_quiz', 'completed', 'Quiz generated', 90, topic);
 
         // Step 5: Assemble and save PacketImage, with the source page first.
-        const finalSourceContent = [sourcePageContentItem, summaryPageDef, ...validatedExternalLinks, quizPageDef];
+        const finalSourceContent = [sourcePageContentItem, summaryPageDef, ...validatedExternalLinks, ...mediaContentItems, quizPageDef];
         const packetImage = { id: imageId, topic: topic, created: new Date().toISOString(), sourceContent: finalSourceContent };
         
         await storage.savePacketImage(packetImage);
@@ -361,7 +417,7 @@ export async function processCreatePacketRequest(data, initiatorTabId) {
         if (!summaryResponse.success || !summaryResponse.data) throw new Error(summaryResponse.error || 'LLM failed to generate summary.');
         const summaryHtmlBody = await processHtmlViaOffscreen(String(summaryResponse.data).trim(), imageId);
         const finalSummaryHtml = enhanceHtml(summaryHtmlBody, topic, summaryPageDef.title);
-        summaryPageDef.contentB64 = base64Encode(finalSummaryHtml);
+        summaryPageDef.contentB64 = arrayBufferToBase64(new TextEncoder().encode(finalSummaryHtml));
         sendStencilProgressNotification(imageId, 'generate_summary', 'completed', 'Summary generated', 60);
 
         sendStencilProgressNotification(imageId, 'generate_quiz', 'active', 'Generating quiz...', 65);
@@ -369,7 +425,7 @@ export async function processCreatePacketRequest(data, initiatorTabId) {
         if (!quizResponse.success || !quizResponse.data) throw new Error(quizResponse.error || 'LLM failed to generate quiz.');
         const quizHtmlBody = await processHtmlViaOffscreen(String(quizResponse.data).trim(), imageId);
         const finalQuizHtml = enhanceHtml(quizHtmlBody, topic, quizPageDef.title);
-        quizPageDef.contentB64 = base64Encode(finalQuizHtml);
+        quizPageDef.contentB64 = arrayBufferToBase64(new TextEncoder().encode(finalQuizHtml));
         sendStencilProgressNotification(imageId, 'generate_quiz', 'completed', 'Quiz generated', 85);
 
         // 3. Assemble the final PacketImage with embedded content
@@ -406,7 +462,7 @@ export async function instantiatePacket(imageId, preGeneratedInstanceId, initiat
         const packetImage = await storage.getPacketImage(imageId);
         if (!packetImage) throw new Error(`Packet Image ${imageId} not found.`);
 
-        const hasGeneratedContent = packetImage.sourceContent.some(item => item.type === 'generated');
+        const hasGeneratedContent = packetImage.sourceContent.some(item => item.type === 'generated' || item.type === 'media');
         let activeCloudConfig = null;
 
         if (hasGeneratedContent) {
@@ -437,7 +493,6 @@ export async function instantiatePacket(imageId, preGeneratedInstanceId, initiat
             let instanceItem = { ...sourceItem };
 
             if (instanceItem.type === 'generated') {
-                // This block will only be entered if hasGeneratedContent was true
                 const { pageId, contentB64, contentType } = instanceItem;
                 if (!contentB64) {
                     logger.warn('PacketProcessor:instantiate', `Generated item ${pageId} is missing Base64 content. Cannot publish.`);
@@ -445,7 +500,7 @@ export async function instantiatePacket(imageId, preGeneratedInstanceId, initiat
                     instanceItem.url = null;
                 } else {
                     const decodedContent = base64Decode(contentB64);
-                    const filesToUpload = [{ name: 'index.html', content: decodedContent, contentType }];
+                    const filesToUpload = [{ name: 'index.html', content: new TextDecoder().decode(decodedContent), contentType }];
                     
                     await indexedDbStorage.saveGeneratedContent(imageId, pageId, filesToUpload);
 
@@ -461,6 +516,31 @@ export async function instantiatePacket(imageId, preGeneratedInstanceId, initiat
                         };
                     } else {
                         throw new Error(`Failed to publish ${pageId}: ${uploadResult.error}`);
+                    }
+                }
+                delete instanceItem.contentB64;
+            } else if (instanceItem.type === 'media') {
+                const { pageId, contentB64, mimeType, title } = instanceItem;
+                if (!contentB64) {
+                    logger.warn('PacketProcessor:instantiate', `Media item ${pageId} is missing Base64 content. Cannot publish.`);
+                    instanceItem.published = false;
+                    instanceItem.url = null;
+                } else {
+                    const decodedContent = base64Decode(contentB64);
+                    const filePath = `packets/${instanceId}/${pageId}/${title}`;
+                    await indexedDbStorage.saveGeneratedContent(imageId, pageId, [{ name: title, content: decodedContent, contentType: mimeType }]);
+                    const uploadResult = await cloudStorage.uploadFile(filePath, decodedContent, mimeType, 'private');
+                    if (uploadResult.success) {
+                        instanceItem.url = uploadResult.fileName;
+                        instanceItem.published = true;
+                        instanceItem.publishContext = {
+                            storageConfigId: activeCloudConfig.id,
+                            provider: activeCloudConfig.provider,
+                            region: activeCloudConfig.region,
+                            bucket: activeCloudConfig.bucket
+                        };
+                    } else {
+                        throw new Error(`Failed to publish media ${title}: ${uploadResult.error}`);
                     }
                 }
                 delete instanceItem.contentB64;
@@ -577,7 +657,7 @@ export async function processRepublishRequest(data, initiatorTabId = null) {
         }
 
         const decodedContent = base64Decode(sourceContentItem.contentB64);
-        const filesToUpload = [{ name: 'index.html', content: decodedContent, contentType: sourceContentItem.contentType || 'text/html' }];
+        const filesToUpload = [{ name: 'index.html', content: new TextDecoder().decode(decodedContent), contentType: sourceContentItem.contentType || 'text/html' }];
 
         if (!(await cloudStorage.initialize())) {
              throw new Error("Cloud storage not initialized. Cannot republish.");

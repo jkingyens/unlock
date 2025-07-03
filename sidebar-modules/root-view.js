@@ -585,9 +585,9 @@ function insertRowSorted(row, listElement) {
     if (!inserted) listElement.appendChild(row);
 }
 
-export function calculateInstanceProgress(instance) {
+export function calculateInstanceProgress(instance, mediaProgress = {}) {
     if (!instance || !Array.isArray(instance.contents)) return { visitedCount: 0, totalCount: 0, progressPercentage: 0 };
-    const trackableItems = instance.contents.filter(item => (item.type === 'external' && item.url) || (item.type === 'generated' && item.pageId));
+    const trackableItems = instance.contents.filter(item => (item.type === 'external' && item.url) || ((item.type === 'generated' || item.type === 'media') && item.pageId));
     const totalCount = trackableItems.length;
     if (totalCount === 0) return { visitedCount: 0, totalCount: 0, progressPercentage: 0 };
     
@@ -596,8 +596,15 @@ export function calculateInstanceProgress(instance) {
     let visitedCount = 0;
     
     trackableItems.forEach(item => {
-        if (item.type === 'generated' && item.pageId && visitedGeneratedIds.has(item.pageId)) visitedCount++;
-        else if (item.type === 'external' && item.url && visitedUrlsSet.has(item.url)) visitedCount++;
+        if ((item.type === 'generated' || item.type === 'media') && item.pageId) {
+            if (visitedGeneratedIds.has(item.pageId)) {
+                visitedCount++;
+            } else if (mediaProgress[item.pageId]) {
+                visitedCount += mediaProgress[item.pageId];
+            }
+        } else if (item.type === 'external' && item.url && visitedUrlsSet.has(item.url)) {
+            visitedCount++;
+        }
     });
     
     return {
