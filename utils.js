@@ -92,7 +92,8 @@ const CONFIG = {
     themePreference: 'auto',
     confettiEnabled: true,
     tabGroupsEnabled: true,
-    visitThresholdSeconds: 5
+    visitThresholdSeconds: 5,
+    elevenlabsApiKey: ''
   },
   INDEXED_DB: {
     NAME: 'UnlockDB', VERSION: 1, STORE_GENERATED_CONTENT: 'generatedContent'
@@ -507,7 +508,7 @@ const packetUtils = {
     if (!instance || !Array.isArray(instance.contents)) return false;
     const trackableItems = instance.contents.filter(item =>
         (item.type === 'external' && item.url) ||
-        (item.type === 'generated' && item.pageId)
+        ((item.type === 'generated' || item.type === 'media') && item.pageId)
     );
     const totalCount = trackableItems.length;
     if (totalCount === 0) return false;
@@ -515,7 +516,7 @@ const packetUtils = {
     const visitedGeneratedIdsSet = new Set(instance.visitedGeneratedPageIds || []);
     let visitedCount = 0;
     trackableItems.forEach(item => {
-        if (item.type === 'generated' && item.pageId && visitedGeneratedIdsSet.has(item.pageId)) {
+        if ((item.type === 'generated' || item.type === 'media') && item.pageId && visitedGeneratedIdsSet.has(item.pageId)) {
             visitedCount++;
         } else if (item.type === 'external' && item.url && visitedUrlsSet.has(item.url)) {
             visitedCount++;
@@ -539,7 +540,7 @@ const packetUtils = {
             if (urlToCompare === itemCanonicalReference) {
                 return options.returnItem ? item : true;
             }
-        } else if (item.type === 'generated') {
+        } else if (item.type === 'generated' || item.type === 'media') {
             try {
                 const loadedUrlObj = new URL(urlToCompare);
                 const { publishContext } = item;
@@ -589,7 +590,7 @@ const packetUtils = {
         if (foundItem) {
              isTrackable = true;
              pageIdToMark = foundItem.pageId;
-             if (foundItem.type === 'generated' && pageIdToMark) {
+             if ((foundItem.type === 'generated' || foundItem.type === 'media') && pageIdToMark) {
                  isGenerated = true;
                  alreadyVisited = (instance.visitedGeneratedPageIds || []).includes(pageIdToMark);
              } else if (foundItem.type === 'external') {
@@ -718,8 +719,30 @@ async function applyThemeMode() { try { const settings = await storage.getSettin
 
 async function shouldUseTabGroups() { if (!isTabGroupsAvailable()) return false; try { const settings = await storage.getSettings(); return typeof settings.tabGroupsEnabled === 'boolean' ? settings.tabGroupsEnabled : true; } catch (error) { logger.error('Utils:shouldUseTabGroups', 'Error getting settings, defaulting to false', error); return false; } }
 
-function base64Encode(str) { try { const bytes = new TextEncoder().encode(str); const binaryString = String.fromCharCode(...bytes); return btoa(binaryString); } catch (error) { logger.error('Utils:base64Encode', 'Error encoding string', error); return null; } }
-function base64Decode(base64) { try { const binaryString = atob(base64); const bytes = Uint8Array.from(binaryString, c => c.charCodeAt(0)); return new TextDecoder().decode(bytes); } catch (error) { logger.error('Utils:base64Decode', 'Error decoding base64', error); return null; } }
+function arrayBufferToBase64(buffer) {
+    let binary = '';
+    const bytes = new Uint8Array(buffer);
+    const len = bytes.byteLength;
+    for (let i = 0; i < len; i++) {
+        binary += String.fromCharCode(bytes[i]);
+    }
+    return window.btoa(binary);
+}
+
+function base64Decode(base64) {
+    try {
+        const binaryString = atob(base64);
+        const len = binaryString.length;
+        const bytes = new Uint8Array(len);
+        for (let i = 0; i < len; i++) {
+            bytes[i] = binaryString.charCodeAt(i);
+        }
+        return bytes.buffer;
+    } catch (error) {
+        logger.error('Utils:base64Decode', 'Error decoding base64', error);
+        return null;
+    }
+}
 
 
 export {
@@ -736,6 +759,7 @@ export {
   applyThemeMode,
   getDb,
   shouldUseTabGroups,
-  base64Encode,
-  base64Decode
+  arrayBufferToBase64,
+  base64Decode,
+  arrayBufferToBase64 as base64Encode,
 };

@@ -48,6 +48,9 @@ export function cacheDomReferences() {
         createViewContentList: document.getElementById('create-view-content-list'),
         createViewDiscardBtn: document.getElementById('create-view-discard-btn'),
         createViewSaveBtn: document.getElementById('create-view-save-btn'),
+        dropZone: document.getElementById('drop-zone'),
+        addCurrentTabBtn: document.getElementById('add-current-tab-btn'),
+        createNewPageBtn: document.getElementById('create-new-page-btn'),
         
         // Generate New Page Dialog Refs
         makePageDialog: document.getElementById('make-page-dialog'),

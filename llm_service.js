@@ -122,11 +122,15 @@ function _parseJsonArticleResponse(contentStr, providerNameForLog) {
         if (parsedJson.topic && parsedJson.contentSummary) { // For extract_topic_from_html
             return parsedJson;
         }
-        if (!parsedJson || !Array.isArray(parsedJson.contents)) {
-            logger.error(`LLMService:_parseJsonArticleResponse[${providerNameForLog}]`, `Parsed JSON for articles does not contain the expected "contents" array.`, parsedJson);
-            throw new Error(`Parsed JSON for articles is not in the expected format (missing "contents" array).`);
+        // MODIFICATION START: Make the check more flexible
+        if (parsedJson && (Array.isArray(parsedJson.contents) || Array.isArray(parsedJson.podcasts) || Array.isArray(parsedJson.media))) {
+            return parsedJson;
         }
-        return parsedJson;
+        // MODIFICATION END
+
+        logger.error(`LLMService:_parseJsonArticleResponse[${providerNameForLog}]`, `Parsed JSON does not contain the expected "contents", "podcasts", or "media" array.`, parsedJson);
+        throw new Error(`Parsed JSON is not in the expected format (missing "contents", "podcasts", or "media" array).`);
+
     } catch (parseError) {
         logger.error(`LLMService:_parseJsonArticleResponse[${providerNameForLog}]`, `Failed to parse JSON. Content that caused error (first 500 chars): "${contentStr.substring(0,500)}"`, { parseError });
         throw new Error(`Invalid JSON response format from ${providerNameForLog} for articles: ${parseError.message}`);
@@ -306,6 +310,23 @@ ${htmlContent}
     return { systemPrompt, userPrompt };
 }
 
+function getMediaPromptText(context) {
+    const { htmlContent } = context;
+    const systemPrompt = `You are an expert at finding direct links to media files within HTML content.
+Your response MUST be a single, valid JSON object.
+This JSON object MUST have a single top-level key named "media".
+The value of "media" MUST be an array of objects, where each object has two keys:
+- "url": The value of the src attribute of the media tag, even if it is a relative path.
+- "title": A suitable title for the media, derived from the surrounding text.
+If no media files are found, return an empty array for the "media" value.
+Do NOT include any introductory text, apologies, or markdown formatting like \`\`\`json around your JSON output.`;
+    const userPrompt = `Analyze the following webpage content and extract all media links in the specified JSON format.
+Page Content:
+---
+${htmlContent.substring(0, 15000)}
+---`;
+    return { systemPrompt, userPrompt };
+}
 
 const llmService = {
     prepareOpenAIPayload(promptType, context, activeModelConfig) {
@@ -319,6 +340,10 @@ const llmService = {
             maxTokensForTask = 1024;
         } else if (promptType === 'article_suggestions') {
             ({ systemPrompt, userPrompt } = getArticlePromptText(context));
+            responseFormat = { type: "json_object" };
+            maxTokensForTask = 2048;
+        } else if (promptType === 'extract_media') {
+            ({ systemPrompt, userPrompt } = getMediaPromptText(context));
             responseFormat = { type: "json_object" };
             maxTokensForTask = 2048;
         } else if (promptType === 'summary_page' || promptType === 'quiz_page') {
@@ -347,7 +372,7 @@ const llmService = {
         if (promptType === 'custom_page' || promptType === 'modify_html_for_completion') {
             return _cleanFullHtmlOutput(contentStr);
         }
-        if (promptType === 'article_suggestions' || promptType === 'extract_topic_from_html') {
+        if (promptType === 'article_suggestions' || promptType === 'extract_topic_from_html' || promptType === 'extract_media') {
             return _parseJsonArticleResponse(contentStr, `OpenAI (${responseData.model || ''})`);
         }
         if (promptType === 'summary_page' || promptType === 'quiz_page') {
@@ -367,6 +392,9 @@ const llmService = {
         } else if (promptType === 'article_suggestions') {
             ({ systemPrompt, userPrompt } = getArticlePromptText(context));
             responseMimeType = "application/json"; 
+        } else if (promptType === 'extract_media') {
+            ({ systemPrompt, userPrompt } = getMediaPromptText(context));
+            responseMimeType = "application/json";
         } else if (promptType === 'summary_page') {
             ({ systemPrompt, userPrompt } = getSummaryPromptText(context));
         } else if (promptType === 'quiz_page') {
@@ -400,7 +428,7 @@ const llmService = {
         if (promptType === 'custom_page' || promptType === 'modify_html_for_completion') {
             return _cleanFullHtmlOutput(contentStr);
         }
-        if (promptType === 'article_suggestions' || promptType === 'extract_topic_from_html') return _parseJsonArticleResponse(contentStr, `Gemini (${responseData.model || ''})`);
+        if (promptType === 'article_suggestions' || promptType === 'extract_topic_from_html' || promptType === 'extract_media') return _parseJsonArticleResponse(contentStr, `Gemini (${responseData.model || ''})`);
         else if (promptType === 'summary_page' || promptType === 'quiz_page') return _cleanHtmlOutput(contentStr);
         else throw new Error(`Invalid promptType for Gemini parsing: ${promptType}`);
     },
@@ -411,6 +439,9 @@ const llmService = {
             userPrompt += "\n\nIMPORTANT: Your entire response MUST be only the valid JSON object as described, without any surrounding text or markdown.";
         } else if (promptType === 'article_suggestions') {
             ({ systemPrompt, userPrompt } = getArticlePromptText(context));
+            userPrompt += "\n\nIMPORTANT: Your entire response MUST be only the valid JSON object as described, without any surrounding text or markdown.";
+        } else if (promptType === 'extract_media') {
+            ({ systemPrompt, userPrompt } = getMediaPromptText(context));
             userPrompt += "\n\nIMPORTANT: Your entire response MUST be only the valid JSON object as described, without any surrounding text or markdown.";
         } else if (promptType === 'summary_page') {
             ({ systemPrompt, userPrompt } = getSummaryPromptText(context));
@@ -428,7 +459,7 @@ const llmService = {
         if (promptType === 'custom_page' || promptType === 'modify_html_for_completion') {
             return _cleanFullHtmlOutput(responseString);
         }
-        if (promptType === 'article_suggestions' || promptType === 'extract_topic_from_html') return _parseJsonArticleResponse(responseString, 'ChromeAI-Nano');
+        if (promptType === 'article_suggestions' || promptType === 'extract_topic_from_html' || promptType === 'extract_media') return _parseJsonArticleResponse(responseString, 'ChromeAI-Nano');
         else if (promptType === 'summary_page' || promptType === 'quiz_page') return _cleanHtmlOutput(responseString);
         else throw new Error(`Invalid promptType for Chrome AI parsing: ${promptType}`);
     },
@@ -449,6 +480,11 @@ const llmService = {
             maxTokensForTask = 1024;
         } else if (promptType === 'article_suggestions') {
             const { systemPrompt, userPrompt } = getArticlePromptText(context);
+            systemPromptText = systemPrompt;
+            userMessages = [{role: "user", content: userPrompt }];
+            maxTokensForTask = 2048;
+        } else if (promptType === 'extract_media') {
+            const { systemPrompt, userPrompt } = getMediaPromptText(context);
             systemPromptText = systemPrompt;
             userMessages = [{role: "user", content: userPrompt }];
             maxTokensForTask = 2048;
@@ -500,7 +536,7 @@ const llmService = {
         if (promptType === 'custom_page' || promptType === 'modify_html_for_completion') {
             return _cleanFullHtmlOutput(contentStr);
         }
-        if (promptType === 'article_suggestions' || promptType === 'extract_topic_from_html') return _parseJsonArticleResponse(contentStr, `Anthropic (${responseData.model || ''})`);
+        if (promptType === 'article_suggestions' || promptType === 'extract_topic_from_html' || promptType === 'extract_media') return _parseJsonArticleResponse(contentStr, `Anthropic (${responseData.model || ''})`);
         else if (promptType === 'summary_page' || promptType === 'quiz_page') return _cleanHtmlOutput(contentStr);
         else throw new Error(`Invalid promptType for Anthropic parsing: ${promptType}`);
     },

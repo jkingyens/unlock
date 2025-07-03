@@ -312,6 +312,27 @@ body.dark-mode #detail-action-button-container button:hover { background-color: 
   cursor: not-allowed;
 }
 
+.media-player-button {
+    background: conic-gradient(var(--packet-color-accent, var(--text-accent)) calc(var(--p, 0) * 1%), var(--bg-tertiary) 0);
+    border-radius: 50%;
+    width: 30px;
+    height: 30px;
+    cursor: pointer;
+    font-size: 1.2em;
+    color: var(--text-accent);
+    display: grid;
+    place-items: center;
+}
+
+.media-player-button::before {
+    content: "";
+    width: 80%;
+    height: 80%;
+    background-color: var(--bg-secondary);
+    border-radius: 50%;
+}
+
+
 /* === Settings View (#settings-view) === */
 #settings-view { padding: 10px 15px; overflow-y: auto; flex-grow: 1; }
 #settings-view h3 { margin-top: 15px; margin-bottom: 10px; font-size: 1.1em; color: var(--text-secondary); border-bottom: 1px solid var(--border-secondary); padding-bottom: 5px; overflow: visible;}

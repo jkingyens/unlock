@@ -194,7 +194,13 @@
 
     <div id="create-view" class="view-container hidden" style="display: flex; flex-direction: column;">
         <div id="create-view-content-list" style="flex-grow: 1; overflow-y: auto; padding: 15px;">
-            <p class="empty-state">Add pages to your packet.</p>
+            <div id="drop-zone" class="placeholder-card">
+                <p>Drag & Drop Media Files Here</p>
+                <div class="placeholder-card-actions">
+                    <button id="add-current-tab-btn" class="sidebar-action-button">Add Current Tab</button>
+                    <button id="create-new-page-btn" class="sidebar-action-button">Create New Page</button>
+                </div>
+            </div>
         </div>
         <div id="create-view-actions" class="create-view-actions-bar">
         <button id="create-view-discard-btn" class="sidebar-action-button tertiary">Discard</button>
@@ -307,6 +313,15 @@
           <button id="s3-edit-form-save-btn" class="sidebar-action-button" style="background-color: var(--button-primary-bg); color: var(--text-on-primary-button);">Save Configuration</button>
         </div>
       </div>
+      <div class="section-divider"></div>
+        <h3>ElevenLabs Credentials</h3>
+        <div class="form-group">
+            <label for="elevenlabs-api-key">API Key</label>
+            <div class="input-wrapper">
+                <input type="password" id="elevenlabs-api-key" placeholder="Enter ElevenLabs API Key">
+                <span class="eye-icon" id="toggle-elevenlabs-api-key-visibility">Show</span>
+            </div>
+        </div>
       <div class="section-divider"></div>
       <h3>Features</h3>
       <div class="form-group">
