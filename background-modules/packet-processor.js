@@ -12,7 +12,8 @@ import {
     CONFIG,
     arrayBufferToBase64,
     base64Decode,
-    MPI_PARAMS
+    MPI_PARAMS,
+    sanitizeForFileName
 } from '../utils.js';
 import llmService from '../llm_service.js';
 import cloudStorage from '../cloud-storage.js';
@@ -316,6 +317,7 @@ export async function processCreatePacketRequestFromTab(initiatorTabId) {
         // Step 4: Generate summary and quiz
         const summaryPageDef = { type: "generated", pageId: "summary-page", title: `${topic} Summary`, contentType: "text/html" };
         const quizPageDef = { type: "generated", pageId: "quiz-page", title: `${topic} Quiz`, contentType: "text/html", interactionBasedCompletion: true };
+        let audioMediaItem = null;
         
         const contentForSummaryPrompt = [sourcePageContentItem, ...validatedExternalLinks, ...mediaContentItems, quizPageDef];
 
@@ -329,20 +331,19 @@ export async function processCreatePacketRequestFromTab(initiatorTabId) {
         let summaryHtmlBody = await processHtmlViaOffscreen(String(summaryResponse.data).trim(), imageId);
         
         if (ttsResponse.success) {
-            const audioFileName = `audio/summary-audio-${Date.now()}.mp3`;
-            const uploadResult = await cloudStorage.uploadFile(audioFileName, ttsResponse.audioBlob, 'audio/mpeg', 'private');
-            if (uploadResult.success) {
-                const audioUrl = await cloudStorage.generatePresignedGetUrl(uploadResult.fileName, 3600, {
-                    storageConfigId: (await storage.getActiveCloudStorageConfig()).id,
-                    provider: (await storage.getActiveCloudStorageConfig()).provider,
-                    region: (await storage.getActiveCloudStorageConfig()).region,
-                    bucket: (await storage.getActiveCloudStorageConfig()).bucket
-                });
-                const audioPlayerHtml = `<audio controls src="${audioUrl}">Your browser does not support the audio element.</audio>`;
-                summaryHtmlBody = audioPlayerHtml + summaryHtmlBody;
-            } else {
-                logger.warn('PacketProcessor:FromTab', 'Failed to upload generated audio to S3.', uploadResult.error);
-            }
+            const audioBuffer = await ttsResponse.audioBlob.arrayBuffer();
+            audioMediaItem = {
+                type: 'media',
+                pageId: `audio_summary_${Date.now()}`,
+                title: 'Audio Summary',
+                mimeType: 'audio/mpeg'
+            };
+            await indexedDbStorage.saveGeneratedContent(imageId, audioMediaItem.pageId, [{
+                name: 'audio.mp3',
+                content: audioBuffer,
+                contentType: 'audio/mpeg'
+            }]);
+            logger.log('PacketProcessor:FromTab', 'Successfully created media item for TTS audio and saved to IndexedDB.');
         } else {
             logger.warn('PacketProcessor:FromTab', 'Failed to generate audio from ElevenLabs.', ttsResponse.error);
         }
@@ -358,7 +359,12 @@ export async function processCreatePacketRequestFromTab(initiatorTabId) {
         sendStencilProgressNotification(imageId, 'generate_quiz', 'completed', 'Quiz generated', 90, topic);
 
         // Step 5: Assemble and save PacketImage, with the source page first.
-        const finalSourceContent = [sourcePageContentItem, summaryPageDef, ...validatedExternalLinks, ...mediaContentItems, quizPageDef];
+        const finalSourceContent = [sourcePageContentItem, summaryPageDef];
+        if (audioMediaItem) {
+            finalSourceContent.push(audioMediaItem);
+        }
+        finalSourceContent.push(...validatedExternalLinks, ...mediaContentItems, quizPageDef);
+        
         const packetImage = { id: imageId, topic: topic, created: new Date().toISOString(), sourceContent: finalSourceContent };
         
         await storage.savePacketImage(packetImage);
@@ -520,16 +526,20 @@ export async function instantiatePacket(imageId, preGeneratedInstanceId, initiat
                 }
                 delete instanceItem.contentB64;
             } else if (instanceItem.type === 'media') {
-                const { pageId, contentB64, mimeType, title } = instanceItem;
-                if (!contentB64) {
-                    logger.warn('PacketProcessor:instantiate', `Media item ${pageId} is missing Base64 content. Cannot publish.`);
+                const { pageId, mimeType, title } = instanceItem;
+                const cachedContent = await indexedDbStorage.getGeneratedContent(imageId, pageId);
+
+                if (!cachedContent || cachedContent.length === 0) {
+                    logger.warn('PacketProcessor:instantiate', `Media item ${pageId} is missing from IndexedDB. Cannot publish.`);
                     instanceItem.published = false;
                     instanceItem.url = null;
                 } else {
-                    const decodedContent = base64Decode(contentB64);
-                    const filePath = `packets/${instanceId}/${pageId}/${title}`;
-                    await indexedDbStorage.saveGeneratedContent(imageId, pageId, [{ name: title, content: decodedContent, contentType: mimeType }]);
-                    const uploadResult = await cloudStorage.uploadFile(filePath, decodedContent, mimeType, 'private');
+                    const fileContent = cachedContent[0].content;
+                    const fileExtension = mimeType === 'audio/mpeg' ? '.mp3' : '';
+                    const fileName = sanitizeForFileName(title) + fileExtension;
+                    const filePath = `packets/${instanceId}/${pageId}/${fileName}`;
+                    
+                    const uploadResult = await cloudStorage.uploadFile(filePath, fileContent, mimeType, 'private');
                     if (uploadResult.success) {
                         instanceItem.url = uploadResult.fileName;
                         instanceItem.published = true;
@@ -543,7 +553,6 @@ export async function instantiatePacket(imageId, preGeneratedInstanceId, initiat
                         throw new Error(`Failed to publish media ${title}: ${uploadResult.error}`);
                     }
                 }
-                delete instanceItem.contentB64;
             }
             packetInstance.contents.push(instanceItem);
         }

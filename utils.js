@@ -726,7 +726,7 @@ function arrayBufferToBase64(buffer) {
     for (let i = 0; i < len; i++) {
         binary += String.fromCharCode(bytes[i]);
     }
-    return window.btoa(binary);
+    return btoa(binary);
 }
 
 function base64Decode(base64) {
@@ -742,6 +742,16 @@ function base64Decode(base64) {
         logger.error('Utils:base64Decode', 'Error decoding base64', error);
         return null;
     }
+}
+
+function sanitizeForFileName(input) {
+  if (!input) return '';
+  return input
+    .toLowerCase()
+    .replace(/\s+/g, '-') // Replace spaces with hyphens
+    .replace(/[^a-z0-9_.-]/g, '') // Remove all non-alphanumeric characters except underscore, dot, hyphen
+    .replace(/-+/g, '-') // Replace multiple hyphens with a single one
+    .replace(/^-+|-+$/g, ''); // Remove leading/trailing hyphens
 }
 
 
@@ -762,4 +772,5 @@ export {
   arrayBufferToBase64,
   base64Decode,
   arrayBufferToBase64 as base64Encode,
+  sanitizeForFileName,
 };
