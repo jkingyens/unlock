@@ -194,8 +194,8 @@ function createContentCard(contentItem, visitedUrlsSet, visitedGeneratedIds, ins
             playerButton.textContent = '▶️';
             playerButton.onclick = (e) => {
                 e.stopPropagation();
-                playMediaInCard(card, contentItem, instance);
             };
+            card.addEventListener('click', () => playMediaInCard(card, contentItem, instance));
             card.appendChild(playerButton);
         } else {
             card.addEventListener('click', () => openUrl(urlToOpen, instance.instanceId));
