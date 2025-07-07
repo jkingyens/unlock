@@ -471,9 +471,7 @@ const cloudStorage = {
        return null;
      }
      return constructPublicUrl(filePath, this.activeConfig);
-  },
-
-  sanitizeForFileName(input) { if (!input) return ''; return input .toLowerCase() .replace(/[^a-z0-9_-]/g, '-') .replace(/-+/g, '-') .replace(/^-+|-+$/g, ''); }
+  }
 };
 
 cloudStorage.constructPublicUrl = constructPublicUrl;
