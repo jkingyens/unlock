@@ -774,6 +774,13 @@ export async function processDeletePacketsRequest(data, initiatorTabId = null) {
             } else if (browserState) {
                 await storage.deletePacketBrowserState(instanceId);
             }
+            
+            for (const item of instance.contents) {
+                if (item.type === 'media' && item.pageId) {
+                    const sessionKey = `audio_progress_${instanceId}_${item.pageId}`;
+                    await storage.removeSession(sessionKey);
+                }
+            }
 
             if (await cloudStorage.initialize()) {
                 for (const item of instance.contents) {
