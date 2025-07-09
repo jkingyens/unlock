@@ -47,26 +47,62 @@ export async function displayPacketContent(instance, currentPacketUrl) {
     }
 
     try {
-        // --- Always do a full render ---
-        logger.log(`DetailView[${uniqueCallId}]`, 'Performing full render of detail view.');
-        const colorName = packetUtils.getColorForTopic(instance.topic);
-        const colors = { grey: { accent: '#90a4ae', progress: '#78909c' }, blue: { accent: '#64b5f6', progress: '#42a5f5' }, red: { accent: '#e57373', progress: '#ef5350' }, yellow: { accent: '#fff176', progress: '#ffee58' }, green: { accent: '#81c784', progress: '#66bb6a' }, pink: { accent: '#f06292', progress: '#ec407a' }, purple: { accent: '#ba68c8', progress: '#ab47bc' }, cyan: { accent: '#4dd0e1', progress: '#26c6da' }, orange: { accent: '#ffb74d', progress: '#ffa726' } }[colorName] || { accent: '#90a4ae', progress: '#78909c' };
+        const isAlreadyRendered = container.querySelector(`#detail-cards-container[data-instance-id="${instance.instanceId}"]`);
 
-        container.style.setProperty('--packet-color-accent', colors.accent);
-        container.style.setProperty('--packet-color-progress-fill', colors.progress);
+        if (isAlreadyRendered) {
+            // --- Non-destructive update path ---
+            logger.log(`DetailView[${uniqueCallId}]`, 'Updating existing detail view non-destructively.');
+            
+            let mediaProgress = {};
+            if (activeAudioElement && !activeAudioElement.paused) {
+                const pageId = activeAudioElement.dataset.pageId;
+                if (pageId && !isNaN(activeAudioElement.duration)) {
+                    mediaProgress[pageId] = activeAudioElement.currentTime / activeAudioElement.duration;
+                }
+            }
 
-        const fragment = document.createDocumentFragment();
-        fragment.appendChild(createProgressSection(instance));
-        fragment.appendChild(await createActionButtons(instance));
-        const cardsWrapper = createCardsSection(instance);
-        cardsWrapper.dataset.instanceId = instance.instanceId; // Tag the container for future updates
-        fragment.appendChild(cardsWrapper);
+            const { progressPercentage } = calculateInstanceProgress(instance, mediaProgress);
+            const progressBar = container.querySelector('#detail-progress-container .progress-bar');
+            if (progressBar) {
+                progressBar.style.width = `${progressPercentage}%`;
+            }
+            const progressBarContainer = container.querySelector('#detail-progress-container .progress-bar-container');
+            if(progressBarContainer) {
+                progressBarContainer.title = `${progressPercentage}% Complete`;
+            }
 
-        container.innerHTML = ''; // Clear previous content
-        container.appendChild(fragment);
+            // Update visited status on cards
+            const visitedUrlsSet = new Set(instance.visitedUrls || []);
+            const visitedGeneratedIds = new Set(instance.visitedGeneratedPageIds || []);
+            container.querySelectorAll('.card').forEach(card => {
+                const isVisited = (card.dataset.pageId && visitedGeneratedIds.has(card.dataset.pageId)) ||
+                                  (card.dataset.url && visitedUrlsSet.has(card.dataset.url));
+                card.classList.toggle('visited', isVisited);
+            });
+            
+            updateActiveCardHighlight(currentPacketUrl);
 
-        updateActiveCardHighlight(currentPacketUrl);
+        } else {
+            // --- Full render path (for initial load) ---
+            logger.log(`DetailView[${uniqueCallId}]`, 'Performing full render of detail view.');
+            const colorName = packetUtils.getColorForTopic(instance.topic);
+            const colors = { grey: { accent: '#90a4ae', progress: '#78909c' }, blue: { accent: '#64b5f6', progress: '#42a5f5' }, red: { accent: '#e57373', progress: '#ef5350' }, yellow: { accent: '#fff176', progress: '#ffee58' }, green: { accent: '#81c784', progress: '#66bb6a' }, pink: { accent: '#f06292', progress: '#ec407a' }, purple: { accent: '#ba68c8', progress: '#ab47bc' }, cyan: { accent: '#4dd0e1', progress: '#26c6da' }, orange: { accent: '#ffb74d', progress: '#ffa726' } }[colorName] || { accent: '#90a4ae', progress: '#78909c' };
+            
+            container.style.setProperty('--packet-color-accent', colors.accent);
+            container.style.setProperty('--packet-color-progress-fill', colors.progress);
+            
+            const fragment = document.createDocumentFragment();
+            fragment.appendChild(createProgressSection(instance));
+            fragment.appendChild(await createActionButtons(instance));
+            const cardsWrapper = createCardsSection(instance);
+            cardsWrapper.dataset.instanceId = instance.instanceId; // Tag the container for future updates
+            fragment.appendChild(cardsWrapper);
 
+            container.innerHTML = ''; // Clear previous content
+            container.appendChild(fragment);
+
+            updateActiveCardHighlight(currentPacketUrl);
+        }
     } catch (error) {
         logger.error(`DetailView[${uniqueCallId}]`, 'Error during detail view rendering', { instanceId: instance?.instanceId, error });
         container.innerHTML = '<div class="empty-state">Error displaying packet details.</div>';
@@ -248,50 +284,72 @@ async function playMediaInCard(card, contentItem, instance) {
         activeAudioElement.pause();
         return;
     }
-    if (activeAudioElement) {
+    
+    // If clicking on a different audio card, pause the old one
+    if (activeAudioElement && activeAudioElement.dataset.pageId !== contentItem.pageId) {
         activeAudioElement.pause();
     }
 
     const playerButton = card.querySelector('.media-player-button');
     if (!playerButton) return;
 
-    const audio = new Audio();
-    audio.dataset.pageId = contentItem.pageId;
-    activeAudioElement = audio;
-
-    const cachedAudio = await indexedDbStorage.getGeneratedContent(instance.instanceId, contentItem.pageId);
-    if (cachedAudio) {
-        const blob = new Blob([cachedAudio[0].content], { type: contentItem.mimeType });
-        audio.src = URL.createObjectURL(blob);
-    } else {
-        const response = await sendMessageToBackground({
-            action: 'get_presigned_url',
-            data: { s3Key: contentItem.url, instanceId: instance.instanceId }
-        });
-        if (response.success) {
-            audio.src = response.url;
+    // Use existing audio element if it's for the same media, otherwise create new
+    if (!activeAudioElement || activeAudioElement.dataset.pageId !== contentItem.pageId) {
+        const audio = new Audio();
+        audio.dataset.pageId = contentItem.pageId;
+        activeAudioElement = audio;
+        
+        const cachedAudio = await indexedDbStorage.getGeneratedContent(instance.instanceId, contentItem.pageId);
+        if (cachedAudio) {
+            const blob = new Blob([cachedAudio[0].content], { type: contentItem.mimeType });
+            audio.src = URL.createObjectURL(blob);
         } else {
-            logger.error("DetailView", "Failed to get presigned URL for media", response.error);
-            return;
+            const response = await sendMessageToBackground({
+                action: 'get_presigned_url',
+                data: { s3Key: contentItem.url, instanceId: instance.instanceId }
+            });
+            if (response.success) {
+                audio.src = response.url;
+            } else {
+                logger.error("DetailView", "Failed to get presigned URL for media", response.error);
+                return;
+            }
         }
     }
+    
+    const audio = activeAudioElement;
+    const sessionKey = `audio_progress_${instance.instanceId}_${contentItem.pageId}`;
     
     audio.onplay = () => {
         playerButton.textContent = '⏸️';
     };
 
-    audio.onpause = () => {
+    audio.onpause = async () => {
         playerButton.textContent = '▶️';
+        await storage.setSession({ [sessionKey]: audio.currentTime });
+
+        // Perform a final progress calculation on pause to "set" the state
+        const freshInstance = await storage.getPacketInstance(instance.instanceId);
+        if (!freshInstance) return;
+
+        if (!audio.duration || isNaN(audio.duration)) return;
+
+        const { progressPercentage } = calculateInstanceProgress(freshInstance, { [contentItem.pageId]: audio.currentTime / audio.duration });
+        const progressBar = document.querySelector('#detail-progress-container .progress-bar');
+        if (progressBar) {
+            progressBar.style.width = `${progressPercentage}%`;
+        }
     };
 
-    audio.ontimeupdate = () => {
-        // Guard against NaN duration at the start of playback
-        if (!audio.duration || isNaN(audio.duration)) {
-            return;
-        }
+    audio.ontimeupdate = async () => {
+        if (!audio.duration || isNaN(audio.duration)) return;
+        
+        const freshInstance = await storage.getPacketInstance(instance.instanceId);
+        if (!freshInstance) return;
+
         const percentage = (audio.currentTime / audio.duration) * 100;
         playerButton.style.setProperty('--p', percentage);
-        const { progressPercentage } = calculateInstanceProgress(instance, { [contentItem.pageId]: percentage / 100 });
+        const { progressPercentage } = calculateInstanceProgress(freshInstance, { [contentItem.pageId]: percentage / 100 });
         const progressBar = document.querySelector('#detail-progress-container .progress-bar');
         if (progressBar) {
             progressBar.style.width = `${progressPercentage}%`;
@@ -301,6 +359,7 @@ async function playMediaInCard(card, contentItem, instance) {
     audio.onended = async () => {
         playerButton.textContent = '▶️';
         playerButton.style.setProperty('--p', 100);
+        storage.removeSession(sessionKey);
         await sendMessageToBackground({
             action: 'media_playback_complete',
             data: {
@@ -309,6 +368,23 @@ async function playMediaInCard(card, contentItem, instance) {
             }
         });
     };
+    
+    audio.onloadedmetadata = async () => {
+        const sessionData = await storage.getSession(sessionKey);
+        const savedTime = sessionData[sessionKey];
+        if (savedTime && isFinite(savedTime)) {
+            audio.currentTime = savedTime;
+        }
+        audio.play();
+    };
 
-    audio.play();
+    // If audio is already loaded, check session and play. Otherwise, onloadedmetadata will handle it.
+    if (audio.readyState >= 1) { // HAVE_METADATA
+         const sessionData = await storage.getSession(sessionKey);
+         const savedTime = sessionData[sessionKey];
+         if (savedTime && isFinite(savedTime)) {
+             audio.currentTime = savedTime;
+         }
+         audio.play();
+    }
 }
