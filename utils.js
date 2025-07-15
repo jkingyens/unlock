@@ -535,7 +535,7 @@ const packetUtils = {
     
     return visitedCount >= totalCount;
   },
-  
+
   isUrlInPacket(loadedUrl, instance, options = {}) {
     if (!loadedUrl || !instance || !Array.isArray(instance.contents)) {
         return options.returnItem ? null : false;

@@ -32,6 +32,43 @@ function createTabGroupHelper(tabId) {
     });
 }
 
+/**
+ * Ejects a specific tab from its group and updates the browser state.
+ * @param {number} tabId - The ID of the tab to eject.
+ * @param {string} instanceId - The ID of the packet instance the tab belonged to.
+ */
+export async function ejectTabFromGroup(tabId, instanceId) {
+    if (typeof tabId !== 'number' || !instanceId) {
+        logger.warn('TabGroupHandler:ejectTabFromGroup', 'Invalid tabId or instanceId provided.', { tabId, instanceId });
+        return;
+    }
+
+    try {
+        const tab = await chrome.tabs.get(tabId);
+        if (tab.groupId && tab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE) {
+            logger.log('TabGroupHandler:ejectTabFromGroup', `Ejecting tab ${tabId} from group ${tab.groupId}.`);
+            await chrome.tabs.ungroup(tabId);
+        }
+
+        // Clean up the tab from the instance's browser state
+        const browserState = await storage.getPacketBrowserState(instanceId);
+        if (browserState && Array.isArray(browserState.activeTabIds)) {
+            const initialLength = browserState.activeTabIds.length;
+            browserState.activeTabIds = browserState.activeTabIds.filter(id => id !== tabId);
+            if (browserState.activeTabIds.length < initialLength) {
+                await storage.savePacketBrowserState(browserState);
+                logger.log('TabGroupHandler:ejectTabFromGroup', `Removed tab ${tabId} from browser state for instance ${instanceId}.`);
+            }
+        }
+    } catch (error) {
+        // Ignore errors if the tab or group is already gone, but log others.
+        if (!error.message.toLowerCase().includes('no tab with id')) {
+            logger.error('TabGroupHandler:ejectTabFromGroup', `Error ejecting tab ${tabId}`, error);
+        }
+    }
+}
+
+
 export async function ungroupTabIfUrlExternalToPacket(tabId, groupId, targetUrl, packetInstance) {
     if (!packetInstance) {
         logger.warn('TabGroupHandler:ungroupTabIfUrlExternalToPacket', 'Packet instance data not provided. Cannot check URL.', { tabId, groupId, targetUrl });
