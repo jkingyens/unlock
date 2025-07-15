@@ -334,7 +334,6 @@ export async function processCreatePacketRequestFromTab(initiatorTabId) {
             audioMediaItem = {
                 type: 'media',
                 pageId: `audio_summary_${Date.now()}`,
-                // --- FIX: Use the title from the generated summary page ---
                 title: summaryPageDef.title,
                 mimeType: 'audio/mpeg'
             };
@@ -600,7 +599,27 @@ export async function publishImageForSharing(imageId) {
         const packetImage = await storage.getPacketImage(imageId);
         if (!packetImage) return { success: false, error: `Packet image ${imageId} not found.` };
         
-        const jsonString = JSON.stringify(packetImage);
+        // --- FIX START: Embed media content into the export ---
+        const imageForExport = JSON.parse(JSON.stringify(packetImage)); // Deep copy to avoid modifying original
+
+        for (const contentItem of imageForExport.sourceContent) {
+            let itemsToProcess = [];
+            if (contentItem.type === 'media') {
+                itemsToProcess.push(contentItem);
+            } else if (contentItem.type === 'alternative' && Array.isArray(contentItem.alternatives)) {
+                itemsToProcess.push(...contentItem.alternatives.filter(alt => alt.type === 'media'));
+            }
+
+            for (const mediaItem of itemsToProcess) {
+                const mediaContent = await indexedDbStorage.getGeneratedContent(imageId, mediaItem.pageId);
+                if (mediaContent && mediaContent[0] && mediaContent[0].content) {
+                    mediaItem.contentB64 = arrayBufferToBase64(mediaContent[0].content);
+                }
+            }
+        }
+        // --- FIX END ---
+
+        const jsonString = JSON.stringify(imageForExport);
         const shareFileName = `shared/img_${imageId.replace(/^img_/, '')}_${Date.now()}.json`;
 
         const uploadResult = await cloudStorage.uploadFile(shareFileName, jsonString, 'application/json', 'public-read');
@@ -638,6 +657,31 @@ export async function importImageFromUrl(url) {
         
         const importedPacketImage = { ...sharedImage, id: imageId, created: new Date().toISOString(), shareUrl: url };
         
+        // --- FIX START: Process imported media and save to IndexedDB ---
+        for (const contentItem of importedPacketImage.sourceContent) {
+            let itemsToProcess = [];
+             if (contentItem.type === 'media') {
+                itemsToProcess.push(contentItem);
+            } else if (contentItem.type === 'alternative' && Array.isArray(contentItem.alternatives)) {
+                itemsToProcess.push(...contentItem.alternatives.filter(alt => alt.type === 'media'));
+            }
+
+            for (const mediaItem of itemsToProcess) {
+                if (mediaItem.contentB64) {
+                    const audioBuffer = base64Decode(mediaItem.contentB64);
+                    if (audioBuffer) {
+                        await indexedDbStorage.saveGeneratedContent(imageId, mediaItem.pageId, [{
+                            name: 'audio.mp3',
+                            content: audioBuffer,
+                            contentType: mediaItem.mimeType
+                        }]);
+                    }
+                    delete mediaItem.contentB64; // Clean up after saving to DB
+                }
+            }
+        }
+        // --- FIX END ---
+
         await storage.savePacketImage(importedPacketImage);
         logger.log('PacketProcessor:importImageFromUrl', 'Packet image imported and saved.', { newImageId: imageId, originalUrl: url });
         
