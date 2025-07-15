@@ -316,10 +316,9 @@ export async function processCreatePacketRequestFromTab(initiatorTabId) {
         
         // Step 4: Generate summary and quiz
         const summaryPageDef = { type: "generated", pageId: "summary-page", title: `${topic} Summary`, contentType: "text/html" };
-        const quizPageDef = { type: "generated", pageId: "quiz-page", title: `${topic} Quiz`, contentType: "text/html", interactionBasedCompletion: true };
         let audioMediaItem = null;
         
-        const contentForSummaryPrompt = [sourcePageContentItem, ...validatedExternalLinks, ...mediaContentItems, quizPageDef];
+        const contentForSummaryPrompt = [...validatedExternalLinks, ...mediaContentItems];
 
         sendStencilProgressNotification(imageId, 'generate_summary', 'active', 'Generating summary...', 50, topic);
         let summaryResponse = await llmService.callLLM('summary_page', { topic: topic, allPacketContents: contentForSummaryPrompt });
@@ -350,20 +349,22 @@ export async function processCreatePacketRequestFromTab(initiatorTabId) {
 
         summaryPageDef.contentB64 = arrayBufferToBase64(new TextEncoder().encode(enhanceHtml(summaryHtmlBody, topic, summaryPageDef.title)));
         sendStencilProgressNotification(imageId, 'generate_summary', 'completed', 'Summary generated', 70, topic);
-
-        sendStencilProgressNotification(imageId, 'generate_quiz', 'active', 'Generating quiz...', 75, topic);
-        const quizResponse = await llmService.callLLM('quiz_page', { topic: topic, articlesData: validatedExternalLinks });
-        if (!quizResponse.success || !quizResponse.data) throw new Error(quizResponse.error || 'LLM failed to generate quiz.');
-        const quizHtmlBody = await processHtmlViaOffscreen(String(quizResponse.data).trim(), imageId);
-        quizPageDef.contentB64 = arrayBufferToBase64(new TextEncoder().encode(enhanceHtml(quizHtmlBody, topic, quizPageDef.title)));
-        sendStencilProgressNotification(imageId, 'generate_quiz', 'completed', 'Quiz generated', 90, topic);
-
+        
         // Step 5: Assemble and save PacketImage, with the source page first.
-        const finalSourceContent = [sourcePageContentItem, summaryPageDef];
+        const summaryContent = {
+            type: 'alternative',
+            alternatives: [summaryPageDef]
+        };
         if (audioMediaItem) {
-            finalSourceContent.push(audioMediaItem);
+            summaryContent.alternatives.push(audioMediaItem);
         }
-        finalSourceContent.push(...validatedExternalLinks, ...mediaContentItems, quizPageDef);
+
+        const finalSourceContent = [
+            summaryContent,
+            ...validatedExternalLinks,
+            ...mediaContentItems,
+            sourcePageContentItem
+        ];
         
         const packetImage = { id: imageId, topic: topic, created: new Date().toISOString(), sourceContent: finalSourceContent };
         
@@ -415,30 +416,23 @@ export async function processCreatePacketRequest(data, initiatorTabId) {
         
         // 1. Define generated content structure
         const summaryPageDef = { type: "generated", pageId: "summary-page", title: `${topic} Summary`, contentType: "text/html" };
-        const quizPageDef = { type: "generated", pageId: "quiz-page", title: `${topic} Quiz`, contentType: "text/html", interactionBasedCompletion: true };
 
         // 2. Generate content for each defined item
         sendStencilProgressNotification(imageId, 'generate_summary', 'active', 'Generating summary...', 40);
-        const summaryResponse = await llmService.callLLM('summary_page', { topic: topic, allPacketContents: validatedExternalLinks.concat([quizPageDef]) });
+        const summaryResponse = await llmService.callLLM('summary_page', { topic: topic, allPacketContents: validatedExternalLinks });
         if (!summaryResponse.success || !summaryResponse.data) throw new Error(summaryResponse.error || 'LLM failed to generate summary.');
         const summaryHtmlBody = await processHtmlViaOffscreen(String(summaryResponse.data).trim(), imageId);
         const finalSummaryHtml = enhanceHtml(summaryHtmlBody, topic, summaryPageDef.title);
         summaryPageDef.contentB64 = arrayBufferToBase64(new TextEncoder().encode(finalSummaryHtml));
         sendStencilProgressNotification(imageId, 'generate_summary', 'completed', 'Summary generated', 60);
 
-        sendStencilProgressNotification(imageId, 'generate_quiz', 'active', 'Generating quiz...', 65);
-        const quizResponse = await llmService.callLLM('quiz_page', { topic: topic, articlesData: validatedExternalLinks });
-        if (!quizResponse.success || !quizResponse.data) throw new Error(quizResponse.error || 'LLM failed to generate quiz.');
-        const quizHtmlBody = await processHtmlViaOffscreen(String(quizResponse.data).trim(), imageId);
-        const finalQuizHtml = enhanceHtml(quizHtmlBody, topic, quizPageDef.title);
-        quizPageDef.contentB64 = arrayBufferToBase64(new TextEncoder().encode(finalQuizHtml));
-        sendStencilProgressNotification(imageId, 'generate_quiz', 'completed', 'Quiz generated', 85);
-
         // 3. Assemble the final PacketImage with embedded content
         const finalSourceContent = [
-            summaryPageDef,
+            {
+                type: 'alternative',
+                alternatives: [summaryPageDef]
+            },
             ...validatedExternalLinks,
-            quizPageDef
         ];
 
         const packetImage = { id: imageId, topic: topic, created: new Date().toISOString(), sourceContent: finalSourceContent };
@@ -468,7 +462,7 @@ export async function instantiatePacket(imageId, preGeneratedInstanceId, initiat
         const packetImage = await storage.getPacketImage(imageId);
         if (!packetImage) throw new Error(`Packet Image ${imageId} not found.`);
 
-        const hasGeneratedContent = packetImage.sourceContent.some(item => item.type === 'generated' || item.type === 'media');
+        const hasGeneratedContent = packetImage.sourceContent.some(item => item.type === 'generated' || item.type === 'media' || (item.type === 'alternative' && item.alternatives.some(alt => alt.type === 'generated' || alt.type === 'media')));
         let activeCloudConfig = null;
 
         if (hasGeneratedContent) {
@@ -496,14 +490,31 @@ export async function instantiatePacket(imageId, preGeneratedInstanceId, initiat
         };
 
         for (const sourceItem of packetImage.sourceContent) {
-            let instanceItem = { ...sourceItem };
+            if (sourceItem.type === 'alternative') {
+                const settings = await storage.getSettings();
+                const preferAudio = settings.preferAudio && sourceItem.alternatives.some(a => a.type === 'media');
 
-            if (instanceItem.type === 'generated') {
-                const { pageId, contentB64, contentType } = instanceItem;
+                const chosenItem = preferAudio
+                    ? sourceItem.alternatives.find(a => a.type === 'media')
+                    : sourceItem.alternatives.find(a => a.type === 'generated');
+                
+                if (chosenItem) {
+                    packetInstance.contents.push(chosenItem);
+                }
+
+            } else {
+                packetInstance.contents.push(sourceItem);
+            }
+        }
+        
+        for (let i = 0; i < packetInstance.contents.length; i++) {
+            const item = packetInstance.contents[i];
+            if (item.type === 'generated') {
+                const { pageId, contentB64, contentType } = item;
                 if (!contentB64) {
                     logger.warn('PacketProcessor:instantiate', `Generated item ${pageId} is missing Base64 content. Cannot publish.`);
-                    instanceItem.published = false;
-                    instanceItem.url = null;
+                    item.published = false;
+                    item.url = null;
                 } else {
                     const decodedContent = base64Decode(contentB64);
                     const filesToUpload = [{ name: 'index.html', content: new TextDecoder().decode(decodedContent), contentType }];
@@ -512,9 +523,9 @@ export async function instantiatePacket(imageId, preGeneratedInstanceId, initiat
 
                     const uploadResult = await cloudStorage.uploadPacketFiles(instanceId, pageId, filesToUpload, 'private');
                     if (uploadResult.success) {
-                        instanceItem.url = uploadResult.url;
-                        instanceItem.published = true;
-                        instanceItem.publishContext = {
+                        item.url = uploadResult.url;
+                        item.published = true;
+                        item.publishContext = {
                             storageConfigId: activeCloudConfig.id,
                             provider: activeCloudConfig.provider,
                             region: activeCloudConfig.region,
@@ -524,15 +535,15 @@ export async function instantiatePacket(imageId, preGeneratedInstanceId, initiat
                         throw new Error(`Failed to publish ${pageId}: ${uploadResult.error}`);
                     }
                 }
-                delete instanceItem.contentB64;
-            } else if (instanceItem.type === 'media') {
-                const { pageId, mimeType, title } = instanceItem;
+                delete item.contentB64;
+            } else if (item.type === 'media') {
+                const { pageId, mimeType, title } = item;
                 const cachedContent = await indexedDbStorage.getGeneratedContent(imageId, pageId);
 
                 if (!cachedContent || cachedContent.length === 0) {
                     logger.warn('PacketProcessor:instantiate', `Media item ${pageId} is missing from IndexedDB. Cannot publish.`);
-                    instanceItem.published = false;
-                    instanceItem.url = null;
+                    item.published = false;
+                    item.url = null;
                 } else {
                     const fileContent = cachedContent[0].content;
                     const fileExtension = mimeType === 'audio/mpeg' ? '.mp3' : '';
@@ -541,9 +552,9 @@ export async function instantiatePacket(imageId, preGeneratedInstanceId, initiat
                     
                     const uploadResult = await cloudStorage.uploadFile(filePath, fileContent, mimeType, 'private');
                     if (uploadResult.success) {
-                        instanceItem.url = uploadResult.fileName;
-                        instanceItem.published = true;
-                        instanceItem.publishContext = {
+                        item.url = uploadResult.fileName;
+                        item.published = true;
+                        item.publishContext = {
                             storageConfigId: activeCloudConfig.id,
                             provider: activeCloudConfig.provider,
                             region: activeCloudConfig.region,
@@ -554,7 +565,6 @@ export async function instantiatePacket(imageId, preGeneratedInstanceId, initiat
                     }
                 }
             }
-            packetInstance.contents.push(instanceItem);
         }
 
         if (!(await storage.savePacketInstance(packetInstance))) {

@@ -101,6 +101,7 @@ export function setupSettingsListeners() {
     // Other Settings
     s.themeRadios?.forEach(radio => radio.addEventListener('change', requestSave));
     s.tabGroupsEnabledCheckbox?.addEventListener('change', requestSave);
+    s.preferAudioEnabledCheckbox?.addEventListener('change', requestSave);
     s.visitThresholdSecondsInput?.addEventListener('change', requestSave);
     s.confettiEnabledCheckbox?.addEventListener('change', (event) => {
         requestSave();
@@ -166,6 +167,7 @@ async function loadSettings() {
         domRefs.tabGroupsEnabledCheckbox.parentElement.title = isTabGroupsAvailable() ? '' : 'Tab Groups API not available in this browser version.';
 
         domRefs.confettiEnabledCheckbox.checked = loadedSettings.confettiEnabled ?? true;
+        domRefs.preferAudioEnabledCheckbox.checked = loadedSettings.preferAudio ?? false;
         domRefs.visitThresholdSecondsInput.value = loadedSettings.visitThresholdSeconds ?? 5;
 
         const theme = loadedSettings.themePreference || 'auto';
@@ -261,6 +263,7 @@ async function gatherAndSaveSettings() {
             activeStorageId: currentActiveStorageIdSetting,
             themePreference: domRefs.themeLightRadio.checked ? 'light' : (domRefs.themeDarkRadio.checked ? 'dark' : 'auto'),
             tabGroupsEnabled: domRefs.tabGroupsEnabledCheckbox.checked,
+            preferAudio: domRefs.preferAudioEnabledCheckbox.checked,
             confettiEnabled: domRefs.confettiEnabledCheckbox.checked,
             visitThresholdSeconds: visitThreshold,
             elevenlabsApiKey: document.getElementById('elevenlabs-api-key').value.trim()

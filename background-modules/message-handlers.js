@@ -10,7 +10,8 @@ import {
     clearPacketContext,
     MPI_PARAMS,
     CONFIG,
-    arrayBufferToBase64
+    arrayBufferToBase64,
+    base64Decode
 } from '../utils.js';
 import * as tabGroupHandler from './tab-group-handler.js';
 import * as sidebarHandler from './sidebar-handler.js';
@@ -300,6 +301,38 @@ export function handleMessage(message, sender, sendResponse) {
     }
 
     switch (message.action) {
+        case 'get_draft_item_for_preview':
+            (async () => {
+                const { pageId } = message.data;
+                const sessionData = await storage.getSession('draftPacketForPreview');
+                const draftPacket = sessionData?.draftPacketForPreview;
+                
+                let item = null;
+                if (draftPacket && draftPacket.sourceContent) {
+                    for (const contentItem of draftPacket.sourceContent) {
+                        if (contentItem.pageId === pageId) {
+                            item = contentItem;
+                            break;
+                        }
+                        if (contentItem.type === 'alternative' && Array.isArray(contentItem.alternatives)) {
+                            const foundAlt = contentItem.alternatives.find(alt => alt.pageId === pageId);
+                            if (foundAlt) {
+                                item = foundAlt;
+                                break;
+                            }
+                        }
+                    }
+                }
+                
+                if (item && item.contentB64) {
+                    const htmlContent = new TextDecoder().decode(base64Decode(item.contentB64));
+                    sendResponse({ success: true, htmlContent, title: item.title });
+                } else {
+                    sendResponse({ success: false, error: 'Item not found or has no content.' });
+                }
+            })();
+            isAsync = true;
+            break;
         case 'get_presigned_url':
             (async () => {
                 const { s3Key, instanceId } = message.data;

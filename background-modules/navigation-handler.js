@@ -28,8 +28,6 @@ export function clearPendingVisitTimer(tabId) {
 
 export { clearPacketContext };
 
-// ... (parseMpiEventFromUrl remains the same) ...
-
 // --- Web Navigation Listener Functions ---
 
 export async function onCommitted(details) {
@@ -167,6 +165,7 @@ async function processNavigationEvent(tabId, finalUrl, sourceEventName, details 
         });
     }
 
+    // --- FIX START: Restore the visit timer logic for navigation events ---
     const canonicalUrlToVisit = packetUrlForSidebar;
     const itemToVisit = instance.contents.find(item => item.url && decodeURIComponent(item.url) === decodeURIComponent(canonicalUrlToVisit));
 
@@ -201,6 +200,7 @@ async function processNavigationEvent(tabId, finalUrl, sourceEventName, details 
         pendingVisitTimers.set(tabId, visitTimer);
         logger.log(logPrefix, `Scheduled visit check for tab ${tabId} in ${visitThresholdMs}ms.`);
     }
+    // --- FIX END ---
 }
 
 
