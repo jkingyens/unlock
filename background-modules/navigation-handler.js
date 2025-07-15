@@ -141,6 +141,13 @@ async function processNavigationEvent(tabId, finalUrl, sourceEventName, details 
             
             if (!isNewUrlInPacket) {
                 logger.log(logPrefix, `Context-breaking user transition: '${transitionType}'. URL is not in packet. Clearing context.`);
+
+                 // --- FIX START: Eject the tab from its group immediately ---
+                if (await shouldUseTabGroups()) {
+                    await tabGroupHandler.ejectTabFromGroup(tabId, instanceId);
+                }
+                // --- FIX END ---
+                
                 await clearPacketContext(tabId);
                 await sidebarHandler.updateActionForTab(tabId);
                 if (sidebarHandler.isSidePanelAvailable()) sidebarHandler.notifySidebar('update_sidebar_context', { tabId: tabId, instanceId: null });

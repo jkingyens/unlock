@@ -334,7 +334,8 @@ export async function processCreatePacketRequestFromTab(initiatorTabId) {
             audioMediaItem = {
                 type: 'media',
                 pageId: `audio_summary_${Date.now()}`,
-                title: 'Audio Summary',
+                // --- FIX: Use the title from the generated summary page ---
+                title: summaryPageDef.title,
                 mimeType: 'audio/mpeg'
             };
             await indexedDbStorage.saveGeneratedContent(imageId, audioMediaItem.pageId, [{
