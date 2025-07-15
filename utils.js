@@ -92,6 +92,7 @@ const CONFIG = {
     themePreference: 'auto',
     confettiEnabled: true,
     tabGroupsEnabled: true,
+    preferAudio: false,
     visitThresholdSeconds: 5,
     elevenlabsApiKey: ''
   },
@@ -399,6 +400,9 @@ const storage = {
       if (typeof mergedSettings.tabGroupsEnabled !== 'boolean') {
         mergedSettings.tabGroupsEnabled = defaults.tabGroupsEnabled;
       }
+      if (typeof mergedSettings.preferAudio !== 'boolean') {
+        mergedSettings.preferAudio = defaults.preferAudio;
+      }
       return mergedSettings;
     } catch (error) {
       logger.error('Storage', 'Error getting settings, returning full defaults', error);
@@ -506,15 +510,21 @@ const storage = {
 const packetUtils = {
   isPacketInstanceCompleted(instance) {
     if (!instance || !Array.isArray(instance.contents)) return false;
-    const trackableItems = instance.contents.filter(item =>
-        (item.type === 'external' && item.url) ||
+
+    // FIX: A PacketInstance's contents are resolved and do not contain 'alternative' wrappers.
+    // The list of trackable items is simply all items that have a URL or a pageId.
+    const trackableItems = instance.contents.filter(item => 
+        (item.type === 'external' && item.url) || 
         ((item.type === 'generated' || item.type === 'media') && item.pageId)
     );
+    
     const totalCount = trackableItems.length;
     if (totalCount === 0) return false;
+
     const visitedUrlsSet = new Set(instance.visitedUrls || []);
     const visitedGeneratedIdsSet = new Set(instance.visitedGeneratedPageIds || []);
     let visitedCount = 0;
+    
     trackableItems.forEach(item => {
         if ((item.type === 'generated' || item.type === 'media') && item.pageId && visitedGeneratedIdsSet.has(item.pageId)) {
             visitedCount++;
@@ -522,46 +532,51 @@ const packetUtils = {
             visitedCount++;
         }
     });
+    
     return visitedCount >= totalCount;
   },
-
+  
   isUrlInPacket(loadedUrl, instance, options = {}) {
     if (!loadedUrl || !instance || !Array.isArray(instance.contents)) {
         return options.returnItem ? null : false;
     }
 
     const urlToCompare = decodeURIComponent(loadedUrl);
-
+    
     for (const item of instance.contents) {
-        if (!item.url) continue;
-
-        if (item.type === 'external') {
-            const itemCanonicalReference = decodeURIComponent(item.url);
-            if (urlToCompare === itemCanonicalReference) {
-                return options.returnItem ? item : true;
+        if (item.type === 'alternative') {
+            for (const alt of item.alternatives) {
+                const result = this.isUrlInPacket(loadedUrl, { contents: [alt] }, options);
+                if (result) return result;
             }
-        } else if (item.type === 'generated' || item.type === 'media') {
-            try {
-                const loadedUrlObj = new URL(urlToCompare);
-                const { publishContext } = item;
+        } else {
+            if (!item.url) continue;
 
-                if (publishContext) {
-                    let expectedUrl;
-                    if (publishContext.provider === 'google') {
-                        expectedUrl = `https://storage.googleapis.com/${publishContext.bucket}/${item.url}`;
-                    } else if (publishContext.provider === 's3' || publishContext.provider === 'digitalocean') {
-                        const domain = publishContext.provider === 'digitalocean'
-                            ? `${publishContext.bucket}.${publishContext.region}.digitaloceanspaces.com`
-                            : `${publishContext.bucket}.s3.${publishContext.region}.amazonaws.com`;
-                        expectedUrl = `https://${domain}/${item.url}`;
-                    }
-
-                    if (expectedUrl && loadedUrlObj.origin === new URL(expectedUrl).origin && loadedUrlObj.pathname === new URL(expectedUrl).pathname) {
-                        return options.returnItem ? item : true;
-                    }
+            if (item.type === 'external') {
+                const itemCanonicalReference = decodeURIComponent(item.url);
+                if (urlToCompare === itemCanonicalReference) {
+                    return options.returnItem ? item : true;
                 }
-            } catch (e) {
-                // Ignore URL parsing errors for malformed URLs
+            } else if (item.type === 'generated' || item.type === 'media') {
+                try {
+                    const loadedUrlObj = new URL(urlToCompare);
+                    const { publishContext } = item;
+
+                    if (publishContext) {
+                        let expectedPathname;
+                        if (publishContext.provider === 'google') {
+                            expectedPathname = `/${publishContext.bucket}/${item.url}`;
+                        } else {
+                            expectedPathname = `/${item.url}`;
+                        }
+
+                        if (loadedUrlObj.pathname === expectedPathname) {
+                            return options.returnItem ? item : true;
+                        }
+                    }
+                } catch (e) {
+                    logger.warn('Utils:isUrlInPacket', 'Could not parse loaded URL', { url: urlToCompare, error: e.message });
+                }
             }
         }
     }
@@ -585,7 +600,17 @@ const packetUtils = {
         if (!instance) throw new Error('Packet instance not found');
         const wasCompletedBefore = this.isPacketInstanceCompleted(instance);
 
-        foundItem = instance.contents.find(item => item.url && decodeURIComponent(item.url) === decodeURIComponent(url));
+        // Directly find the item by its canonical URL (S3 key or external URL)
+        foundItem = instance.contents.find(item => item.url === url);
+        // If not found in the main list, check inside "alternative" content wrappers
+        if (!foundItem) {
+            for (const altWrapper of instance.contents.filter(i => i.type === 'alternative')) {
+                if (altWrapper.alternatives) {
+                    foundItem = altWrapper.alternatives.find(alt => alt.url === url);
+                    if (foundItem) break;
+                }
+            }
+        }
 
         if (foundItem) {
              isTrackable = true;
@@ -685,12 +710,21 @@ const packetUtils = {
   },
   getDefaultGeneratedPageUrl(instance) {
     if (!instance || !Array.isArray(instance.contents)) return null;
-    const generatedPage = instance.contents.find(item => item.type === 'generated' && item.url && item.published);
+    const generatedPage = this.getGeneratedPages(instance)[0];
     return generatedPage ? generatedPage.url : null;
   },
   getGeneratedPages(instance) {
       if (!instance || !Array.isArray(instance.contents)) return [];
-      return instance.contents.filter(item => item.type === 'generated');
+      
+      const pages = [];
+      instance.contents.forEach(item => {
+          if (item.type === 'generated') {
+              pages.push(item);
+          } else if (item.type === 'alternative') {
+              pages.push(...item.alternatives.filter(alt => alt.type === 'generated'));
+          }
+      });
+      return pages;
   }
 };
 

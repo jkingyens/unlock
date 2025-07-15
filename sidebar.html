@@ -208,12 +208,11 @@
         </div>
     </div>
 
-
     <div id="packet-detail-view" class="view-container hidden">
       </div>
 
     <div id="settings-view" class="view-container hidden">
-      <h3>Language Model Configurations <a href="#" id="llm-help-link" class="help-link">(How to get keys?)</a></h3>
+      <h3>Large Language Models <a href="#" id="llm-help-link" class="help-link">(How to get keys?)</a></h3>
       <div id="llm-models-list">
         </div>
       <button id="llm-add-new-model-btn" class="sidebar-action-button">Add New LLM Configuration</button>
@@ -262,7 +261,7 @@
       </div>
 
       <div class="section-divider"></div>
-      <h3>S3 Service Credentials <a href="#" id="s3-help-link" class="help-link">(How to get keys?)</a></h3>
+      <h3>Cloud Services <a href="#" id="s3-help-link" class="help-link">(How to get keys?)</a></h3>
         
       <div id="s3-configs-list">
         </div>
@@ -314,9 +313,16 @@
         </div>
       </div>
       <div class="section-divider"></div>
-        <h3>ElevenLabs Credentials</h3>
+        <h3>Tools</h3>
         <div class="form-group">
-            <label for="elevenlabs-api-key">API Key</label>
+            <label class="checkbox-label">
+                <input type="checkbox" id="prefer-audio-enabled" name="prefer-audio-enabled">
+                Prefer Audio Summaries
+            </label>
+            <p class="setting-description">When available, show the audio version of a summary by default.</p>
+        </div>
+        <div class="form-group">
+            <label for="elevenlabs-api-key">ElevenLabs API Key</label>
             <div class="input-wrapper">
                 <input type="password" id="elevenlabs-api-key" placeholder="Enter ElevenLabs API Key">
                 <span class="eye-icon" id="toggle-elevenlabs-api-key-visibility">Show</span>

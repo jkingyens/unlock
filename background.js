@@ -21,7 +21,7 @@ import {
 } from './utils.js';
 import * as msgHandler from './background-modules/message-handlers.js';
 import * as ruleManager from './background-modules/rule-manager.js';
-import { onCommitted, onHistoryStateUpdated, checkAndPromptForCompletion, clearPendingVisitTimer } from './background-modules/navigation-handler.js';
+import { onCommitted, onHistoryStateUpdated, checkAndPromptForCompletion } from './background-modules/navigation-handler.js';
 import * as tabGroupHandler from './background-modules/tab-group-handler.js';
 import * as sidebarHandler from './background-modules/sidebar-handler.js';
 import cloudStorage from './cloud-storage.js';
@@ -31,6 +31,55 @@ export let interimContextMap = new Map();
 
 // Rule refresh alarm name
 const RULE_REFRESH_ALARM_NAME = 'refreshRedirectRules';
+
+// --- FIX: Centralize all timer logic here ---
+const pendingVisitTimers = new Map();
+
+function clearPendingVisitTimer(tabId) {
+    if (pendingVisitTimers.has(tabId)) {
+        clearTimeout(pendingVisitTimers.get(tabId));
+        pendingVisitTimers.delete(tabId);
+        logger.log(`[Background] Cleared pending visit timer for tab ${tabId}.`);
+    }
+}
+
+async function handleTabVisit(tabId, url) {
+    clearPendingVisitTimer(tabId); // Clear any existing timer for this tab
+
+    const context = await getPacketContext(tabId);
+    if (!context || !context.instanceId || !context.packetUrl) return;
+
+    const instance = await storage.getPacketInstance(context.instanceId);
+    if (!instance) return;
+
+    const itemToVisit = packetUtils.isUrlInPacket(url, instance, { returnItem: true });
+
+    if (itemToVisit && itemToVisit.interactionBasedCompletion !== true) {
+        const settings = await storage.getSettings();
+        const visitThresholdMs = (settings.visitThresholdSeconds ?? 5) * 1000;
+
+        const visitTimer = setTimeout(async () => {
+            pendingVisitTimers.delete(tabId);
+            const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+
+            if (activeTab && activeTab.id === tabId) {
+                const visitResult = await packetUtils.markUrlAsVisited(context.instanceId, itemToVisit.url);
+                if (visitResult.success && visitResult.modified) {
+                    const updatedInstance = visitResult.instance || await storage.getPacketInstance(context.instanceId);
+                    if (sidebarHandler.isSidePanelAvailable()) {
+                         sidebarHandler.notifySidebar('update_sidebar_context', {
+                             tabId, instanceId: updatedInstance.instanceId, instance: updatedInstance, currentUrl: url, packetUrl: itemToVisit.url
+                         });
+                    }
+                    await checkAndPromptForCompletion(`[Background:Timer]`, visitResult, context.instanceId);
+                }
+            }
+        }, visitThresholdMs);
+        pendingVisitTimers.set(tabId, visitTimer);
+    }
+}
+// --- FIX END ---
+
 
 // --- Helper: Initialize Storage ---
 async function initializeStorageAndSettings() {
@@ -482,6 +531,13 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
             const context = await getPacketContext(tabId);
             const instanceId = context?.instanceId || null;
             let instanceData = null;
+
+            // Use the reliable URL from our stored context for visit handling
+            const urlToVisit = context?.currentUrl || tabData.url;
+            if (urlToVisit) {
+                await handleTabVisit(tabId, urlToVisit);
+            }
+
             if (instanceId) {
                 instanceData = await storage.getPacketInstance(instanceId).catch(e => null);
                 if (!instanceData) {
@@ -514,7 +570,7 @@ chrome.tabs.onRemoved.addListener(async (tabId, removeInfo) => {
     const logPrefix = `[Unpack Background:onRemoved Tab ${tabId}]`;
     logger.log(logPrefix, 'Tab removed');
     
-    // Clear any pending visit timers for the closed tab
+    // Use the centralized clearer
     clearPendingVisitTimer(tabId);
 
     if (interimContextMap.has(tabId)) {

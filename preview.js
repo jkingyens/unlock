@@ -8,31 +8,25 @@ document.addEventListener('DOMContentLoaded', () => {
         return;
     }
 
-    // Listener for the response from the sidebar
-    chrome.runtime.onMessage.addListener(function handleResponse(message) {
-        if (message.action === 'draft_item_content_response' && message.data.pageId === pageId) {
+    // --- FIX START: Send message to background and handle direct response ---
+    chrome.runtime.sendMessage({
+        action: 'get_draft_item_for_preview',
+        data: { pageId: pageId }
+    }, (response) => {
+        if (response && response.success) {
             const frame = document.getElementById('content-frame');
-            
-            // Set the page title
-            if (message.data.title) {
-                document.title = message.data.title;
+            if (response.title) {
+                document.title = response.title;
             }
-
-            if (frame && message.data.htmlContent) {
-                // Use a sandboxed data URI for the iframe content
-                const dataUrl = 'data:text/html;charset=utf-8,' + encodeURIComponent(message.data.htmlContent);
+            if (frame && response.htmlContent) {
+                const dataUrl = 'data:text/html;charset=utf-8,' + encodeURIComponent(response.htmlContent);
                 frame.src = dataUrl;
             } else if (frame) {
                 frame.srcdoc = '<h1>Error: Could not load content.</h1>';
             }
-            // Clean up listener once we have our content
-            chrome.runtime.onMessage.removeListener(handleResponse);
+        } else {
+            document.body.innerHTML = `<h1>Error: ${response?.error || 'Could not load preview.'}</h1>`;
         }
     });
-
-    // Request the content from the sidebar
-    chrome.runtime.sendMessage({
-        action: 'get_draft_item_for_preview',
-        data: { pageId: pageId }
-    });
+    
 });

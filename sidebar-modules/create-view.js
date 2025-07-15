@@ -3,7 +3,7 @@
 // by adding the current page or generating new pages from prompts.
 
 import { domRefs } from './dom-references.js';
-import { logger, storage, base64Decode, shouldUseTabGroups, arrayBufferToBase64 } from '../utils.js';
+import { logger, storage, base64Decode, shouldUseTabGroups, indexedDbStorage } from '../utils.js';
 import { showConfirmDialog, showTitlePromptDialog } from './dialog-handler.js';
 
 // --- Module-specific State & Dependencies ---
@@ -13,6 +13,7 @@ let draggedItemIndex = null; // To track the item being dragged
 let initialDraftState = null; // To track if changes have been made
 let draftTabGroupId = null; // To hold the ID of the builder's tab group
 let isTabGroupSyncing = false; // To prevent concurrent sync operations
+let draftActiveAudio = null; // To manage playback for the draft view
 
 // Functions to be imported from the new, lean sidebar.js
 let navigateTo;
@@ -58,40 +59,11 @@ export function setupCreateViewListeners() {
         listEl.addEventListener('dragend', handleDragEnd);
     }
     
-    // Add a listener to serve content to the preview page
-    chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-        if (message.action === 'get_draft_item_for_preview' && sender.tab) {
-            const pageId = message.data.pageId;
-            const item = draftPacket?.sourceContent?.find(i => i.pageId === pageId);
-            if (item?.type === 'generated' && item.contentB64) {
-                const htmlContent = base64Decode(item.contentB64);
-                // Send the HTML content and title back to the specific preview tab
-                chrome.tabs.sendMessage(sender.tab.id, {
-                    action: 'draft_item_content_response',
-                    data: { 
-                        pageId: pageId, 
-                        htmlContent,
-                        title: item.title || 'Preview'
-                    }
-                });
-            }
-        }
-    });
-
     const dropZone = document.getElementById('drop-zone');
     if (dropZone) {
-        dropZone.addEventListener('dragenter', (e) => {
-            e.preventDefault();
-            dropZone.classList.add('drag-over');
-        });
-        dropZone.addEventListener('dragover', (e) => {
-            e.preventDefault();
-            dropZone.classList.add('drag-over');
-        });
-        dropZone.addEventListener('dragleave', (e) => {
-            e.preventDefault();
-            dropZone.classList.remove('drag-over');
-        });
+        dropZone.addEventListener('dragenter', (e) => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+        dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+        dropZone.addEventListener('dragleave', (e) => { e.preventDefault(); dropZone.classList.remove('drag-over'); });
         dropZone.addEventListener('drop', handleFileDrop);
     }
     
@@ -104,15 +76,25 @@ export function setupCreateViewListeners() {
  * @param {object | null} imageToEdit - The PacketImage to load for editing.
  */
 export async function prepareCreateView(imageToEdit = null) {
+    if (draftActiveAudio) {
+        draftActiveAudio.pause();
+        draftActiveAudio = null;
+    }
+
     if (imageToEdit) {
         isEditing = true;
         draftPacket = JSON.parse(JSON.stringify(imageToEdit));
         domRefs.createViewSaveBtn.textContent = 'Save Changes';
     } else {
         isEditing = false;
-        draftPacket = { topic: '', sourceContent: [] };
+        // FIX: Assign a temporary ID to new drafts so media can be saved to IndexedDB immediately.
+        const draftId = `draft_${Date.now()}`;
+        draftPacket = { id: draftId, topic: '', sourceContent: [] };
         domRefs.createViewSaveBtn.textContent = 'Save';
     }
+    
+    await storage.setSession({ 'draftPacketForPreview': draftPacket });
+    
     initialDraftState = JSON.stringify(draftPacket.sourceContent);
     renderDraftContentList();
     syncDraftGroup();
@@ -139,7 +121,12 @@ async function syncDraftGroup() {
     isTabGroupSyncing = true;
     try {
         const desiredUrls = draftPacket.sourceContent
-            .map((item, index) => getUrlForItem(item, index))
+            .flatMap(item => {
+                if (item.type === 'alternative') {
+                    return item.alternatives.map(alt => getUrlForItem(alt));
+                }
+                return getUrlForItem(item);
+            })
             .filter(Boolean);
 
         const response = await sendMessageToBackground({
@@ -161,6 +148,11 @@ async function cleanupDraftGroup() {
         await sendMessageToBackground({ action: 'cleanup_draft_group' });
         draftTabGroupId = null;
     }
+    await storage.removeSession('draftPacketForPreview');
+    // Also clean up any temporary draft media from IndexedDB
+    if (draftPacket && draftPacket.id.startsWith('draft_')) {
+        await indexedDbStorage.deleteGeneratedContentForImage(draftPacket.id);
+    }
 }
 
 // --- UI Rendering ---
@@ -169,15 +161,17 @@ function renderDraftContentList() {
     const listEl = domRefs.createViewContentList;
     if (!listEl) return;
 
-    // Clear only the cards, not the entire container
-    listEl.querySelectorAll('.card').forEach(card => card.remove());
+    listEl.querySelectorAll('.card, .alternative-group-card').forEach(card => card.remove());
 
     const listFragment = document.createDocumentFragment();
 
     if (draftPacket?.sourceContent?.length > 0) {
         draftPacket.sourceContent.forEach((item, index) => {
-            const card = createDraftContentCard(item, index);
-            if (card) {
+            let card;
+            if (item.type === 'alternative') {
+                card = createAlternativeGroupCard(item, index);
+            } else {
+                card = createDraftContentCard(item, index);
                 const removeBtn = document.createElement('button');
                 removeBtn.className = 'delete-draft-item-btn';
                 removeBtn.innerHTML = '&times;';
@@ -186,9 +180,13 @@ function renderDraftContentList() {
                     e.stopPropagation();
                     draftPacket.sourceContent.splice(index, 1);
                     renderDraftContentList();
+                    storage.setSession({ 'draftPacketForPreview': draftPacket });
                     syncDraftGroup();
                 });
                 card.appendChild(removeBtn);
+            }
+            
+            if (card) {
                 listFragment.appendChild(card);
             }
         });
@@ -197,36 +195,67 @@ function renderDraftContentList() {
     listEl.prepend(listFragment);
 }
 
+function createAlternativeGroupCard(groupItem, groupIndex) {
+    const groupCard = document.createElement('div');
+    groupCard.className = 'alternative-group-card';
+    groupCard.dataset.index = groupIndex;
+
+    groupItem.alternatives.forEach((altItem, altIndex) => {
+        const innerCard = createDraftContentCard(altItem, -1);
+        innerCard.setAttribute('draggable', 'false');
+        
+        const altRemoveBtn = document.createElement('button');
+        altRemoveBtn.className = 'delete-draft-item-btn';
+        altRemoveBtn.innerHTML = '&times;';
+        altRemoveBtn.title = 'Remove this alternative';
+        altRemoveBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            groupItem.alternatives.splice(altIndex, 1);
+            if (groupItem.alternatives.length === 1) {
+                draftPacket.sourceContent[groupIndex] = groupItem.alternatives[0];
+            }
+            renderDraftContentList();
+            storage.setSession({ 'draftPacketForPreview': draftPacket });
+            syncDraftGroup();
+        });
+        
+        innerCard.appendChild(altRemoveBtn);
+        groupCard.appendChild(innerCard);
+    });
+
+    return groupCard;
+}
+
+
 function createDraftContentCard(contentItem, index) {
     const card = document.createElement('div');
     card.className = 'card clickable';
-    card.setAttribute('draggable', 'true');
-    card.dataset.index = index;
-
+    if (index !== -1) {
+        card.setAttribute('draggable', 'true');
+        card.dataset.index = index;
+    }
+    
     const { title = 'Untitled', type } = contentItem;
     let iconHTML = '?';
     let displayUrl = '';
     const itemUrl = getUrlForItem(contentItem, index);
 
-    if (type === 'external') {
-        iconHTML = '🔗';
-        try {
-            displayUrl = new URL(itemUrl).hostname.replace(/^www\./, '');
-        } catch (e) {
-            displayUrl = itemUrl ? itemUrl.substring(0, 40) + '...' : 'Invalid URL';
-        }
-    } else if (type === 'generated') {
-        iconHTML = '📄';
-        displayUrl = "Preview (Generated)";
-    } else if (type === 'media') {
-        iconHTML = '🎵';
-        displayUrl = "Media File";
+    if (type === 'external') { iconHTML = '🔗'; try { displayUrl = new URL(itemUrl).hostname.replace(/^www\./, ''); } catch (e) { displayUrl = itemUrl ? itemUrl.substring(0, 40) + '...' : 'Invalid URL'; }
+    } else if (type === 'generated') { iconHTML = '📄'; displayUrl = "Preview (Generated)";
+    } else if (type === 'media') { 
+        iconHTML = '▶️';
+        displayUrl = "Audio Preview";
+        card.classList.add('media');
+        card.dataset.pageId = contentItem.pageId;
     }
 
     card.title = `Click to open or focus tab: ${title}`;
     card.addEventListener('click', async (e) => {
         if (e.target.classList.contains('delete-draft-item-btn') || e.target.classList.contains('drag-handle')) return;
-        if (itemUrl) {
+        
+        if (contentItem.type === 'media') {
+            toggleDraftAudioPlayback(contentItem, card);
+        } else if (itemUrl) {
             if (await shouldUseTabGroups()) {
                 sendMessageToBackground({ action: 'focus_or_create_draft_tab', data: { url: itemUrl } });
             } else {
@@ -236,7 +265,7 @@ function createDraftContentCard(contentItem, index) {
     });
 
     card.innerHTML = `
-        <div class="drag-handle" title="Drag to reorder">⠿</div>
+        <div class="drag-handle" title="Drag to reorder">☰</div>
         <div class="card-icon">${iconHTML}</div>
         <div class="card-text">
             <div class="card-title">${title}</div>
@@ -245,28 +274,66 @@ function createDraftContentCard(contentItem, index) {
     return card;
 }
 
-/**
- * Checks if the current draft has been modified.
- * @returns {boolean}
- */
 function isDraftDirty() {
     if (!draftPacket) return false;
     const currentDraftState = JSON.stringify(draftPacket.sourceContent);
     return currentDraftState !== initialDraftState;
 }
 
+// --- Audio Playback Handler ---
+
+async function toggleDraftAudioPlayback(item, card) {
+    const iconElement = card.querySelector('.card-icon');
+
+    if (draftActiveAudio && draftActiveAudio.dataset.pageId === item.pageId && !draftActiveAudio.paused) {
+        draftActiveAudio.pause();
+        return;
+    }
+
+    if (draftActiveAudio) {
+        draftActiveAudio.pause();
+        const oldCard = document.querySelector(`.card.media[data-page-id="${draftActiveAudio.dataset.pageId}"]`);
+        if (oldCard) {
+            oldCard.querySelector('.card-icon').textContent = '▶️';
+        }
+    }
+
+    // --- FIX START: Fetch audio from IndexedDB ---
+    try {
+        const audioContent = await indexedDbStorage.getGeneratedContent(draftPacket.id, item.pageId);
+        if (!audioContent || audioContent.length === 0) {
+            throw new Error(`Audio content not found in IndexedDB for pageId: ${item.pageId}`);
+        }
+        
+        const audioData = audioContent[0].content; // This is an ArrayBuffer
+        const blob = new Blob([audioData], { type: item.mimeType });
+        const audioUrl = URL.createObjectURL(blob);
+
+        const audio = new Audio(audioUrl);
+        audio.dataset.pageId = item.pageId;
+        
+        audio.onplay = () => { if (iconElement) iconElement.textContent = '⏸️'; };
+        audio.onpause = () => { if (iconElement) iconElement.textContent = '▶️'; };
+        audio.onended = () => { if (iconElement) iconElement.textContent = '▶️'; draftActiveAudio = null; };
+
+        audio.play();
+        draftActiveAudio = audio;
+
+    } catch (error) {
+        logger.error("CreateView:toggleDraftAudio", "Failed to load and play audio from IndexedDB", error);
+        showRootViewStatus("Could not play audio preview.", "error");
+    }
+    // --- FIX END ---
+}
+
 // --- Action Handlers ---
 
 export async function handleDiscardDraftPacket() {
     if (isDraftDirty()) {
-        const confirmed = await showConfirmDialog(
-            'You have unsaved changes. Are you sure you want to discard them?',
-            'Discard Changes',
-            'Cancel',
-            true
-        );
+        const confirmed = await showConfirmDialog( 'You have unsaved changes. Are you sure you want to discard them?', 'Discard Changes', 'Cancel', true );
         if (!confirmed) return;
     }
+    if (draftActiveAudio) draftActiveAudio.pause();
     await cleanupDraftGroup();
     draftPacket = null;
     isEditing = false;
@@ -280,23 +347,33 @@ async function handleSaveDraftPacket() {
         return;
     }
     
+    if (draftActiveAudio) draftActiveAudio.pause();
     await cleanupDraftGroup();
 
     let packetToSave = { ...draftPacket };
 
-    if (!isEditing) {
+    if (packetToSave.id.startsWith('draft_')) {
+        const originalDraftId = packetToSave.id;
         const topic = await showTitlePromptDialog();
         if (!topic) return;
         packetToSave.topic = topic;
         packetToSave.id = `img_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
         packetToSave.created = new Date().toISOString();
+        
+        // Move content in IndexedDB from draft key to final key
+        for (const item of packetToSave.sourceContent) {
+            if (item.type === 'media') {
+                const content = await indexedDbStorage.getGeneratedContent(originalDraftId, item.pageId);
+                if (content) {
+                    await indexedDbStorage.saveGeneratedContent(packetToSave.id, item.pageId, content);
+                    await indexedDbStorage.deleteGeneratedContent(originalDraftId, item.pageId);
+                }
+            }
+        }
     }
 
     try {
-        const response = await sendMessageToBackground({
-            action: 'save_packet_image',
-            data: { image: packetToSave }
-        });
+        const response = await sendMessageToBackground({ action: 'save_packet_image', data: { image: packetToSave } });
         if (response && response.success) {
             showRootViewStatus(`Packet "${packetToSave.topic}" saved.`, 'success');
             draftPacket = null;
@@ -319,29 +396,19 @@ async function handleAddCurrentPageToDraft() {
 
     try {
         const tabInfo = await sendMessageToBackground({ action: 'get_current_tab_context' });
-        if (!tabInfo?.success || !tabInfo.currentUrl) {
-            throw new Error("Could not get current tab info.");
-        }
+        if (!tabInfo?.success || !tabInfo.currentUrl) { throw new Error("Could not get current tab info."); }
         
         const { currentUrl, title } = tabInfo;
-        if (currentUrl.startsWith('chrome://') || currentUrl.startsWith('chrome-extension://')) {
-            throw new Error("Cannot add special browser pages to a packet.");
-        }
+        if (currentUrl.startsWith('chrome://') || currentUrl.startsWith('chrome-extension://')) { throw new Error("Cannot add special browser pages to a packet."); }
         if (draftPacket.sourceContent.some(item => item.url === currentUrl)) {
-            if (await shouldUseTabGroups()) {
-                sendMessageToBackground({ action: 'focus_or_create_draft_tab', data: { url: currentUrl } });
-            }
+            if (await shouldUseTabGroups()) { sendMessageToBackground({ action: 'focus_or_create_draft_tab', data: { url: currentUrl } }); }
             throw new Error("This page is already in the draft.");
         }
         
-        draftPacket.sourceContent.push({
-            type: 'external',
-            url: currentUrl,
-            title: title,
-            relevance: ''
-        });
+        draftPacket.sourceContent.push({ type: 'external', url: currentUrl, title: title, relevance: '' });
         
         renderDraftContentList();
+        await storage.setSession({ 'draftPacketForPreview': draftPacket });
         await syncDraftGroup();
         showRootViewStatus('Page added to draft.', 'success');
 
@@ -387,21 +454,18 @@ async function handleConfirmMakePage() {
     try {
         const response = await sendMessageToBackground({
             action: 'generate_custom_page',
-            data: {
-                prompt: prompt,
-                topic: draftPacket?.topic || 'Custom Packet',
-                context: draftPacket?.sourceContent || []
-            }
+            data: { prompt: prompt, topic: draftPacket?.topic || 'Custom Packet', context: draftPacket?.sourceContent || [] }
         });
 
         if (response?.success && response.newItem) {
-            const newContentItem = response.newItem;
-            draftPacket.sourceContent.push(newContentItem);
+            draftPacket.sourceContent.push(response.newItem);
             renderDraftContentList();
             hideMakePageDialog();
             
+            await storage.setSession({ 'draftPacketForPreview': draftPacket });
             await syncDraftGroup();
-            const previewUrl = getUrlForItem(newContentItem, draftPacket.sourceContent.length - 1);
+            
+            const previewUrl = getUrlForItem(response.newItem, draftPacket.sourceContent.length - 1);
             if (previewUrl && (await shouldUseTabGroups())) {
                 await sendMessageToBackground({ action: 'focus_or_create_draft_tab', data: { url: previewUrl } });
             }
@@ -421,47 +485,42 @@ async function handleConfirmMakePage() {
 // --- Drag and Drop Handlers ---
 
 function handleDragStart(e) {
-    const targetCard = e.target.closest('.card[draggable="true"]');
+    const targetCard = e.target.closest('.card[draggable="true"], .alternative-group-card');
     if (targetCard) {
         draggedItemIndex = parseInt(targetCard.dataset.index, 10);
         e.dataTransfer.effectAllowed = 'move';
-        setTimeout(() => {
-            targetCard.classList.add('dragging');
-        }, 0);
+        setTimeout(() => { targetCard.classList.add('dragging'); }, 0);
     }
 }
 
 function handleDragOver(e) {
     e.preventDefault();
-    const targetCard = e.target.closest('.card[draggable="true"]');
-    if (targetCard && !targetCard.classList.contains('dragging')) {
+    const dropZone = e.target.closest('.card[draggable="true"], .alternative-group-card');
+    if (dropZone && !dropZone.classList.contains('dragging')) {
         document.querySelectorAll('.drag-over-indicator').forEach(el => el.classList.remove('drag-over-indicator'));
-        targetCard.classList.add('drag-over-indicator');
+        dropZone.classList.add('drag-over-indicator');
     }
 }
 
 function handleDragLeave(e) {
-    const targetCard = e.target.closest('.card[draggable="true"]');
-    if (targetCard) {
-        targetCard.classList.remove('drag-over-indicator');
-    }
+    e.target.closest('.card, .alternative-group-card')?.classList.remove('drag-over-indicator');
 }
 
 async function handleDrop(e) {
     e.preventDefault();
-    const dropTargetCard = e.target.closest('.card[draggable="true"]');
+    const dropTarget = e.target.closest('.card[draggable="true"], .alternative-group-card');
     
-    if (dropTargetCard && draggedItemIndex !== null) {
-        const droppedOnIndex = parseInt(dropTargetCard.dataset.index, 10);
-
+    if (dropTarget && draggedItemIndex !== null) {
+        const droppedOnIndex = parseInt(dropTarget.dataset.index, 10);
         if (draggedItemIndex !== droppedOnIndex) {
             const [draggedItem] = draftPacket.sourceContent.splice(draggedItemIndex, 1);
             draftPacket.sourceContent.splice(droppedOnIndex, 0, draggedItem);
             renderDraftContentList();
+            await storage.setSession({ 'draftPacketForPreview': draftPacket });
             await syncDraftGroup();
         }
     }
-    dropTargetCard?.classList.remove('drag-over-indicator');
+    dropTarget?.classList.remove('drag-over-indicator');
 }
 
 function handleDragEnd(e) {
@@ -477,17 +536,27 @@ function handleFileDrop(e) {
     if (e.dataTransfer.files) {
         for (const file of e.dataTransfer.files) {
             const reader = new FileReader();
-            reader.onload = (event) => {
+            reader.onload = async (event) => {
                 const newMediaItem = {
                     type: 'media',
                     pageId: `media_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
                     title: file.name,
                     mimeType: file.type,
-                    contentB64: arrayBufferToBase64(event.target.result),
                 };
+                
+                // Save the ArrayBuffer to IndexedDB immediately using the draft ID
+                const audioBuffer = event.target.result;
+                await indexedDbStorage.saveGeneratedContent(draftPacket.id, newMediaItem.pageId, [{
+                    name: 'audio.mp3', // Generic name, doesn't really matter here
+                    content: audioBuffer,
+                    contentType: newMediaItem.mimeType
+                }]);
+
                 draftPacket.sourceContent.push(newMediaItem);
                 renderDraftContentList();
+                await storage.setSession({ 'draftPacketForPreview': draftPacket });
             };
+            // Read as an ArrayBuffer to store in IndexedDB
             reader.readAsArrayBuffer(file);
         }
     }

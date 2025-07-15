@@ -14,6 +14,7 @@
   --table-header-bg: #f2f2f2; --table-row-hover-bg: var(--bg-tertiary);
   --card-shadow: rgba(0, 0, 0, 0.08); --card-hover-shadow: rgba(0, 0, 0, 0.12); --card-border-visited: #1e8e3e; --card-border-active: var(--text-accent);
   --bg-overlay: rgba(0,0,0,0.5);
+  --media-progress-overlay-bg: rgba(255, 255, 255, 0.4);
 }
 .hidden { display: none !important; }
 /* --- Dark Mode Variables --- */
@@ -31,7 +32,8 @@
     --table-header-bg: #2d2e31; --table-row-hover-bg: var(--bg-tertiary);
     --card-shadow: rgba(0,0,0,0.3); --card-hover-shadow: rgba(0,0,0,0.4); --card-border-visited: #81c995; 
     --card-border-active: var(--packet-color-accent, var(--border-focus)); 
-    --bg-overlay: rgba(0,0,0,0.7); 
+    --bg-overlay: rgba(0,0,0,0.7);
+    --media-progress-overlay-bg: rgba(0, 0, 0, 0.4);
   }
 }
 body.dark-mode {
@@ -48,6 +50,7 @@ body.dark-mode {
     --card-shadow: rgba(0,0,0,0.3); --card-hover-shadow: rgba(0,0,0,0.4); --card-border-visited: #81c995;
     --card-border-active: var(--packet-color-accent, var(--border-focus)); 
     --bg-overlay: rgba(0,0,0,0.7);
+    --media-progress-overlay-bg: rgba(0, 0, 0, 0.4);
 }
 
 /* === Base Layout, Header, Main Content Area, View Container === */
@@ -312,27 +315,6 @@ body.dark-mode #detail-action-button-container button:hover { background-color: 
   cursor: not-allowed;
 }
 
-.media-player-button {
-    background: conic-gradient(var(--packet-color-accent, var(--text-accent)) calc(var(--p, 0) * 1%), var(--bg-tertiary) 0);
-    border-radius: 50%;
-    width: 30px;
-    height: 30px;
-    cursor: pointer;
-    font-size: 1.2em;
-    color: var(--text-accent);
-    display: grid;
-    place-items: center;
-}
-
-.media-player-button::before {
-    content: "";
-    width: 80%;
-    height: 80%;
-    background-color: var(--bg-secondary);
-    border-radius: 50%;
-}
-
-
 /* === Settings View (#settings-view) === */
 #settings-view { padding: 10px 15px; overflow-y: auto; flex-grow: 1; }
 #settings-view h3 { margin-top: 15px; margin-bottom: 10px; font-size: 1.1em; color: var(--text-secondary); border-bottom: 1px solid var(--border-secondary); padding-bottom: 5px; overflow: visible;}
@@ -565,4 +547,87 @@ body.dark-mode #detail-cards-container .card.active.visited { border-color: var(
 #settings-view #visit-threshold-seconds {
   width: 75px; /* Give it a smaller, fixed width */
   flex-shrink: 0; /* Prevent it from shrinking if the label text is long */
+}
+
+/* --- NEW/REVISED MEDIA CARD STYLES --- */
+#detail-cards-container .card.media {
+  padding: 0;
+  height: 64px;
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+  background-color: var(--bg-secondary);
+}
+
+.media-waveform-container {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  /* REMOVED: "pointer-events: none;" was here, causing the issue */
+  cursor: pointer;
+}
+
+.waveform-svg {
+  width: 100%;
+  height: 100%;
+  object-fit: fill; /* Stretch the SVG to fill the container */
+}
+
+.media-progress-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  width: 0%; /* Controlled by JS */
+  background-color: var(--media-progress-overlay-bg);
+  mix-blend-mode: screen; /* Creates a nice effect over the colored waveform */
+  transition: width 0.1s linear;
+  pointer-events: none;
+}
+body.dark-mode .media-progress-overlay {
+   mix-blend-mode: multiply; /* Better effect for dark mode */
+}
+
+
+.card.media .media-play-icon {
+  position: relative;
+  z-index: 2;
+  font-size: 1.5em;
+  padding: 0 12px 0 15px;
+  color: var(--text-primary);
+  text-shadow: 0 0 4px var(--bg-secondary);
+}
+
+.card.media .card-text {
+  position: relative;
+  z-index: 2;
+  padding-right: 12px;
+}
+
+.card.media .card-title {
+  color: var(--text-primary);
+  font-weight: 600;
+  text-shadow: 0 0 4px var(--bg-secondary);
+}
+
+.card.media:hover {
+  background-color: var(--bg-tertiary);
+}
+
+/* --- NEW: Alternative Group Styles --- */
+.alternative-group-card {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    background-color: var(--bg-primary);
+    border: 1px solid var(--border-primary);
+    border-radius: 6px;
+    padding: 10px;
+    margin-bottom: 10px;
+}
+.alternative-group-card .card {
+    margin-bottom: 0; /* Override default card margin */
+    box-shadow: none; /* Sub-cards don't need their own shadow */
 }

@@ -587,7 +587,13 @@ function insertRowSorted(row, listElement) {
 
 export function calculateInstanceProgress(instance, mediaProgress = {}) {
     if (!instance || !Array.isArray(instance.contents)) return { visitedCount: 0, totalCount: 0, progressPercentage: 0 };
-    const trackableItems = instance.contents.filter(item => (item.type === 'external' && item.url) || ((item.type === 'generated' || item.type === 'media') && item.pageId));
+    
+    // FIX: A PacketInstance's contents are resolved and do not contain 'alternative' wrappers.
+    const trackableItems = instance.contents.filter(item => 
+        (item.type === 'external' && item.url) || 
+        ((item.type === 'generated' || item.type === 'media') && item.pageId)
+    );
+
     const totalCount = trackableItems.length;
     if (totalCount === 0) return { visitedCount: 0, totalCount: 0, progressPercentage: 0 };
     
@@ -600,6 +606,7 @@ export function calculateInstanceProgress(instance, mediaProgress = {}) {
             if (visitedGeneratedIds.has(item.pageId)) {
                 visitedCount++;
             } else if (mediaProgress[item.pageId]) {
+                // For real-time progress of media being played
                 visitedCount += mediaProgress[item.pageId];
             }
         } else if (item.type === 'external' && item.url && visitedUrlsSet.has(item.url)) {
@@ -613,6 +620,7 @@ export function calculateInstanceProgress(instance, mediaProgress = {}) {
         progressPercentage: totalCount > 0 ? Math.round((visitedCount / totalCount) * 100) : 0
     };
 }
+
 
 /**
  * Creates or updates a placeholder "stencil" for a packet image being created.

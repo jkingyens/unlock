@@ -21,6 +21,31 @@ export function init(dependencies) {
     sendMessageToBackground = dependencies.sendMessageToBackground;
 }
 
+// --- Waveform Generation Helper ---
+
+/**
+ * Generates a simple, decorative SVG waveform data URI.
+ * @param {string} color - The hex color for the waveform bars.
+ * @returns {string} - A data URI for the SVG.
+ */
+function _generateWaveformSVGDataUri(color = '#a0a0a0') {
+    const width = 200;
+    const height = 40;
+    let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none">`;
+    const barCount = 50;
+    const barWidth = width / barCount;
+
+    for (let i = 0; i < barCount; i++) {
+        const barHeight = Math.random() * (height - 10) + 10;
+        const y = (height - barHeight) / 2;
+        svg += `<rect x="${i * barWidth}" y="${y}" width="${barWidth - 1}" height="${barHeight}" fill="${color}" rx="1"/>`;
+    }
+
+    svg += `</svg>`;
+    return `data:image/svg+xml;base64,${btoa(svg)}`;
+}
+
+
 // --- Main Rendering Function ---
 
 /**
@@ -94,7 +119,7 @@ export async function displayPacketContent(instance, currentPacketUrl) {
             const fragment = document.createDocumentFragment();
             fragment.appendChild(createProgressSection(instance));
             fragment.appendChild(await createActionButtons(instance));
-            const cardsWrapper = createCardsSection(instance);
+            const cardsWrapper = await createCardsSection(instance);
             cardsWrapper.dataset.instanceId = instance.instanceId; // Tag the container for future updates
             fragment.appendChild(cardsWrapper);
 
@@ -161,16 +186,22 @@ async function createActionButtons(instance) {
     return actionButtonContainer;
 }
 
-function createCardsSection(instance) {
+async function createCardsSection(instance) {
     const cardsWrapper = document.createElement('div');
     cardsWrapper.id = 'detail-cards-container';
     const visitedUrlsSet = new Set(instance.visitedUrls || []);
     const visitedGeneratedIds = new Set(instance.visitedGeneratedPageIds || []);
 
     if (instance.contents && instance.contents.length > 0) {
-        instance.contents.forEach(item => {
-            const card = createContentCard(item, visitedUrlsSet, visitedGeneratedIds, instance);
-            if (card) cardsWrapper.appendChild(card);
+        const cardPromises = instance.contents.map(item =>
+            createContentCard(item, visitedUrlsSet, visitedGeneratedIds, instance)
+        );
+        
+        const cards = await Promise.all(cardPromises);
+        cards.forEach(card => {
+            if (card) {
+                cardsWrapper.appendChild(card);
+            }
         });
     } else {
         cardsWrapper.innerHTML = '<div class="empty-state">This packet has no content items.</div>';
@@ -180,8 +211,20 @@ function createCardsSection(instance) {
     return cardsWrapper;
 }
 
-function createContentCard(contentItem, visitedUrlsSet, visitedGeneratedIds, instance) {
+async function createContentCard(contentItem, visitedUrlsSet, visitedGeneratedIds, instance) {
     if (!contentItem || !contentItem.type) return null;
+
+    if (contentItem.type === 'alternative') {
+        const settings = await storage.getSettings();
+        const preferAudio = settings.elevenlabsApiKey && contentItem.alternatives.some(a => a.type === 'media');
+        
+        const chosenItem = preferAudio 
+            ? contentItem.alternatives.find(a => a.type === 'media')
+            : contentItem.alternatives.find(a => a.type === 'generated');
+
+        return chosenItem ? createContentCard(chosenItem, visitedUrlsSet, visitedGeneratedIds, instance) : null;
+    }
+
 
     const card = document.createElement('div');
     card.className = 'card';
@@ -197,6 +240,8 @@ function createContentCard(contentItem, visitedUrlsSet, visitedGeneratedIds, ins
             isClickable = true;
             isVisited = visitedUrlsSet.has(urlToOpen);
         }
+        card.innerHTML = `<div class="card-icon">${iconHTML}</div><div class="card-text"><div class="card-title">${title}</div><div class="card-url">${displayUrl}</div>${relevance ? `<div class="card-relevance">${relevance}</div>` : ''}</div>`;
+
     } else if (type === 'generated') {
         iconHTML = '📄';
         if (urlToOpen && contentItem.published) {
@@ -207,32 +252,37 @@ function createContentCard(contentItem, visitedUrlsSet, visitedGeneratedIds, ins
             card.style.opacity = '0.7';
             displayUrl = contentItem.published ? '(Error: URL missing)' : '(Not Published)';
         }
+        card.innerHTML = `<div class="card-icon">${iconHTML}</div><div class="card-text"><div class="card-title">${title}</div><div class="card-url">${displayUrl}</div>${relevance ? `<div class="card-relevance">${relevance}</div>` : ''}</div>`;
+
     } else if (type === 'media') {
-        iconHTML = '▶️';
+        card.classList.add('media');
         if (contentItem.published) {
             isClickable = true;
             isVisited = visitedGeneratedIds.has(contentItem.pageId);
-            displayUrl = title;
         } else {
             card.style.opacity = '0.7';
-            displayUrl = '(Not Published)';
         }
+        
+        const waveformColor = getComputedStyle(domRefs.packetDetailView).getPropertyValue('--packet-color-accent').trim();
+        const waveformDataUri = _generateWaveformSVGDataUri(waveformColor);
+
+        card.innerHTML = `
+            <div class="media-waveform-container">
+                <img src="${waveformDataUri}" class="waveform-svg" alt="Audio waveform" />
+                <div class="media-progress-overlay"></div>
+            </div>
+            <div class="media-play-icon">▶️</div>
+            <div class="card-text">
+                <div class="card-title">${title}</div>
+            </div>
+        `;
     }
 
 
-    card.innerHTML = `<div class="card-icon">${iconHTML}</div><div class="card-text"><div class="card-title">${title}</div><div class="card-url">${displayUrl}</div>${relevance ? `<div class="card-relevance">${relevance}</div>` : ''}</div>`;
-    
     if (isClickable) {
         card.classList.add('clickable');
         if (type === 'media') {
-            const playerButton = document.createElement('button');
-            playerButton.className = 'media-player-button';
-            playerButton.textContent = '▶️';
-            playerButton.onclick = (e) => {
-                e.stopPropagation();
-            };
-            card.addEventListener('click', () => playMediaInCard(card, contentItem, instance));
-            card.appendChild(playerButton);
+            playMediaInCard(card, contentItem, instance);
         } else {
             card.addEventListener('click', () => openUrl(urlToOpen, instance.instanceId));
         }
@@ -241,6 +291,7 @@ function createContentCard(contentItem, visitedUrlsSet, visitedGeneratedIds, ins
     
     return card;
 }
+
 
 // --- UI Updates ---
 
@@ -280,111 +331,123 @@ function handleCloseTabGroup(tabGroupId) {
 }
 
 async function playMediaInCard(card, contentItem, instance) {
-    if (activeAudioElement && !activeAudioElement.paused && activeAudioElement.dataset.pageId === contentItem.pageId) {
-        activeAudioElement.pause();
-        return;
-    }
-    
-    // If clicking on a different audio card, pause the old one
-    if (activeAudioElement && activeAudioElement.dataset.pageId !== contentItem.pageId) {
-        activeAudioElement.pause();
-    }
+    const waveformContainer = card.querySelector('.media-waveform-container');
+    if (!waveformContainer) return;
 
-    const playerButton = card.querySelector('.media-player-button');
-    if (!playerButton) return;
-
-    // Use existing audio element if it's for the same media, otherwise create new
-    if (!activeAudioElement || activeAudioElement.dataset.pageId !== contentItem.pageId) {
-        const audio = new Audio();
-        audio.dataset.pageId = contentItem.pageId;
-        activeAudioElement = audio;
-        
-        const cachedAudio = await indexedDbStorage.getGeneratedContent(instance.instanceId, contentItem.pageId);
-        if (cachedAudio) {
-            const blob = new Blob([cachedAudio[0].content], { type: contentItem.mimeType });
-            audio.src = URL.createObjectURL(blob);
-        } else {
-            const response = await sendMessageToBackground({
-                action: 'get_presigned_url',
-                data: { s3Key: contentItem.url, instanceId: instance.instanceId }
-            });
-            if (response.success) {
-                audio.src = response.url;
-            } else {
-                logger.error("DetailView", "Failed to get presigned URL for media", response.error);
-                return;
-            }
-        }
-    }
-    
-    const audio = activeAudioElement;
-    const sessionKey = `audio_progress_${instance.instanceId}_${contentItem.pageId}`;
-    
-    audio.onplay = () => {
-        playerButton.textContent = '⏸️';
-    };
-
-    audio.onpause = async () => {
-        playerButton.textContent = '▶️';
-        await storage.setSession({ [sessionKey]: audio.currentTime });
-
-        // Perform a final progress calculation on pause to "set" the state
-        const freshInstance = await storage.getPacketInstance(instance.instanceId);
-        if (!freshInstance) return;
-
-        if (!audio.duration || isNaN(audio.duration)) return;
-
-        const { progressPercentage } = calculateInstanceProgress(freshInstance, { [contentItem.pageId]: audio.currentTime / audio.duration });
-        const progressBar = document.querySelector('#detail-progress-container .progress-bar');
-        if (progressBar) {
-            progressBar.style.width = `${progressPercentage}%`;
-        }
-    };
-
-    audio.ontimeupdate = async () => {
-        if (!audio.duration || isNaN(audio.duration)) return;
-        
-        const freshInstance = await storage.getPacketInstance(instance.instanceId);
-        if (!freshInstance) return;
-
-        const percentage = (audio.currentTime / audio.duration) * 100;
-        playerButton.style.setProperty('--p', percentage);
-        const { progressPercentage } = calculateInstanceProgress(freshInstance, { [contentItem.pageId]: percentage / 100 });
-        const progressBar = document.querySelector('#detail-progress-container .progress-bar');
-        if (progressBar) {
-            progressBar.style.width = `${progressPercentage}%`;
-        }
-    };
-
-    audio.onended = async () => {
-        playerButton.textContent = '▶️';
-        playerButton.style.setProperty('--p', 100);
-        storage.removeSession(sessionKey);
-        await sendMessageToBackground({
-            action: 'media_playback_complete',
-            data: {
-                instanceId: instance.instanceId,
-                pageId: contentItem.pageId
+    const initializeAndPlayAudio = async () => {
+        document.querySelectorAll('.card.media.playing').forEach(c => {
+            if (c !== card) {
+                c.classList.remove('playing');
+                const icon = c.querySelector('.media-play-icon');
+                if (icon) icon.textContent = '▶️';
             }
         });
+        
+        card.classList.add('playing');
+        const playIcon = card.querySelector('.media-play-icon');
+
+        if (!activeAudioElement || activeAudioElement.dataset.pageId !== contentItem.pageId) {
+            const audio = new Audio();
+            audio.dataset.pageId = contentItem.pageId;
+            activeAudioElement = audio;
+            
+            const cachedAudio = await indexedDbStorage.getGeneratedContent(instance.imageId, contentItem.pageId);
+            if (cachedAudio) {
+                const blob = new Blob([cachedAudio[0].content], { type: contentItem.mimeType });
+                audio.src = URL.createObjectURL(blob);
+            } else {
+                const response = await sendMessageToBackground({
+                    action: 'get_presigned_url',
+                    data: { s3Key: contentItem.url, instanceId: instance.instanceId }
+                });
+                if (response.success) {
+                    audio.src = response.url;
+                } else {
+                    logger.error("DetailView", "Failed to get presigned URL for media", response.error);
+                    card.classList.remove('playing');
+                    return;
+                }
+            }
+        }
+        
+        const audio = activeAudioElement;
+        const sessionKey = `audio_progress_${instance.instanceId}_${contentItem.pageId}`;
+        const progressOverlay = card.querySelector('.media-progress-overlay');
+        
+        audio.onplay = () => { if (playIcon) playIcon.textContent = '⏸️'; card.classList.add('playing'); };
+        audio.onpause = async () => { if (playIcon) playIcon.textContent = '▶️'; card.classList.remove('playing'); await storage.setSession({ [sessionKey]: audio.currentTime }); const freshInstance = await storage.getPacketInstance(instance.instanceId); if (!freshInstance || !audio.duration || isNaN(audio.duration)) return; const { progressPercentage } = calculateInstanceProgress(freshInstance, { [contentItem.pageId]: audio.currentTime / audio.duration }); const progressBar = document.querySelector('#detail-progress-container .progress-bar'); if (progressBar) progressBar.style.width = `${progressPercentage}%`; };
+        audio.ontimeupdate = async () => { if (!audio.duration || isNaN(audio.duration)) return; const freshInstance = await storage.getPacketInstance(instance.instanceId); if (!freshInstance) return; const percentage = (audio.currentTime / audio.duration) * 100; if (progressOverlay) progressOverlay.style.width = `${percentage}%`; const { progressPercentage } = calculateInstanceProgress(freshInstance, { [contentItem.pageId]: percentage / 100 }); const progressBar = document.querySelector('#detail-progress-container .progress-bar'); if (progressBar) progressBar.style.width = `${progressPercentage}%`; };
+        audio.onended = async () => { if (playIcon) playIcon.textContent = '▶️'; card.classList.remove('playing'); if (progressOverlay) progressOverlay.style.width = '100%'; storage.removeSession(sessionKey); await sendMessageToBackground({ action: 'media_playback_complete', data: { instanceId: instance.instanceId, pageId: contentItem.pageId } }); };
+        
+        audio.onloadedmetadata = async () => { const sessionData = await storage.getSession(sessionKey); const savedTime = sessionData[sessionKey]; if (savedTime && isFinite(savedTime)) audio.currentTime = savedTime; audio.play(); };
+        if (audio.readyState >= 1) { const sessionData = await storage.getSession(sessionKey); const savedTime = sessionData[sessionKey]; if (savedTime && isFinite(savedTime)) audio.currentTime = savedTime; audio.play(); }
     };
     
-    audio.onloadedmetadata = async () => {
-        const sessionData = await storage.getSession(sessionKey);
-        const savedTime = sessionData[sessionKey];
-        if (savedTime && isFinite(savedTime)) {
-            audio.currentTime = savedTime;
-        }
-        audio.play();
+    // --- REVISED SEEK AND PLAY/PAUSE LOGIC ---
+    let isDragging = false;
+    let wasPlayingBeforeSeek = false;
+    let dragThreshold = 5; // Pixels mouse must move to be considered a drag
+    let startX = 0;
+
+    const handleSeek = (e) => {
+        if (!activeAudioElement || !activeAudioElement.duration) return;
+        const rect = waveformContainer.getBoundingClientRect();
+        const offsetX = e.clientX - rect.left;
+        const percentage = Math.max(0, Math.min(1, offsetX / rect.width));
+        activeAudioElement.currentTime = percentage * activeAudioElement.duration;
     };
 
-    // If audio is already loaded, check session and play. Otherwise, onloadedmetadata will handle it.
-    if (audio.readyState >= 1) { // HAVE_METADATA
-         const sessionData = await storage.getSession(sessionKey);
-         const savedTime = sessionData[sessionKey];
-         if (savedTime && isFinite(savedTime)) {
-             audio.currentTime = savedTime;
-         }
-         audio.play();
-    }
+    const handleMouseMove = (e) => {
+        if (Math.abs(e.clientX - startX) > dragThreshold) {
+            isDragging = true;
+            if (!wasPlayingBeforeSeek && activeAudioElement) {
+                 activeAudioElement.pause();
+            }
+        }
+        if (isDragging) {
+            handleSeek(e);
+        }
+    };
+
+    const handleMouseUp = (e) => {
+        document.removeEventListener('mousemove', handleMouseMove);
+        document.removeEventListener('mouseup', handleMouseUp);
+        
+        if (isDragging) {
+            // Seek is finished, handle final position
+            handleSeek(e);
+            if (wasPlayingBeforeSeek && activeAudioElement) {
+                activeAudioElement.play();
+            }
+        } else {
+            // This was a click, not a drag. Toggle play/pause.
+            if (activeAudioElement && !activeAudioElement.paused) {
+                activeAudioElement.pause();
+            } else if (activeAudioElement && activeAudioElement.paused) {
+                activeAudioElement.play();
+            } else {
+                initializeAndPlayAudio();
+            }
+        }
+        isDragging = false;
+    };
+    
+    waveformContainer.onmousedown = (e) => {
+        e.preventDefault();
+        isDragging = false;
+        startX = e.clientX;
+        wasPlayingBeforeSeek = activeAudioElement && !activeAudioElement.paused;
+
+        // If audio isn't loaded yet, initialize it on first interaction
+        if (!activeAudioElement) {
+            initializeAndPlayAudio().then(() => {
+                // Now that audio is loaded, we can proceed
+                document.addEventListener('mousemove', handleMouseMove);
+                document.addEventListener('mouseup', handleMouseUp);
+            });
+        } else {
+            document.addEventListener('mousemove', handleMouseMove);
+            document.addEventListener('mouseup', handleMouseUp);
+        }
+    };
 }
