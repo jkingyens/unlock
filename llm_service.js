@@ -183,26 +183,25 @@ function getSummaryPromptText(context) {
     const externalArticlesForSynthesis = allPacketContents.filter(item => item.type === 'external' && item.url);
     const articleSynthesisInfo = externalArticlesForSynthesis.map(a => `- ${a.title}: ${a.url} (Relevance: ${a.relevance || 'N/A'})`).join('\n');
 
-    let quizPageItem = allPacketContents.find(item => item.pageId === 'quiz-page');
-    const quizTitle = quizPageItem ? (quizPageItem.title || `${topic} Quiz`) : `${topic} Quiz`;
-    const quizUrl = quizPageItem ? (quizPageItem.predictedUrl || '#') : '#';
+    // --- FIX START: Logic related to the quiz is removed. ---
+    const systemPrompt = `You are an expert content creator and a knowledgeable guide. Your task is to generate the BODY HTML for a summary page that acts as a narrative guide to a topic, using a set of provided articles.
 
-    const systemPrompt = `You are an expert content creator specializing in educational summaries. Your task is to generate the BODY HTML for a summary page based on the provided topic and a list of related Wikipedia articles.
 CRITICAL REQUIREMENTS:
 1.  **Output ONLY HTML BODY Content:** Your entire response MUST be only the HTML content that would go INSIDE the \`<body>\` tags. Do NOT include \`<!DOCTYPE html>\`, \`<html>\`, \`<head>\`, or \`<body>\` tags themselves.
-2.  **Structure:** Use semantic HTML (<h1> for main topic, <h2> for sections, <p>, <ul>, <li> etc.).
-3.  **Content:** Synthesize information from the provided external articles to create a comprehensive yet concise summary.
-4.  **Linking:** You MUST create an "Explore All Packet Contents" section at the end with a \`<ul>\` list. Each \`<li>\` must link to every item provided in the 'All Packet Contents Data' list below, using the item's title for the link text and its URL for the href.
-5.  **Quiz Link (Mandatory):** At the very end, add a paragraph with a direct link to the quiz page, e.g., "Ready to test your knowledge? Take the <a href='${quizUrl}'>${quizTitle}</a>!"`;
+2.  **Narrative Structure:** Write in a conversational and engaging tone. Instead of a dry summary, act as a guide leading the user through the topic. Use headings (<h2>, <h3>) to create a logical flow.
+3.  **Interweave Links Naturally:** You MUST link to every provided article within the flow of the text. Do not just list the links at the end. Introduce each link contextually. For example, instead of "Here is a link about X," write something like, "To get a foundational understanding, a great place to start is the article on <a href='...'>The History of X</a>, which covers the key milestones..."
+4.  **Synthesize, Don't Just List:** Your narrative should connect the ideas from the different articles, showing how they relate to each other to build a complete picture of the topic.`;
 
-    const userPrompt = `Generate the HTML body content for a summary page on "${topic}".
-Base the summary on the key information from these articles:
+    const userPrompt = `Generate the HTML body content for a narrative guide on "${topic}".
+Your guide should naturally introduce and link to the following articles as part of the text:
 ${articleSynthesisInfo || "No primary external articles provided."}
 
-**All Packet Contents Data (for the final list):**
+**All Packet Contents Data (for context of what the user has):**
 ${allPacketContents.map(item => `- Title: ${item.title || 'Untitled'}, URL: ${item.predictedUrl || item.url || '#'}`).join('\n')}
 
-Follow ALL instructions from the system prompt precisely.`;
+Follow ALL instructions from the system prompt precisely. Create an engaging narrative, not a simple list.`;
+    // --- FIX END ---
+    
     return { systemPrompt, userPrompt };
 }
 
