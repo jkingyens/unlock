@@ -374,44 +374,123 @@ export async function processCreatePacketRequestFromTab(initiatorTabId) {
             };
             audioMediaItem.debug = debugData;
 
-            if (wordTimestamps && links.length > 0) {
-                // Prepare the word timestamps for searching
-                const transcriptWords = wordTimestamps.map(ts => ts.text.toLowerCase().replace(/[.,!?;:]/g, ''));
+            const timestamps = [];
+            if (wordTimestamps) {
+                // --- NEW: Call LLM to get character offsets for links ---
+                logger.log("PacketProcessor:processCreatePacketRequestFromTab", "Calling LLM for link character offsets.");
+                const llmLinkOffsetsResponse = await llmService.callLLM('link_character_offsets', { plainText: summaryTextForTTS, links });
+                
+                if (!llmLinkOffsetsResponse.success || !llmLinkOffsetsResponse.data?.linkOffsets) {
+                    // Fallback to sequential matching if LLM call fails
+                    logger.warn("PacketProcessor:processCreatePacketRequestFromTab", "LLM failed to provide link character offsets. Falling back to sequential matching algorithm.", llmLinkOffsetsResponse.error);
+                    
+                    const transcriptWords = wordTimestamps.map(ts => ts.text.toLowerCase().replace(/[.,!?;:]/g, ''));
+                    let currentTranscriptWordIndex = 0; // Initialize pointer
 
-                links.forEach(link => {
-                    const linkWords = link.text.toLowerCase().replace(/[.,!?;:]/g, '').split(/\s+/).filter(w => w);
-                    if (linkWords.length === 0) return;
+                    // Iterate through links in the order they appear in the HTML
+                    for (const link of links) {
+                        const linkSearchWords = link.text.toLowerCase().replace(/[.,!?;:]/g, '').split(/\s+/).filter(word => word);
+                        if (linkSearchWords.length === 0) {
+                            continue; // Skip empty link texts
+                        }
 
-                    // Find the sequence of link words in the transcript
-                    let matchIndex = -1;
-                    for (let i = 0; i <= transcriptWords.length - linkWords.length; i++) {
-                        let isMatch = true;
-                        for (let j = 0; j < linkWords.length; j++) {
-                            if (transcriptWords[i + j] !== linkWords[j]) {
-                                isMatch = false;
+                        let matchStartIndex = -1;
+                        // Search for the link's words *starting from the currentTranscriptWordIndex*
+                        for (let i = currentTranscriptWordIndex; i <= transcriptWords.length - linkSearchWords.length; i++) {
+                            let isMatch = true;
+                            for (let j = 0; j < linkSearchWords.length; j++) {
+                                if (transcriptWords[i + j] !== linkSearchWords[j]) {
+                                    isMatch = false;
+                                    break;
+                                }
+                            }
+                            if (isMatch) {
+                                matchStartIndex = i;
+                                break; // Found the first match after the current pointer
+                            }
+                        }
+
+                        if (matchStartIndex !== -1) {
+                            const startTime = wordTimestamps[matchStartIndex].start;
+                            const matchEndIndex = matchStartIndex + linkSearchWords.length - 1;
+                            const endTime = (matchEndIndex < wordTimestamps.length) ? wordTimestamps[matchEndIndex].end : wordTimestamps[wordTimestamps.length - 1].end;
+
+                            timestamps.push({
+                                url: link.href,
+                                text: link.text,
+                                startTime: startTime,
+                                endTime: endTime
+                            });
+                            // Advance the pointer to after the last matched word
+                            currentTranscriptWordIndex = matchEndIndex + 1;
+                        } else {
+                            logger.warn("PacketProcessor:Timestamping (Fallback)", `Could not find word sequence for link text "${link.text}" in transcript (after word index ${currentTranscriptWordIndex}).`);
+                        }
+                    }
+
+                } else { // LLM call was successful
+                    const llmIdentifiedOffsets = llmLinkOffsetsResponse.data.linkOffsets;
+                    debugData.llmIdentifiedOffsets = llmIdentifiedOffsets; // Add LLM's output to debug data
+                    
+                    // Pre-calculate character offsets for each word in the transcript
+                    let currentWordCharOffset = 0;
+                    const wordCharOffsets = wordTimestamps.map(word => {
+                        const startChar = currentWordCharOffset;
+                        const endChar = currentWordCharOffset + word.text.length;
+                        currentWordCharOffset = endChar + 1; // +1 for space or separator
+                        return { ...word, startChar, endChar };
+                    });
+                    
+                    // Adjust for the very last word if plainText has no trailing space
+                    if (wordCharOffsets.length > 0 && summaryTextForTTS.length < currentWordCharOffset) {
+                        wordCharOffsets[wordCharOffsets.length - 1].endChar = summaryTextForTTS.length;
+                    }
+
+                    for (const llmOffset of llmIdentifiedOffsets) {
+                        const originalLink = links.find(l => l.href === llmOffset.url); // Use URL to find original link
+                        if (!originalLink) {
+                            logger.warn("PacketProcessor:Timestamping", `LLM returned offset for unknown link URL: ${llmOffset.url}`);
+                            continue;
+                        }
+
+                        let startTimestamp = null;
+                        let endTimestamp = null;
+                        let firstWordMatchedIndex = -1;
+                        let lastWordMatchedIndex = -1;
+
+                        // Find the words that cover the LLM's character range
+                        for (let i = 0; i < wordCharOffsets.length; i++) {
+                            const word = wordCharOffsets[i];
+                            const overlapStart = Math.max(word.startChar, llmOffset.charStart);
+                            const overlapEnd = Math.min(word.endChar, llmOffset.charEnd);
+
+                            if (overlapEnd > overlapStart) { // There is an actual overlap
+                                if (firstWordMatchedIndex === -1) { // This is the first word that overlaps
+                                    firstWordMatchedIndex = i;
+                                    startTimestamp = word.start;
+                                }
+                                lastWordMatchedIndex = i; // Keep track of the last overlapping word
+                                endTimestamp = word.end;
+                            } else if (firstWordMatchedIndex !== -1 && word.startChar >= llmOffset.charEnd) {
+                                // We found overlapping words, and now we've passed the end of the LLM's range.
                                 break;
                             }
                         }
-                        if (isMatch) {
-                            matchIndex = i;
-                            break;
+                        
+                        if (startTimestamp !== null && endTimestamp !== null) {
+                            timestamps.push({
+                                url: originalLink.href,
+                                text: originalLink.text,
+                                startTime: startTimestamp,
+                                endTime: endTimestamp
+                            });
+                        } else {
+                            logger.warn("PacketProcessor:Timestamping", `LLM-provided character offset for link "${originalLink.text}" (URL: ${originalLink.href}) did not map to words in transcript. Offsets: [${llmOffset.charStart}, ${llmOffset.charEnd}]`);
                         }
                     }
-
-                    if (matchIndex !== -1) {
-                        const startTime = wordTimestamps[matchIndex].start;
-                        const endTime = wordTimestamps[matchIndex + linkWords.length - 1].end;
-                        audioMediaItem.timestamps.push({
-                            url: link.href,
-                            text: link.text,
-                            startTime: startTime,
-                            endTime: endTime
-                        });
-                    } else {
-                        logger.warn("PacketProcessor:Timestamping", "Could not find word sequence for link text in transcript", { linkText: link.text });
-                    }
-                });
+                }
             }
+            audioMediaItem.timestamps = timestamps; // Assign the collected timestamps
 
             await indexedDbStorage.saveGeneratedContent(imageId, audioMediaItem.pageId, [{
                 name: 'audio.mp3',
@@ -571,37 +650,125 @@ export async function processGenerateTimestampsRequest(data) {
         };
 
         if (wordTimestamps) {
-            const transcriptWords = wordTimestamps.map(ts => ts.text.toLowerCase().replace(/[.,!?;:]/g, ''));
-            links.forEach(link => {
-                const linkWords = link.text.toLowerCase().replace(/[.,!?;:]/g, '').split(/\s+/).filter(w => w);
-                if (linkWords.length === 0) return;
+            // --- NEW: Call LLM to get character offsets for links ---
+            logger.log("PacketProcessor:processGenerateTimestampsRequest", "Calling LLM for link character offsets.");
+            const llmLinkOffsetsResponse = await llmService.callLLM('link_character_offsets', { plainText, links });
+            if (!llmLinkOffsetsResponse.success || !llmLinkOffsetsResponse.data?.linkOffsets) {
+                // Fallback to sequential matching if LLM call fails
+                logger.warn("PacketProcessor:processGenerateTimestampsRequest", "LLM failed to provide link character offsets. Falling back to sequential matching algorithm.", llmLinkOffsetsResponse.error);
+                
+                const transcriptWords = wordTimestamps.map(ts => ts.text.toLowerCase().replace(/[.,!?;:]/g, ''));
+                let currentTranscriptWordIndex = 0; // Initialize pointer
 
-                let matchIndex = -1;
-                for (let i = 0; i <= transcriptWords.length - linkWords.length; i++) {
-                    let isMatch = true;
-                    for (let j = 0; j < linkWords.length; j++) {
-                        if (transcriptWords[i + j] !== linkWords[j]) {
-                            isMatch = false;
+                // Iterate through links in the order they appear in the HTML
+                for (const link of links) {
+                    const linkSearchWords = link.text.toLowerCase().replace(/[.,!?;:]/g, '').split(/\s+/).filter(word => word);
+                    if (linkSearchWords.length === 0) {
+                        continue; // Skip empty link texts
+                    }
+
+                    let matchStartIndex = -1;
+                    // Search for the link's words *starting from the currentTranscriptWordIndex*
+                    for (let i = currentTranscriptWordIndex; i <= transcriptWords.length - linkSearchWords.length; i++) {
+                        let isMatch = true;
+                        for (let j = 0; j < linkSearchWords.length; j++) {
+                            if (transcriptWords[i + j] !== linkSearchWords[j]) {
+                                isMatch = false;
+                                break;
+                            }
+                        }
+                        if (isMatch) {
+                            matchStartIndex = i;
+                            break; // Found the first match after the current pointer
+                        }
+                    }
+
+                    if (matchStartIndex !== -1) {
+                        const startTime = wordTimestamps[matchStartIndex].start;
+                        const matchEndIndex = matchStartIndex + linkSearchWords.length - 1;
+                        const endTime = (matchEndIndex < wordTimestamps.length) ? wordTimestamps[matchEndIndex].end : wordTimestamps[wordTimestamps.length - 1].end;
+
+                        timestamps.push({
+                            url: link.href,
+                            text: link.text,
+                            startTime: startTime,
+                            endTime: endTime
+                        });
+                        // Advance the pointer to after the last matched word
+                        currentTranscriptWordIndex = matchEndIndex + 1;
+                    } else {
+                        logger.warn("PacketProcessor:Timestamping (Fallback)", `Could not find word sequence for link text "${link.text}" in transcript (after word index ${currentTranscriptWordIndex}).`);
+                    }
+                }
+
+            } else { // LLM call was successful
+                const llmIdentifiedOffsets = llmLinkOffsetsResponse.data.linkOffsets;
+                debugData.llmIdentifiedOffsets = llmIdentifiedOffsets; // Add LLM's output to debug data
+                
+                // Pre-calculate character offsets for each word in the transcript
+                let currentWordCharOffset = 0;
+                const wordCharOffsets = wordTimestamps.map(word => {
+                    const startChar = currentWordCharOffset;
+                    // Account for the space following the word that is part of character count,
+                    // but not part of word.text itself.
+                    const endChar = currentWordCharOffset + word.text.length;
+                    currentWordCharOffset = endChar + 1; // +1 for space/separator following the word
+                    return { ...word, startChar, endChar };
+                });
+                
+                // Adjust for the very last word if plainText has no trailing space
+                // This 'currentWordCharOffset' would represent the total length of words + spaces
+                // If plainText doesn't end with a space, the last word's endChar should be plainText.length - 1 (or similar)
+                // A simpler way: if plainText is shorter than calculated currentWordCharOffset, then it means
+                // the last word in wordTimestamps is the actual end of text.
+                if (wordCharOffsets.length > 0 && plainText.length < currentWordCharOffset) {
+                    wordCharOffsets[wordCharOffsets.length - 1].endChar = plainText.length;
+                }
+
+                for (const llmOffset of llmIdentifiedOffsets) {
+                    const originalLink = links.find(l => l.href === llmOffset.url); // Use URL to find original link
+                    if (!originalLink) {
+                        logger.warn("PacketProcessor:Timestamping", `LLM returned offset for unknown link URL: ${llmOffset.url}`);
+                        continue;
+                    }
+
+                    let startTimestamp = null;
+                    let endTimestamp = null;
+                    let firstWordMatchedIndex = -1;
+                    let lastWordMatchedIndex = -1;
+
+                    // Find the words that cover the LLM's character range
+                    for (let i = 0; i < wordCharOffsets.length; i++) {
+                        const word = wordCharOffsets[i];
+                        // Check for overlap: word's start or end is within LLM's range, or LLM's range is within word's range
+                        const overlapStart = Math.max(word.startChar, llmOffset.charStart);
+                        const overlapEnd = Math.min(word.endChar, llmOffset.charEnd);
+
+                        if (overlapEnd > overlapStart) { // There is an actual overlap
+                            if (firstWordMatchedIndex === -1) { // This is the first word that overlaps
+                                firstWordMatchedIndex = i;
+                                startTimestamp = word.start;
+                            }
+                            lastWordMatchedIndex = i; // Keep track of the last overlapping word
+                            endTimestamp = word.end;
+                        } else if (firstWordMatchedIndex !== -1 && word.startChar >= llmOffset.charEnd) {
+                            // We found overlapping words, and now we've passed the end of the LLM's range.
                             break;
                         }
                     }
-                    if (isMatch) {
-                        matchIndex = i;
-                        break;
+                    
+                    if (startTimestamp !== null && endTimestamp !== null) {
+                        timestamps.push({
+                            url: originalLink.href,
+                            text: originalLink.text,
+                            startTime: startTimestamp,
+                            endTime: endTimestamp
+                        });
+                    } else {
+                        logger.warn("PacketProcessor:Timestamping", `LLM-provided character offset for link "${originalLink.text}" (URL: ${originalLink.href}) did not map to words in transcript. Offsets: [${llmOffset.charStart}, ${llmOffset.charEnd}]`);
                     }
                 }
-
-                if (matchIndex !== -1) {
-                    const startTime = wordTimestamps[matchIndex].start;
-                    const endTime = wordTimestamps[matchIndex + linkWords.length - 1].end;
-                    timestamps.push({
-                        url: link.href,
-                        text: link.text,
-                        startTime: startTime,
-                        endTime: endTime
-                    });
-                }
-            });
+            }
         }
         
         // 5. Create the updated media item data structure
