@@ -183,24 +183,23 @@ function getSummaryPromptText(context) {
     const externalArticlesForSynthesis = allPacketContents.filter(item => item.type === 'external' && item.url);
     const articleSynthesisInfo = externalArticlesForSynthesis.map(a => `- ${a.title}: ${a.url} (Relevance: ${a.relevance || 'N/A'})`).join('\n');
 
-    // --- FIX START: Logic related to the quiz is removed. ---
     const systemPrompt = `You are an expert content creator and a knowledgeable guide. Your task is to generate the BODY HTML for a summary page that acts as a narrative guide to a topic, using a set of provided articles.
 
 CRITICAL REQUIREMENTS:
 1.  **Output ONLY HTML BODY Content:** Your entire response MUST be only the HTML content that would go INSIDE the \`<body>\` tags. Do NOT include \`<!DOCTYPE html>\`, \`<html>\`, \`<head>\`, or \`<body>\` tags themselves.
 2.  **Narrative Structure:** Write in a conversational and engaging tone. Instead of a dry summary, act as a guide leading the user through the topic. Use headings (<h2>, <h3>) to create a logical flow.
-3.  **Interweave Links Naturally:** You MUST link to every provided article within the flow of the text. Do not just list the links at the end. Introduce each link contextually. For example, instead of "Here is a link about X," write something like, "To get a foundational understanding, a great place to start is the article on <a href='...'>The History of X</a>, which covers the key milestones..."
-4.  **Synthesize, Don't Just List:** Your narrative should connect the ideas from the different articles, showing how they relate to each other to build a complete picture of the topic.`;
+3.  **Interweave Links Naturally:** You MUST link to every provided article within the flow of the text. Do not just list the links at the end. Introduce each link contextually. For example, instead of "Here is a link about X," write something like, "To get a foundational understanding, a great place to start is the article on <a href='...' data-timestampable="true">The History of X</a>, which covers the key milestones..."
+4.  **Synthesize, Don't Just List:** Your narrative should connect the ideas from the different articles, showing how they relate to each other to build a complete picture of the topic.
+5.  **Timestampable Links:** For each link you create, you MUST add the attribute \`data-timestampable="true"\`. This is critical for the extension to process the links.`;
 
     const userPrompt = `Generate the HTML body content for a narrative guide on "${topic}".
-Your guide should naturally introduce and link to the following articles as part of the text:
+Your guide should naturally introduce and link to the following articles as part of the text. Remember to add \`data-timestampable="true"\` to each link's \`<a>\` tag.
 ${articleSynthesisInfo || "No primary external articles provided."}
 
 **All Packet Contents Data (for context of what the user has):**
 ${allPacketContents.map(item => `- Title: ${item.title || 'Untitled'}, URL: ${item.predictedUrl || item.url || '#'}`).join('\n')}
 
 Follow ALL instructions from the system prompt precisely. Create an engaging narrative, not a simple list.`;
-    // --- FIX END ---
     
     return { systemPrompt, userPrompt };
 }

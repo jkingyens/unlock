@@ -43,22 +43,24 @@ async function hasOffscreenDocument() {
     }
 }
 
+async function setupOffscreenDocument() {
+    if (await hasOffscreenDocument()) return;
+    if (creatingOffscreenDocument) {
+        await creatingOffscreenDocument;
+    } else {
+        creatingOffscreenDocument = chrome.offscreen.createDocument({
+            url: 'offscreen.html',
+            reasons: ['DOM_PARSER'],
+            justification: 'Parse HTML string to extract text content and links.',
+        });
+        await creatingOffscreenDocument;
+        creatingOffscreenDocument = null;
+    }
+}
+
 
 async function getAndParseHtml(html) {
-  if (!(await hasOffscreenDocument())) {
-    if (creatingOffscreenDocument) {
-      await creatingOffscreenDocument;
-    } else {
-      creatingOffscreenDocument = chrome.offscreen.createDocument({
-        url: 'offscreen.html',
-        reasons: ['DOM_PARSER'],
-        justification: 'Parse HTML string to extract text content.',
-      });
-      await creatingOffscreenDocument;
-      creatingOffscreenDocument = null;
-    }
-  }
-
+  await setupOffscreenDocument();
   const response = await chrome.runtime.sendMessage({
     type: 'parse-html-for-text',
     target: 'offscreen',
@@ -68,8 +70,23 @@ async function getAndParseHtml(html) {
   if (response && response.success) {
       return response.data;
   } else {
-      throw new Error(response.error || 'Failed to parse HTML in offscreen document.');
+      throw new Error(response.error || 'Failed to parse HTML for text in offscreen document.');
   }
+}
+
+async function getLinksFromHtml(html) {
+    await setupOffscreenDocument();
+    const response = await chrome.runtime.sendMessage({
+        type: 'parse-html-for-links',
+        target: 'offscreen',
+        data: html,
+    });
+
+    if (response && response.success) {
+        return response.data;
+    } else {
+        throw new Error(response.error || 'Failed to parse HTML for links in offscreen document.');
+    }
 }
 
 async function processHtmlViaOffscreen(html, packetImageId) {
@@ -326,17 +343,76 @@ export async function processCreatePacketRequestFromTab(initiatorTabId) {
         
         // Generate audio for the summary
         const summaryTextForTTS = await getAndParseHtml(summaryResponse.data);
-        const ttsResponse = await ttsService.textToSpeech(summaryTextForTTS);
+        const ttsResponse = await ttsService.generateAudioAndTimestamps(summaryTextForTTS);
         let summaryHtmlBody = await processHtmlViaOffscreen(String(summaryResponse.data).trim(), imageId);
         
-        if (ttsResponse.success) {
+        if (ttsResponse.success && ttsResponse.audioBlob) {
             const audioBuffer = await ttsResponse.audioBlob.arrayBuffer();
             audioMediaItem = {
                 type: 'media',
                 pageId: `audio_summary_${Date.now()}`,
                 title: summaryPageDef.title,
-                mimeType: 'audio/mpeg'
+                mimeType: 'audio/mpeg',
+                timestamps: []
             };
+            
+            // Extract links and their text from the summary HTML using the offscreen document
+            const links = await getLinksFromHtml(summaryHtmlBody);
+            let wordTimestamps = [];
+
+            const alignmentResponse = await ttsService.getAlignmentForExistingAudio(audioBuffer, summaryTextForTTS);
+            if (!alignmentResponse.success) {
+                logger.warn('PacketProcessor:FromTab', 'Failed to get alignment for generated audio.', alignmentResponse.error);
+            } else {
+                wordTimestamps = alignmentResponse.wordTimestamps;
+            }
+
+            // Store debug info from alignment process
+            const debugData = {
+                rawTimestamps: wordTimestamps || [],
+                extractedLinks: links || []
+            };
+            audioMediaItem.debug = debugData;
+
+            if (wordTimestamps && links.length > 0) {
+                // Prepare the word timestamps for searching
+                const transcriptWords = wordTimestamps.map(ts => ts.text.toLowerCase().replace(/[.,!?;:]/g, ''));
+
+                links.forEach(link => {
+                    const linkWords = link.text.toLowerCase().replace(/[.,!?;:]/g, '').split(/\s+/).filter(w => w);
+                    if (linkWords.length === 0) return;
+
+                    // Find the sequence of link words in the transcript
+                    let matchIndex = -1;
+                    for (let i = 0; i <= transcriptWords.length - linkWords.length; i++) {
+                        let isMatch = true;
+                        for (let j = 0; j < linkWords.length; j++) {
+                            if (transcriptWords[i + j] !== linkWords[j]) {
+                                isMatch = false;
+                                break;
+                            }
+                        }
+                        if (isMatch) {
+                            matchIndex = i;
+                            break;
+                        }
+                    }
+
+                    if (matchIndex !== -1) {
+                        const startTime = wordTimestamps[matchIndex].start;
+                        const endTime = wordTimestamps[matchIndex + linkWords.length - 1].end;
+                        audioMediaItem.timestamps.push({
+                            url: link.href,
+                            text: link.text,
+                            startTime: startTime,
+                            endTime: endTime
+                        });
+                    } else {
+                        logger.warn("PacketProcessor:Timestamping", "Could not find word sequence for link text in transcript", { linkText: link.text });
+                    }
+                });
+            }
+
             await indexedDbStorage.saveGeneratedContent(imageId, audioMediaItem.pageId, [{
                 name: 'audio.mp3',
                 content: audioBuffer,
@@ -449,6 +525,99 @@ export async function processCreatePacketRequest(data, initiatorTabId) {
         logger.error('PacketProcessor:processCreatePacketRequest', `Error creating packet image for topic ${topic}`, error);
         // Use the imageId for the failure notification as well
         sendProgressNotification('packet_creation_failed', { imageId: imageId, error: error.message });
+        return { success: false, error: error.message };
+    }
+}
+
+export async function processGenerateTimestampsRequest(data) {
+    const { draftId, htmlPageId, mediaPageId, htmlContentB64 } = data;
+    if (!draftId || !htmlPageId || !mediaPageId || !htmlContentB64) {
+        return { success: false, error: "Missing required data for timestamp generation." };
+    }
+
+    try {
+        const htmlContent = new TextDecoder().decode(base64Decode(htmlContentB64));
+        
+        // 1. Get plain text and links from summary HTML
+        const [plainText, links] = await Promise.all([
+            getAndParseHtml(htmlContent),
+            getLinksFromHtml(htmlContent)
+        ]);
+
+        if (!links || links.length === 0) {
+            return { success: true, updatedMediaItem: null, message: "No timestampable links found." };
+        }
+
+        // 2. Fetch existing audio from IndexedDB
+        const audioContent = await indexedDbStorage.getGeneratedContent(draftId, mediaPageId);
+        if (!audioContent || audioContent.length === 0) {
+            throw new Error(`Audio content not found in IndexedDB for pageId: ${mediaPageId}`);
+        }
+        const audioBuffer = audioContent[0].content;
+
+        // 3. Get timestamps using the forced alignment API
+        const alignmentResponse = await ttsService.getAlignmentForExistingAudio(audioBuffer, plainText);
+        if (!alignmentResponse.success) {
+            throw new Error(alignmentResponse.error || "Forced alignment service failed.");
+        }
+        
+        const { wordTimestamps } = alignmentResponse;
+        
+        // 4. Match links to timestamps with the robust algorithm
+        const timestamps = [];
+        const debugData = {
+            rawTimestamps: wordTimestamps || [],
+            extractedLinks: links || []
+        };
+
+        if (wordTimestamps) {
+            const transcriptWords = wordTimestamps.map(ts => ts.text.toLowerCase().replace(/[.,!?;:]/g, ''));
+            links.forEach(link => {
+                const linkWords = link.text.toLowerCase().replace(/[.,!?;:]/g, '').split(/\s+/).filter(w => w);
+                if (linkWords.length === 0) return;
+
+                let matchIndex = -1;
+                for (let i = 0; i <= transcriptWords.length - linkWords.length; i++) {
+                    let isMatch = true;
+                    for (let j = 0; j < linkWords.length; j++) {
+                        if (transcriptWords[i + j] !== linkWords[j]) {
+                            isMatch = false;
+                            break;
+                        }
+                    }
+                    if (isMatch) {
+                        matchIndex = i;
+                        break;
+                    }
+                }
+
+                if (matchIndex !== -1) {
+                    const startTime = wordTimestamps[matchIndex].start;
+                    const endTime = wordTimestamps[matchIndex + linkWords.length - 1].end;
+                    timestamps.push({
+                        url: link.href,
+                        text: link.text,
+                        startTime: startTime,
+                        endTime: endTime
+                    });
+                }
+            });
+        }
+        
+        // 5. Create the updated media item data structure
+        const updatedMediaItem = {
+            type: 'media',
+            pageId: mediaPageId,
+            title: "Summary Audio", // Or get from original item if needed
+            mimeType: 'audio/mpeg',
+            timestamps: timestamps,
+            debug: debugData
+        };
+
+        return { success: true, updatedMediaItem };
+
+    } catch (error) {
+        logger.error("PacketProcessor:processGenerateTimestampsRequest", "Error during timestamp generation", error);
         return { success: false, error: error.message };
     }
 }
@@ -693,7 +862,7 @@ export async function importImageFromUrl(url) {
     } catch (error) {
         logger.error('PacketProcessor:importImageFromUrl', 'Error importing image', { url, error });
         sendProgressNotification('packet_creation_failed', { imageId: imageId, error: error.message, step: 'import_failure' });
-        return { success: false, error: error.message || "Unknown error during import." };
+        return { success: false, error: error.message };
     }
 }
 
