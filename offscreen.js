@@ -23,6 +23,21 @@ function handleMessages(request, sender, sendResponse) {
         sendResponse({ success: false, error: error.message });
       }
       break;
+    
+    case 'parse-html-for-links':
+      try {
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(request.data, 'text/html');
+        const links = Array.from(doc.querySelectorAll('a[data-timestampable="true"]'));
+        const linkData = links.map(link => ({
+          href: link.getAttribute('href'),
+          text: link.textContent.trim()
+        }));
+        sendResponse({ success: true, data: linkData });
+      } catch (error) {
+        sendResponse({ success: false, error: error.message });
+      }
+      break;
   }
   // return true to indicate you wish to send a response asynchronously
   return true;

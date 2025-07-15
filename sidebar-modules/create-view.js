@@ -200,28 +200,37 @@ function createAlternativeGroupCard(groupItem, groupIndex) {
     groupCard.className = 'alternative-group-card';
     groupCard.dataset.index = groupIndex;
 
-    groupItem.alternatives.forEach((altItem, altIndex) => {
-        const innerCard = createDraftContentCard(altItem, -1);
-        innerCard.setAttribute('draggable', 'false');
-        
-        const altRemoveBtn = document.createElement('button');
-        altRemoveBtn.className = 'delete-draft-item-btn';
-        altRemoveBtn.innerHTML = '&times;';
-        altRemoveBtn.title = 'Remove this alternative';
-        altRemoveBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            groupItem.alternatives.splice(altIndex, 1);
-            if (groupItem.alternatives.length === 1) {
-                draftPacket.sourceContent[groupIndex] = groupItem.alternatives[0];
-            }
-            renderDraftContentList();
-            storage.setSession({ 'draftPacketForPreview': draftPacket });
-            syncDraftGroup();
-        });
-        
-        innerCard.appendChild(altRemoveBtn);
+    const mediaItem = groupItem.alternatives.find(alt => alt.type === 'media');
+    const htmlItem = groupItem.alternatives.find(alt => alt.type === 'generated');
+
+    if (htmlItem) {
+        const innerCard = createDraftContentCard(htmlItem, -1);
         groupCard.appendChild(innerCard);
-    });
+    }
+    if (mediaItem) {
+        const innerCard = createDraftContentCard(mediaItem, -1);
+        groupCard.appendChild(innerCard);
+    }
+
+    if (mediaItem && htmlItem && (!mediaItem.timestamps || mediaItem.timestamps.length === 0)) {
+        const timestampButton = document.createElement('button');
+        timestampButton.textContent = 'Add Timestamps';
+        timestampButton.className = 'sidebar-action-button';
+        timestampButton.style.marginTop = '8px';
+        timestampButton.addEventListener('click', (e) => {
+            e.stopPropagation();
+            handleGenerateTimestamps(groupItem, timestampButton);
+        });
+        groupCard.appendChild(timestampButton);
+    } else if (mediaItem && mediaItem.timestamps && mediaItem.timestamps.length > 0) {
+        const timestampInfo = document.createElement('p');
+        timestampInfo.textContent = `Timestamps added for ${mediaItem.timestamps.length} links.`;
+        timestampInfo.style.fontSize = '0.85em';
+        timestampInfo.style.color = 'var(--status-success-color)';
+        timestampInfo.style.margin = '8px 0 0';
+        groupCard.appendChild(timestampInfo);
+    }
+
 
     return groupCard;
 }
@@ -327,6 +336,52 @@ async function toggleDraftAudioPlayback(item, card) {
 }
 
 // --- Action Handlers ---
+
+async function handleGenerateTimestamps(groupItem, button) {
+    const mediaItem = groupItem.alternatives.find(alt => alt.type === 'media');
+    const htmlItem = groupItem.alternatives.find(alt => alt.type === 'generated');
+
+    if (!mediaItem || !htmlItem) {
+        showRootViewStatus("Error: Missing audio or summary content.", "error");
+        return;
+    }
+
+    button.disabled = true;
+    button.textContent = 'Generating...';
+
+    try {
+        const response = await sendMessageToBackground({
+            action: 'generate_timestamps_for_packet_items',
+            data: {
+                draftId: draftPacket.id,
+                htmlPageId: htmlItem.pageId,
+                mediaPageId: mediaItem.pageId,
+                htmlContentB64: htmlItem.contentB64 // Pass content directly
+            }
+        });
+
+        if (response.success && response.updatedMediaItem) {
+            // Find the original media item in the draftPacket and update it
+            const groupIndex = draftPacket.sourceContent.findIndex(item => item === groupItem);
+            if (groupIndex !== -1) {
+                const mediaIndex = draftPacket.sourceContent[groupIndex].alternatives.findIndex(alt => alt.pageId === mediaItem.pageId);
+                if (mediaIndex !== -1) {
+                    draftPacket.sourceContent[groupIndex].alternatives[mediaIndex] = response.updatedMediaItem;
+                    await storage.setSession({ 'draftPacketForPreview': draftPacket });
+                    renderDraftContentList(); // Re-render to show the updated state
+                    showRootViewStatus("Timestamps added successfully!", "success");
+                }
+            }
+        } else {
+            throw new Error(response.error || "Failed to generate timestamps.");
+        }
+    } catch (error) {
+        showRootViewStatus(`Error: ${error.message}`, "error");
+        button.disabled = false;
+        button.textContent = 'Add Timestamps';
+    }
+}
+
 
 export async function handleDiscardDraftPacket() {
     if (isDraftDirty()) {
