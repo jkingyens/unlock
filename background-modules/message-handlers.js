@@ -30,7 +30,8 @@ import {
     instantiatePacket,
     processDeletePacketImageRequest,
     enhanceHtml,
-    processGenerateTimestampsRequest
+    processGenerateTimestampsRequest,
+    processImproveDraftAudio
 } from './packet-processor.js';
 
 import { interimContextMap } from '../background.js';
@@ -302,6 +303,12 @@ export function handleMessage(message, sender, sendResponse) {
     }
 
     switch (message.action) {
+        case 'improve_draft_audio':
+            processImproveDraftAudio(message.data)
+                .then(sendResponse)
+                .catch(err => sendResponse({ success: false, error: err.message }));
+            isAsync = true;
+            break;
         case 'generate_timestamps_for_packet_items':
             processGenerateTimestampsRequest(message.data)
                 .then(sendResponse)
