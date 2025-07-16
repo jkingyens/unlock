@@ -102,6 +102,7 @@ export function setupSettingsListeners() {
     s.themeRadios?.forEach(radio => radio.addEventListener('change', requestSave));
     s.tabGroupsEnabledCheckbox?.addEventListener('change', requestSave);
     s.preferAudioEnabledCheckbox?.addEventListener('change', requestSave);
+    s.waveformLinkMarkersEnabledCheckbox?.addEventListener('change', requestSave);
     s.visitThresholdSecondsInput?.addEventListener('change', requestSave);
     s.confettiEnabledCheckbox?.addEventListener('change', (event) => {
         requestSave();
@@ -168,6 +169,7 @@ async function loadSettings() {
 
         domRefs.confettiEnabledCheckbox.checked = loadedSettings.confettiEnabled ?? true;
         domRefs.preferAudioEnabledCheckbox.checked = loadedSettings.preferAudio ?? false;
+        domRefs.waveformLinkMarkersEnabledCheckbox.checked = loadedSettings.waveformLinkMarkersEnabled ?? true;
         domRefs.visitThresholdSecondsInput.value = loadedSettings.visitThresholdSeconds ?? 5;
 
         const theme = loadedSettings.themePreference || 'auto';
@@ -264,6 +266,7 @@ async function gatherAndSaveSettings() {
             themePreference: domRefs.themeLightRadio.checked ? 'light' : (domRefs.themeDarkRadio.checked ? 'dark' : 'auto'),
             tabGroupsEnabled: domRefs.tabGroupsEnabledCheckbox.checked,
             preferAudio: domRefs.preferAudioEnabledCheckbox.checked,
+            waveformLinkMarkersEnabled: domRefs.waveformLinkMarkersEnabledCheckbox.checked,
             confettiEnabled: domRefs.confettiEnabledCheckbox.checked,
             visitThresholdSeconds: visitThreshold,
             elevenlabsApiKey: document.getElementById('elevenlabs-api-key').value.trim()
