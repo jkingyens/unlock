@@ -327,28 +327,34 @@ ${htmlContent.substring(0, 15000)}
 }
 
 // NEW: Prompt for getting character offsets of links
-function getLinkOffsetsPromptText(plainText, links) {
+function getLinkOffsetsPromptText(originalHtmlBody, mergedTranscriptString, links) { // UPDATED: Added originalHtmlBody and mergedTranscriptString
     const linksJson = JSON.stringify(links.map(l => ({ text: l.text, url: l.href })));
-    const systemPrompt = `You are an expert text analyzer. Your task is to identify the precise character offsets of specified link texts within a given plain text document.
+    const systemPrompt = `Your task is to identify the precise character offsets of specified link texts within a given plain text document.
+Prioritize finding the exact provided link text. If an exact match is not found, or if the link text is generic, infer the most appropriate character range in the plain text where the concept or topic related to that link's original text is being discussed.
 Your response MUST be a single, valid JSON object with a key "linkOffsets".
 The value of "linkOffsets" MUST be an array of objects.
 Each object in the "linkOffsets" array must have exactly these keys:
 - "url": The original URL of the link.
-- "charStart": The 0-indexed starting character position of the link's text in the plain text.
-- "charEnd": The 0-indexed ending character position of the link's text in the plain text (exclusive, i.e., charEnd - charStart = length).
-If a link text is not found, or cannot be precisely located, it should be omitted from the output.
+- "charStart": The 0-indexed starting character position of the matched or inferred text in the plain text.
+- "charEnd": The 0-indexed ending character position of the matched or inferred text in the plain text (exclusive, i.e., charEnd - charStart = length).
+If a link text's concept or topic is not discussed in the document, or cannot be reasonably inferred, it should be omitted from the output.
 Do NOT include any introductory text, explanations, or markdown formatting around your JSON.
 Adhere strictly to this JSON output format.`;
 
-    const userPrompt = `Plain Text Document:
+    const userPrompt = `Original HTML Document (for context and link identification):
 ---
-${plainText.substring(0, 15000)}
+${originalHtmlBody.substring(0, 15000)}
+---
+
+Plain Text Document (to get character offsets from - this is the audio transcript):
+---
+${mergedTranscriptString.substring(0, 15000)}
 ---
 
 Links to find (exact text to match for offset calculation):
 ${linksJson}
 
-Return the character offsets for these links within the document.`;
+Return the character offsets for these links within the "Plain Text Document".`; // UPDATED: Clarified source of offsets
     return { systemPrompt, userPrompt };
 }
 
@@ -379,7 +385,7 @@ const llmService = {
         } else if (promptType === 'modify_html_for_completion') {
             ({ systemPrompt, userPrompt } = getModificationPromptText(context.htmlContent));
         } else if (promptType === 'link_character_offsets') { // NEW PROMPT TYPE
-            ({ systemPrompt, userPrompt } = getLinkOffsetsPromptText(context.plainText, context.links));
+            ({ systemPrompt, userPrompt } = getLinkOffsetsPromptText(context.originalHtmlBody, context.mergedTranscriptString, context.links)); // UPDATED context properties
             responseFormat = { type: "json_object" };
             maxTokensForTask = 2048; // Can be adjusted based on expected links/text size
         }
@@ -434,7 +440,7 @@ const llmService = {
         } else if (promptType === 'modify_html_for_completion') {
             ({ systemPrompt, userPrompt } = getModificationPromptText(context.htmlContent));
         } else if (promptType === 'link_character_offsets') { // NEW PROMPT TYPE
-            ({ systemPrompt, userPrompt } = getLinkOffsetsPromptText(context.plainText, context.links));
+            ({ systemPrompt, userPrompt } = getLinkOffsetsPromptText(context.originalHtmlBody, context.mergedTranscriptString, context.links)); // UPDATED context properties
             responseMimeType = "application/json";
             maxOutputTokensForTask = 2048; // Adjust based on expected output size
         }
@@ -487,7 +493,7 @@ const llmService = {
         } else if (promptType === 'modify_html_for_completion') {
             ({ systemPrompt, userPrompt } = getModificationPromptText(context.htmlContent));
         } else if (promptType === 'link_character_offsets') { // NEW PROMPT TYPE
-            ({ systemPrompt, userPrompt } = getLinkOffsetsPromptText(context.plainText, context.links));
+            ({ systemPrompt, userPrompt } = getLinkOffsetsPromptText(context.originalHtmlBody, context.mergedTranscriptString, context.links)); // UPDATED context properties
             userPrompt += "\n\nIMPORTANT: Your entire response MUST be only the valid JSON object as described, without any surrounding text or markdown.";
         }
         else { throw new Error(`Invalid promptType for Chrome AI: ${promptType}`); }
@@ -544,7 +550,7 @@ const llmService = {
             systemPromptText = systemPrompt;
             userMessages = [{role: "user", content: userPrompt }];
         } else if (promptType === 'link_character_offsets') { // NEW PROMPT TYPE
-            const { systemPrompt, userPrompt } = getLinkOffsetsPromptText(context.plainText, context.links);
+            const { systemPrompt, userPrompt } = getLinkOffsetsPromptText(context.originalHtmlBody, context.mergedTranscriptString, context.links); // UPDATED context properties
             systemPromptText = systemPrompt;
             userMessages = [{role: "user", content: userPrompt }];
             maxTokensForTask = 2048; // Adjust based on expected output size

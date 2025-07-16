@@ -35,6 +35,18 @@ export function init(dependencies) {
 }
 
 /**
+ * Triggers an immediate save if one is scheduled.
+ */
+export function triggerPendingSave() {
+    if (settingsSaveTimeout) {
+        clearTimeout(settingsSaveTimeout);
+        settingsSaveTimeout = null;
+        gatherAndSaveSettings();
+        logger.log('SettingsView', 'Pending settings save triggered immediately by navigation.');
+    }
+}
+
+/**
  * Attaches event listeners specific to the create view.
  */
 export function setupCreateViewListeners() {
@@ -212,9 +224,14 @@ function createAlternativeGroupCard(groupItem, groupIndex) {
         groupCard.appendChild(innerCard);
     }
 
-    if (mediaItem && htmlItem && (!mediaItem.timestamps || mediaItem.timestamps.length === 0)) {
+    // --- REVISED: Always show button if both media and HTML exist ---
+    if (mediaItem && htmlItem) { // Removed the condition checking for existing timestamps
         const timestampButton = document.createElement('button');
-        timestampButton.textContent = 'Add Timestamps';
+        
+        // Determine button text based on whether timestamps already exist
+        const hasTimestamps = mediaItem.timestamps && mediaItem.timestamps.length > 0;
+        timestampButton.textContent = hasTimestamps ? 'Recalculate Timestamps' : 'Add Timestamps';
+        
         timestampButton.className = 'sidebar-action-button';
         timestampButton.style.marginTop = '8px';
         timestampButton.addEventListener('click', (e) => {
@@ -222,15 +239,18 @@ function createAlternativeGroupCard(groupItem, groupIndex) {
             handleGenerateTimestamps(groupItem, timestampButton);
         });
         groupCard.appendChild(timestampButton);
-    } else if (mediaItem && mediaItem.timestamps && mediaItem.timestamps.length > 0) {
-        const timestampInfo = document.createElement('p');
-        timestampInfo.textContent = `Timestamps added for ${mediaItem.timestamps.length} links.`;
-        timestampInfo.style.fontSize = '0.85em';
-        timestampInfo.style.color = 'var(--status-success-color)';
-        timestampInfo.style.margin = '8px 0 0';
-        groupCard.appendChild(timestampInfo);
-    }
 
+        // --- NEW: Display info about existing timestamps if present ---
+        if (hasTimestamps) {
+            const timestampInfo = document.createElement('p');
+            timestampInfo.textContent = `Timestamps exist for ${mediaItem.timestamps.length} links.`;
+            timestampInfo.style.fontSize = '0.85em';
+            timestampInfo.style.color = 'var(--status-success-color)';
+            timestampInfo.style.margin = '4px 0 0'; // Adjust margin
+            groupCard.appendChild(timestampInfo);
+        }
+    }
+    // --- END REVISED SECTION ---
 
     return groupCard;
 }

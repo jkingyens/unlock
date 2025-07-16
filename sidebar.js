@@ -91,6 +91,11 @@ export async function navigateTo(viewName, instanceId = null, data = null) {
         settingsView.triggerPendingSave();
     }
 
+    // NEW: Before leaving any view that might play audio, pause and clear it
+    if (currentView === 'packet-detail' && viewName !== 'packet-detail') {
+        detailView.pauseAndClearActiveAudio();
+    }
+
     isNavigating = true;
 
     [domRefs.rootView, domRefs.createView, domRefs.packetDetailView, domRefs.settingsView].forEach(v => v?.classList.add('hidden'));
@@ -253,6 +258,10 @@ async function handleBackgroundMessage(message) {
         case 'packet_instance_deleted':
             if (currentView === 'root') {
                 rootView.removeInstanceRow(data.packetId);
+            }
+            // NEW: Stop audio if the deleted packet was playing
+            if (data?.packetId) { // Ensure packetId exists
+                detailView.stopAudioIfPacketDeleted(data.packetId);
             }
             break;
         case 'packet_deletion_complete':
