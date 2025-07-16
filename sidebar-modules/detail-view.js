@@ -71,6 +71,12 @@ export async function displayPacketContent(instance, currentPacketUrl) {
         return;
     }
 
+    // NEW: Always pause and clear any active audio when displaying a new packet context
+    // This helps reset the state even if coming from another audio-playing packet.
+    if (activeAudioElement && activeAudioElement.dataset.instanceId !== instance?.instanceId) {
+        pauseAndClearActiveAudio();
+    }
+
     try {
         const isAlreadyRendered = container.querySelector(`#detail-cards-container[data-instance-id="${instance.instanceId}"]`);
 
@@ -269,7 +275,7 @@ async function createContentCard(contentItem, visitedUrlsSet, visitedGeneratedId
         card.innerHTML = `
             <div class="media-waveform-container">
                 <img src="${waveformDataUri}" class="waveform-svg" alt="Audio waveform" />
-                <div class="media-progress-overlay"></div>
+                <div class="media-highlights-container"></div> <div class="media-progress-overlay"></div>
             </div>
             <div class="media-play-icon">▶️</div>
             <div class="card-text">
@@ -330,18 +336,34 @@ function handleCloseTabGroup(tabGroupId) {
     }).catch(err => logger.error("DetailView", `Error closing group: ${err.message}`));
 }
 
+/**
+ * Pauses any currently active audio element and clears the reference.
+ * Should be called when navigating away from a view that plays audio,
+ * or when preparing to play new audio.
+ */
+export function pauseAndClearActiveAudio() {
+    if (activeAudioElement) {
+        logger.log('DetailView', 'Pausing and clearing active audio element.');
+        activeAudioElement.pause();
+        activeAudioElement.src = ''; // Clear src to release resources
+        activeAudioElement.load(); // Reload to ensure src is cleared
+        activeAudioElement = null;
+    }
+}
+
+
 async function playMediaInCard(card, contentItem, instance) {
     const waveformContainer = card.querySelector('.media-waveform-container');
-    if (!waveformContainer) return;
+    const highlightsContainer = card.querySelector('.media-highlights-container');
+    if (!waveformContainer || !highlightsContainer) return;
 
     const initializeAndPlayAudio = async () => {
-        document.querySelectorAll('.card.media.playing').forEach(c => {
-            if (c !== card) {
-                c.classList.remove('playing');
-                const icon = c.querySelector('.media-play-icon');
-                if (icon) icon.textContent = '▶️';
-            }
-        });
+        // Pause and reset other playing audio elements
+        // Ensure only one audio element is "active" at the module level.
+        // If a different audio element is currently active, pause and clear it.
+        if (activeAudioElement && activeAudioElement.dataset.pageId !== contentItem.pageId) {
+            pauseAndClearActiveAudio();
+        }
         
         card.classList.add('playing');
         const playIcon = card.querySelector('.media-play-icon');
@@ -349,6 +371,7 @@ async function playMediaInCard(card, contentItem, instance) {
         if (!activeAudioElement || activeAudioElement.dataset.pageId !== contentItem.pageId) {
             const audio = new Audio();
             audio.dataset.pageId = contentItem.pageId;
+            audio.dataset.instanceId = instance.instanceId; // Store instanceId for click handling on highlights
             activeAudioElement = audio;
             
             const cachedAudio = await indexedDbStorage.getGeneratedContent(instance.imageId, contentItem.pageId);
@@ -376,11 +399,90 @@ async function playMediaInCard(card, contentItem, instance) {
         
         audio.onplay = () => { if (playIcon) playIcon.textContent = '⏸️'; card.classList.add('playing'); };
         audio.onpause = async () => { if (playIcon) playIcon.textContent = '▶️'; card.classList.remove('playing'); await storage.setSession({ [sessionKey]: audio.currentTime }); const freshInstance = await storage.getPacketInstance(instance.instanceId); if (!freshInstance || !audio.duration || isNaN(audio.duration)) return; const { progressPercentage } = calculateInstanceProgress(freshInstance, { [contentItem.pageId]: audio.currentTime / audio.duration }); const progressBar = document.querySelector('#detail-progress-container .progress-bar'); if (progressBar) progressBar.style.width = `${progressPercentage}%`; };
-        audio.ontimeupdate = async () => { if (!audio.duration || isNaN(audio.duration)) return; const freshInstance = await storage.getPacketInstance(instance.instanceId); if (!freshInstance) return; const percentage = (audio.currentTime / audio.duration) * 100; if (progressOverlay) progressOverlay.style.width = `${percentage}%`; const { progressPercentage } = calculateInstanceProgress(freshInstance, { [contentItem.pageId]: percentage / 100 }); const progressBar = document.querySelector('#detail-progress-container .progress-bar'); if (progressBar) progressBar.style.width = `${progressPercentage}%`; };
-        audio.onended = async () => { if (playIcon) playIcon.textContent = '▶️'; card.classList.remove('playing'); if (progressOverlay) progressOverlay.style.width = '100%'; storage.removeSession(sessionKey); await sendMessageToBackground({ action: 'media_playback_complete', data: { instanceId: instance.instanceId, pageId: contentItem.pageId } }); };
         
-        audio.onloadedmetadata = async () => { const sessionData = await storage.getSession(sessionKey); const savedTime = sessionData[sessionKey]; if (savedTime && isFinite(savedTime)) audio.currentTime = savedTime; audio.play(); };
-        if (audio.readyState >= 1) { const sessionData = await storage.getSession(sessionKey); const savedTime = sessionData[sessionKey]; if (savedTime && isFinite(savedTime)) audio.currentTime = savedTime; audio.play(); }
+        audio.ontimeupdate = async () => {
+            if (!audio.duration || isNaN(audio.duration)) return;
+            const freshInstance = await storage.getPacketInstance(instance.instanceId);
+            if (!freshInstance) return;
+            const percentage = (audio.currentTime / audio.duration) * 100;
+            if (progressOverlay) progressOverlay.style.width = `${percentage}%`;
+            
+            // --- Highlighting active link segments on waveform ---
+            let currentActiveLinkUrl = null;
+            highlightsContainer.querySelectorAll('.media-highlight-segment').forEach(segment => {
+                const segmentStart = parseFloat(segment.dataset.startTime);
+                const segmentEnd = parseFloat(segment.dataset.endTime);
+                if (audio.currentTime >= segmentStart && audio.currentTime < segmentEnd) {
+                    segment.classList.add('active');
+                    currentActiveLinkUrl = segment.dataset.linkUrl; // Capture the URL of the active link
+                } else {
+                    segment.classList.remove('active');
+                }
+            });
+
+            // --- Highlighting the corresponding content card ---
+            // First, remove the highlight from all cards
+            domRefs.detailCardsContainer.querySelectorAll('.card.link-mentioned').forEach(c => {
+                c.classList.remove('link-mentioned');
+            });
+
+            if (currentActiveLinkUrl) {
+                // Find the card that corresponds to the active link URL
+                const targetCard = Array.from(domRefs.detailCardsContainer.querySelectorAll('.card')).find(c => {
+                    // Match external links by dataset.url
+                    if (c.dataset.url === currentActiveLinkUrl) {
+                        return true;
+                    }
+                    // Match generated/media content by dataset.pageId
+                    // This requires finding the content item in the current instance whose URL is currentActiveLinkUrl,
+                    // and then checking if its pageId matches the card's dataset.pageId
+                    const linkedContentItem = freshInstance.contents.find(item => item.url === currentActiveLinkUrl);
+                    if (linkedContentItem && linkedContentItem.pageId && c.dataset.pageId === linkedContentItem.pageId) {
+                        return true;
+                    }
+                    return false;
+                });
+
+                if (targetCard) {
+                    targetCard.classList.add('link-mentioned');
+                    // Optional: scroll the card into view if it's not visible
+                    targetCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                }
+            }
+            
+            const { progressPercentage: overallProgress } = calculateInstanceProgress(freshInstance, { [contentItem.pageId]: percentage / 100 });
+            const progressBar = document.querySelector('#detail-progress-container .progress-bar');
+            if (progressBar) progressBar.style.width = `${overallProgress}%`;
+        };
+
+        audio.onended = async () => {
+            if (playIcon) playIcon.textContent = '▶️';
+            card.classList.remove('playing');
+            if (progressOverlay) progressOverlay.style.width = '100%';
+            highlightsContainer.querySelectorAll('.media-highlight-segment').forEach(segment => segment.classList.remove('active')); // Clear waveform highlights
+            domRefs.detailCardsContainer.querySelectorAll('.card.link-mentioned').forEach(c => c.classList.remove('link-mentioned')); // Clear card highlights
+            storage.removeSession(sessionKey);
+            await sendMessageToBackground({ action: 'media_playback_complete', data: { instanceId: instance.instanceId, pageId: contentItem.pageId } });
+        };
+        
+        audio.onloadedmetadata = async () => {
+            // Render highlight segments based on duration
+            renderLinkHighlights(contentItem.timestamps, audio.duration, highlightsContainer);
+
+            const sessionData = await storage.getSession(sessionKey);
+            const savedTime = sessionData[sessionKey];
+            if (savedTime && isFinite(savedTime)) audio.currentTime = savedTime;
+            audio.play();
+        };
+        if (audio.readyState >= 1) { // If metadata already loaded
+            // Render highlight segments immediately
+            renderLinkHighlights(contentItem.timestamps, audio.duration, highlightsContainer);
+
+            const sessionData = await storage.getSession(sessionKey);
+            const savedTime = sessionData[sessionKey];
+            if (savedTime && isFinite(savedTime)) audio.currentTime = savedTime;
+            audio.play();
+        }
     };
     
     // --- REVISED SEEK AND PLAY/PAUSE LOGIC ---
@@ -450,4 +552,54 @@ async function playMediaInCard(card, contentItem, instance) {
             document.addEventListener('mouseup', handleMouseUp);
         }
     };
+}
+
+/**
+ * Renders highlight segments on the waveform container based on link timestamps.
+ * @param {Array<Object>} timestamps - The array of link timestamp objects ({url, text, startTime, endTime}).
+ * @param {number} audioDuration - The total duration of the audio in seconds.
+ * @param {HTMLElement} container - The .media-highlights-container element.
+ */
+function renderLinkHighlights(timestamps, audioDuration, container) {
+    if (!container || !timestamps || timestamps.length === 0 || !audioDuration || isNaN(audioDuration) || audioDuration <= 0) {
+        container.innerHTML = ''; // Clear any existing highlights
+        return;
+    }
+
+    container.innerHTML = ''; // Clear previous highlights before re-rendering
+
+    timestamps.forEach(ts => {
+        const startPercent = (ts.startTime / audioDuration) * 100;
+        const endPercent = (ts.endTime / audioDuration) * 100;
+        const widthPercent = endPercent - startPercent;
+
+        if (widthPercent <= 0) return; // Skip invalid segments
+
+        const highlightDiv = document.createElement('div');
+        highlightDiv.className = 'media-highlight-segment';
+        highlightDiv.style.left = `${startPercent}%`;
+        highlightDiv.style.width = `${widthPercent}%`;
+        highlightDiv.title = `Link: ${ts.text} (${formatTime(ts.startTime)} - ${formatTime(ts.endTime)})`; // Tooltip
+        
+        // Store data for runtime access
+        highlightDiv.dataset.startTime = ts.startTime;
+        highlightDiv.dataset.endTime = ts.endTime;
+        highlightDiv.dataset.linkUrl = ts.url;
+
+        container.appendChild(highlightDiv);
+
+        // Optional: Add click listener to highlight segment to navigate to link
+        highlightDiv.addEventListener('click', (e) => {
+            e.stopPropagation(); // Prevent waveformContainer's click handler from firing
+            openUrl(ts.url, activeAudioElement.dataset.instanceId); // Assuming instanceId can be retrieved or passed
+        });
+    });
+}
+
+/** Helper function to format time for tooltips (e.g., 0:30.123) */
+function formatTime(seconds) {
+    const minutes = Math.floor(seconds / 60);
+    const remainingSeconds = seconds % 60;
+    const ms = Math.floor((remainingSeconds - Math.floor(remainingSeconds)) * 1000);
+    return `${minutes}:${Math.floor(remainingSeconds).toString().padStart(2, '0')}.${ms.toString().padStart(3, '0')}`;
 }

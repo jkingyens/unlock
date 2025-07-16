@@ -15,12 +15,13 @@
   --card-shadow: rgba(0, 0, 0, 0.08); --card-hover-shadow: rgba(0, 0, 0, 0.12); --card-border-visited: #1e8e3e; --card-border-active: var(--text-accent);
   --bg-overlay: rgba(0,0,0,0.5);
   --media-progress-overlay-bg: rgba(255, 255, 255, 0.4);
+  --link-pulse-glow-color: rgba(0, 255, 255, 0.5); /* Cyan glow for light mode */
 }
 .hidden { display: none !important; }
 /* --- Dark Mode Variables --- */
 @media (prefers-color-scheme: dark) {
   body:not(.light-mode) {
-    --bg-primary: #202124; --bg-secondary: #2d2e31; --bg-tertiary: #3c3d40; --bg-accent: #28313b;
+    --bg-primary: #202124; --bg-secondary: #2d2e31; --bg-tertiary: #3c4040; --bg-accent: #28313b;
     --text-primary: #e8eaed; --text-secondary: #bdc1c6; --text-accent: #8ab4f8; --text-on-primary-button: #202124; --text-on-secondary-button: #e8eaed; --text-placeholder: #9aa0a6; --text-label: #e8eaed; --text-tertiary: #9aa0a6; --text-empty-state: #9aa0a6;
     --border-primary: #5f6368; --border-secondary: #3c4043; --border-focus: #8ab4f8;
     --input-bg: #2d2e31; --input-border: #5f6368;
@@ -34,10 +35,11 @@
     --card-border-active: var(--packet-color-accent, var(--border-focus)); 
     --bg-overlay: rgba(0,0,0,0.7);
     --media-progress-overlay-bg: rgba(0, 0, 0, 0.4);
+    --link-pulse-glow-color: rgba(0, 255, 255, 0.4); /* Slightly less opaque cyan for dark mode */
   }
 }
 body.dark-mode {
-   --bg-primary: #202124; --bg-secondary: #2d2e31; --bg-tertiary: #3c3d40; --bg-accent: #28313b;
+   --bg-primary: #202124; --bg-secondary: #2d2e31; --bg-tertiary: #3c4040; --bg-accent: #28313b;
     --text-primary: #e8eaed; --text-secondary: #bdc1c6; --text-accent: #8ab4f8; --text-on-primary-button: #202124; --text-on-secondary-button: #e8eaed; --text-placeholder: #9aa0a6; --text-label: #e8eaed; --text-tertiary: #9aa0a6; --text-empty-state: #9aa0a6;
     --border-primary: #5f6368; --border-secondary: #3c4043; --border-focus: #8ab4f8;
     --input-bg: #2d2e31; --input-border: #5f6368;
@@ -52,6 +54,14 @@ body.dark-mode {
     --bg-overlay: rgba(0,0,0,0.7);
     --media-progress-overlay-bg: rgba(0, 0, 0, 0.4);
 }
+
+/* NEW: Global @keyframes for link pulse animation */
+@keyframes link-pulse {
+  0% { transform: scale(1); box-shadow: 0 1px 2px var(--card-shadow); }
+  50% { transform: scale(1.01); box-shadow: 0 0 15px var(--link-pulse-glow-color); }
+  100% { transform: scale(1); box-shadow: 0 1px 2px var(--card-shadow); }
+}
+
 
 /* === Base Layout, Header, Main Content Area, View Container === */
 html { box-sizing: border-box; } *, *:before, *:after { box-sizing: inherit; }
@@ -251,24 +261,43 @@ body.dark-mode .creation-stage-text {
   transition: transform 0.15s, box-shadow 0.15s, border-left-color 0.2s, background-color 0.2s, border-color 0.2s;
   border: 1px solid var(--border-secondary);
   position: relative;
-  border-left: 3px solid var(--border-primary);
+  border-left: 3px solid var(--border-primary); /* Default border-left */
   padding-left: 10px;
 }
 #detail-cards-container .card.clickable:hover, #create-view-content-list .card:hover {
   background-color: var(--bg-tertiary);
-  border-color: var(--border-primary);
+  border-color: var(--border-primary); /* This sets all 4 borders */
 }
-#detail-cards-container .card.clickable {
-  cursor: pointer;
+
+/* Explicitly re-apply the green left border when a visited card is hovered */
+#detail-cards-container .card.visited.clickable:hover, /* for clickable cards */
+#detail-cards-container .card.visited:not(.clickable):hover /* for non-clickable cards in create-view */
+{
+  border-left-color: var(--card-border-visited); /* Keep it green */
 }
+
 #detail-cards-container .card.visited {
-  border-left-color: var(--card-border-visited);
+  border-left-color: var(--card-border-visited); /* Sets only left border color */
   opacity: 0.85;
 }
+
 #detail-cards-container .card.active {
-  border: 2px solid var(--card-border-active);
+  border: 2px solid var(--card-border-active); /* Blue border-all */
   background-color: var(--bg-accent);
 }
+
+/* NEW: Rule for active and visited cards */
+body.dark-mode #detail-cards-container .card.active.visited {
+  border-color: var(--card-border-active); /* Reapply active border color */
+  border-left-color: var(--card-border-visited); /* Ensure left is green */
+}
+
+#detail-cards-container .card.active.visited {
+  border-color: var(--card-border-active); /* Reapply active border color */
+  border-left-color: var(--card-border-visited); /* Ensure left is green */
+}
+
+
 .card-icon {
   flex-shrink: 0;
   margin-top: 2px;
@@ -376,34 +405,71 @@ body.dark-mode #detail-action-button-container button:hover { background-color: 
 .close-group-dialog button { padding: 9px 18px; font-size: 0.95em; font-weight: 500; }
 /* Dark mode for dialogs */
 body.dark-mode .import-dialog input[type="url"], body.dark-mode .share-dialog input[type="text"] { border-color: var(--border-primary); }
-/* LLM Model list in settings */
-.llm-model-item { display: flex; align-items: center; padding: 8px 10px; border: 1px solid var(--border-secondary); border-radius: 4px; margin-bottom: 8px; background-color: var(--bg-secondary); }
-.llm-model-item:hover { background-color: var(--bg-tertiary); }
-.llm-model-item input[type="radio"] { margin-right: 10px; width: auto; accent-color: var(--text-accent); }
-.llm-model-item .model-name-display { flex-grow: 1; font-size: 0.95em; color: var(--text-primary); }
-.llm-model-item .model-type-display { font-size: 0.8em; color: var(--text-secondary); margin-left: 8px; padding: 2px 5px; background-color: var(--bg-tertiary); border-radius: 3px; }
-.llm-model-item button { background: none; border: none; color: var(--text-accent); cursor: pointer; padding: 4px 6px; font-size: 0.9em; margin-left: 5px; border-radius: 3px; }
-.llm-model-item button:hover { background-color: var(--bg-accent); color: var(--text-on-primary-button); }
-body.dark-mode .llm-model-item button:hover { background-color: var(--button-secondary-hover-bg); color: var(--text-primary); }
-.llm-model-item .delete-btn { color: var(--status-error-color); }
-.llm-model-item .delete-btn:hover { background-color: var(--status-error-color); color: #fff; }
-#llm-edit-form-buttons button, #llm-add-new-model-btn { padding: 7px 12px; font-size: 0.9em; }
+body.dark-mode .import-dialog .confirm-btn, body.dark-mode .share-dialog button, body.dark-mode .confirm-dialog .confirm-btn { background-color: var(--button-primary-bg); color: var(--text-on-primary-button); }
+body.dark-mode .import-dialog .confirm-btn:hover, body.dark-mode .share-dialog button:hover, body.dark-mode .confirm-dialog .confirm-btn:hover { background-color: var(--button-primary-hover-bg); }
+body.dark-mode .import-dialog .cancel-btn, body.dark-mode .share-dialog .close-btn, body.dark-mode .close-group-dialog .cancel-btn, body.dark-mode .confirm-dialog .cancel-btn { background-color: var(--button-secondary-bg); color: var(--text-on-secondary-button); }
+body.dark-mode .import-dialog .cancel-btn:hover, body.dark-mode .share-dialog .close-btn:hover, body.dark-mode .close-group-dialog .cancel-btn:hover, body.dark-mode .confirm-dialog .cancel-btn:hover { background-color: var(--button-secondary-hover-bg); }
 
-/* Ensure dark mode overrides are consistent */
-body.dark-mode #settings-view input:disabled, body.dark-mode #settings-view input.default-model:disabled { background-color: var(--bg-secondary); }
-body.dark-mode #back-btn, body.dark-mode #settings-btn { color: var(--text-secondary); }
-body.dark-mode #back-btn:hover, body.dark-mode #settings-btn:hover { background-color: var(--bg-tertiary); color: var(--text-primary); }
-body.dark-mode .sidebar-action-button { color: var(--text-on-secondary-button); background-color: var(--button-secondary-bg); }
-body.dark-mode .sidebar-action-button:hover { background-color: var(--button-secondary-hover-bg); }
-body.dark-mode #root-view #sidebar-restart-btn { background-color: var(--button-primary-bg); color: var(--text-on-primary-button); }
-body.dark-mode #root-view #sidebar-restart-btn:hover { background-color: var(--button-primary-hover-bg); }
-body.dark-mode #root-view #sidebar-delete-btn { background-color: var(--button-danger-bg); }
-body.dark-mode #root-view #sidebar-delete-btn:hover { background-color: var(--button-danger-hover-bg); }
-body.dark-mode #detail-cards-container .card { background-color: var(--bg-secondary); border-color: var(--border-secondary); }
-body.dark-mode #detail-cards-container .card.clickable:hover { background-color: var(--bg-tertiary); }
-body.dark-mode #detail-cards-container .card.active { border-color: var(--card-border-active); }
-body.dark-mode #detail-cards-container .card.visited { border-left-color: var(--card-border-visited); }
-body.dark-mode #detail-cards-container .card.active.visited { border-color: var(--card-border-active); border-left-color: var(--card-border-visited); }
+/* LLM Model list in settings */
+.llm-model-item {
+      display: flex;
+      align-items: center;
+      padding: 8px 10px;
+      border: 1px solid var(--border-secondary);
+      border-radius: 4px;
+      margin-bottom: 8px;
+      background-color: var(--bg-secondary);
+    }
+.llm-model-item:hover {
+      background-color: var(--bg-tertiary);
+    }
+.llm-model-item input[type="radio"] {
+      margin-right: 10px;
+      width: auto; /* override general input width */
+      accent-color: var(--text-accent);
+    }
+.llm-model-item .model-name-display {
+      flex-grow: 1;
+      font-size: 0.95em;
+      color: var(--text-primary);
+    }
+.llm-model-item .model-type-display {
+      font-size: 0.8em;
+      color: var(--text-secondary);
+      margin-left: 8px;
+      padding: 2px 5px;
+      background-color: var(--bg-tertiary);
+      border-radius: 3px;
+    }
+.llm-model-item button {
+      background: none;
+      border: none;
+      color: var(--text-accent);
+      cursor: pointer;
+      padding: 4px 6px;
+      font-size: 0.9em;
+      margin-left: 5px;
+      border-radius: 3px;
+    }
+.llm-model-item button:hover {
+      background-color: var(--bg-accent);
+      color: var(--text-on-primary-button); /* if bg-accent is light, else var(--text-primary) */
+    }
+body.dark-mode .llm-model-item button:hover {
+        background-color: var(--button-secondary-hover-bg);
+        color: var(--text-primary);
+     }
+.llm-model-item .delete-btn {
+      color: var(--status-error-color);
+    }
+.llm-model-item .delete-btn:hover {
+      background-color: var(--status-error-color);
+      color: #fff;
+    }
+#llm-edit-form-buttons button, #llm-add-new-model-btn {
+        padding: 7px 12px;
+        font-size: 0.9em;
+     }
 
 /* --- Confetti Styles --- */
 #confetti-container {
@@ -557,6 +623,7 @@ body.dark-mode #detail-cards-container .card.active.visited { border-color: var(
   align-items: center;
   overflow: hidden;
   background-color: var(--bg-secondary);
+  position: relative; /* Ensure proper positioning of children */
 }
 
 .media-waveform-container {
@@ -565,14 +632,19 @@ body.dark-mode #detail-cards-container .card.active.visited { border-color: var(
   left: 0;
   width: 100%;
   height: 100%;
-  /* REMOVED: "pointer-events: none;" was here, causing the issue */
   cursor: pointer;
+  z-index: 1; /* Below play icon, above background */
+  overflow: hidden; /* Ensure highlights don't overflow */
 }
 
 .waveform-svg {
   width: 100%;
   height: 100%;
   object-fit: fill; /* Stretch the SVG to fill the container */
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 1;
 }
 
 .media-progress-overlay {
@@ -585,15 +657,86 @@ body.dark-mode #detail-cards-container .card.active.visited { border-color: var(
   mix-blend-mode: screen; /* Creates a nice effect over the colored waveform */
   transition: width 0.1s linear;
   pointer-events: none;
+  z-index: 3; /* Above highlights, below play icon */
 }
 body.dark-mode .media-progress-overlay {
    mix-blend-mode: multiply; /* Better effect for dark mode */
 }
 
+/* NEW: Styles for Link Highlights on Waveform */
+.media-highlights-container {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    z-index: 2; /* Between waveform SVG and progress overlay */
+    pointer-events: none; /* Do not interfere with clicks on waveform container */
+}
+
+.media-highlight-segment {
+    position: absolute;
+    top: 0;
+    height: 100%;
+    background-color: white; /* Changed to solid white */
+    mix-blend-mode: screen; /* Apply blend mode to affect underlying SVG */
+    transition: background-color 0.2s ease;
+    border-radius: 1px; /* To match rounded bars slightly if desired */
+}
+
+.media-highlight-segment.active {
+    background-color: rgba(255, 255, 255, 0.8); /* Slightly transparent white when active, or a very light gray */
+    mix-blend-mode: screen; /* Keep blend mode consistent */
+}
+
+body.dark-mode .media-highlight-segment {
+    background-color: white; /* Changed to solid white for dark mode */
+    mix-blend-mode: screen;
+}
+
+body.dark-mode .media-highlight-segment.active {
+    background-color: rgba(255, 255, 255, 0.8); /* Slightly transparent white for dark mode active */
+    mix-blend-mode: screen;
+}
+
+
+/* NEW: Styles when the parent card is active */
+#detail-cards-container .card.active .media-progress-overlay {
+    mix-blend-mode: normal; /* Disable blending when card is active */
+    background-color: rgba(255, 255, 255, 0.7); /* Make it more opaque white to be clearly visible on active background */
+}
+
+body.dark-mode #detail-cards-container .card.active .media-progress-overlay {
+    background-color: rgba(0, 0, 0, 0.7); /* Make it more opaque black for dark mode active */
+}
+
+
+/* NEW: Styles for card highlighting during link mention playback */
+@keyframes link-pulse {
+  0% { transform: scale(1); box-shadow: 0 1px 2px var(--card-shadow); }
+  50% { transform: scale(1.01); box-shadow: 0 0 15px var(--link-pulse-glow-color); }
+  100% { transform: scale(1); box-shadow: 0 1px 2px var(--card-shadow); }
+}
+
+
+#detail-cards-container .card.link-mentioned {
+  animation: link-pulse 1.5s ease-out infinite; /* Apply animation */
+  border-color: #00bcd4 !important; /* Emphasize border with a distinct color */
+}
+
+/* Ensure link-mentioned overrides other border colors if necessary */
+#detail-cards-container .card.link-mentioned.visited {
+    border-left-color: var(--card-border-visited); /* Keep green visited marker */
+}
+
+#detail-cards-container .card.link-mentioned.active {
+    border-color: var(--link-pulse-glow-color) !important; /* Keep distinct color when active */
+    border-left-color: var(--card-border-visited); /* Keep green visited marker */
+}
 
 .card.media .media-play-icon {
   position: relative;
-  z-index: 2;
+  z-index: 4; /* Higher z-index to be clickable */
   font-size: 1.5em;
   padding: 0 12px 0 15px;
   color: var(--text-primary);
@@ -602,7 +745,7 @@ body.dark-mode .media-progress-overlay {
 
 .card.media .card-text {
   position: relative;
-  z-index: 2;
+  z-index: 4; /* Higher z-index for text */
   padding-right: 12px;
 }
 
