@@ -179,26 +179,33 @@ Your entire response must be a single JSON object as specified.`;
 
 function getSummaryPromptText(context) {
     const { topic, allPacketContents } = context;
+    // This already correctly includes the original source page since its type is 'external'
     const externalArticlesForSynthesis = allPacketContents.filter(item => item.type === 'external' && item.url);
     const articleSynthesisInfo = externalArticlesForSynthesis.map(a => `- ${a.title}: ${a.url} (Relevance: ${a.relevance || 'N/A'})`).join('\n');
+
+    // Find the original source page to give it special instructions in the prompt
+    const originalSourcePage = allPacketContents.find(item => item.relevance === 'The original source page this packet was created from.');
 
     const systemPrompt = `You are an expert content creator and a knowledgeable guide. Your task is to generate the BODY HTML for a summary page that acts as a narrative guide to a topic, using a set of provided articles.
 
 CRITICAL REQUIREMENTS:
 1.  **Output ONLY HTML BODY Content:** Your entire response MUST be only the HTML content that would go INSIDE the \`<body>\` tags. Do NOT include \`<!DOCTYPE html>\`, \`<html>\`, \`<head>\`, or \`<body>\` tags themselves.
 2.  **Pure Narrative Flow:** Write in a conversational and engaging tone. Instead of using headers (like <h2> or <h3>) to create sections, weave the content into a single, flowing narrative. Use paragraphs (<p>) to structure the text.
-3.  **Interweave Links Naturally:** You MUST link to every provided article within the flow of the text. Introduce each link contextually. For example, instead of "Here is a link about X," write something like, "To get a foundational understanding, a great place to start is the article on <a href='...' data-timestampable="true">The History of X</a>, which covers the key milestones..."
-4.  **Synthesize, Don't Just List:** Your narrative should connect the ideas from the different articles, showing how they relate to each other to build a complete picture of the topic.
-5.  **Timestampable Links:** For each link you create, you MUST add the attribute \`data-timestampable="true"\`. This is critical for the extension to process the links.`;
+3.  **Synthesize, Don't Just List:** Your narrative should connect the ideas from the different articles, showing how they relate to each other to build a complete picture of the topic.
+4.  **Timestampable Links:** For each link you create, you MUST add the attribute \`data-timestampable="true"\`. This is critical for the extension to process the links.
+5.  **Link to All Content:** You MUST naturally link to every article provided in the user prompt.
+6.  **Conclude with the Source Article:** The final paragraph of your narrative must provide a transition to the original source article, framing it as the culmination of the context you've provided.`;
 
-    const userPrompt = `Generate the HTML body content for a narrative guide on "${topic}".
-Your guide should naturally introduce and link to the following articles as part of the text. Remember to add \`data-timestampable="true"\` to each link's \`<a>\` tag.
-${articleSynthesisInfo || "No primary external articles provided."}
+    let userPrompt = `Generate the HTML body content for a narrative guide on "${topic}".
 
-**All Packet Contents Data (for context of what the user has):**
-${allPacketContents.map(item => `- Title: ${item.title || 'Untitled'}, URL: ${item.predictedUrl || item.url || '#'}`).join('\n')}
+Your guide should naturally introduce and link to all of the following articles as part of the text. Remember to add \`data-timestampable="true"\` to each link's \`<a>\` tag.
+${articleSynthesisInfo || "No external articles provided."}
 
-Follow ALL instructions from the system prompt precisely. Create an engaging, flowing narrative without section headers.`;
+Follow ALL instructions from the system prompt precisely.`;
+
+    if (originalSourcePage) {
+        userPrompt += `\n\n**IMPORTANT**: Conclude your entire summary by leading into and linking to the original source article: "${originalSourcePage.title}". Frame this link as the final step, explaining that the user now has the necessary background to fully understand it.`;
+    }
     
     return { systemPrompt, userPrompt };
 }

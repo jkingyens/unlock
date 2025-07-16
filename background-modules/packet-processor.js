@@ -384,7 +384,20 @@ export async function processCreatePacketRequestFromTab(initiatorTabId) {
         let audioMediaItem = null;
 
         sendStencilProgressNotification(imageId, 'generate_summary', 'active', 'Generating summary...', 50, topic);
-        const summaryResponse = await llmService.callLLM('summary_page', { topic: topic, allPacketContents: validatedExternalLinks });
+
+        // --- DEBUGGING CHANGE ---
+        // Combine Wikipedia links and the original source page for the summary context.
+        const allContentForSummary = [...validatedExternalLinks, sourcePageContentItem];
+        const summaryContext = { topic: topic, allPacketContents: allContentForSummary };
+
+        // Log the exact context being sent to the LLM for debugging.
+        console.log('--- DEBUG: Context for Summary Prompt ---');
+        console.log(JSON.stringify(summaryContext, null, 2));
+        console.log('-----------------------------------------');
+        
+        const summaryResponse = await llmService.callLLM('summary_page', summaryContext);
+        // --- END DEBUGGING CHANGE ---
+
         if (!summaryResponse.success || !summaryResponse.data) throw new Error(summaryResponse.error || 'LLM failed to generate summary.');
         const summaryHtmlBodyLLM = String(summaryResponse.data).trim();
         
