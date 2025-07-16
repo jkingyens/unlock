@@ -55,19 +55,20 @@ async function setupOffscreenDocument() {
 }
 
 
-async function getAndParseHtml(html) {
-  await setupOffscreenDocument();
-  const response = await chrome.runtime.sendMessage({
-    type: 'parse-html-for-text',
-    target: 'offscreen',
-    data: html,
-  });
+async function getAndParseHtml(html, withMarkers = false) {
+    await setupOffscreenDocument();
+    const type = withMarkers ? 'parse-html-for-text-with-markers' : 'parse-html-for-text';
+    const response = await chrome.runtime.sendMessage({
+        type: type,
+        target: 'offscreen',
+        data: html,
+    });
 
-  if (response && response.success) {
-      return response.data;
-  } else {
-      throw new Error(response.error || 'Failed to parse HTML for text in offscreen document.');
-  }
+    if (response && response.success) {
+        return response.data;
+    } else {
+        throw new Error(response.error || `Failed to parse HTML in offscreen document (withMarkers: ${withMarkers}).`);
+    }
 }
 
 async function getLinksFromHtml(html) {
@@ -83,11 +84,6 @@ async function getLinksFromHtml(html) {
     } else {
         throw new Error(response.error || 'Failed to parse HTML for links in offscreen document.');
     }
-}
-
-async function processHtmlViaOffscreen(html, packetImageId) {
-    logger.log('PacketProcessor:processHtmlViaOffscreen', 'Offscreen processing is DISABLED. Returning raw HTML.', { packetImageId, htmlLength: html?.length });
-    return html;
 }
 
 // Helper to send targeted progress messages for stencil updates to the sidebar
@@ -178,6 +174,48 @@ export function enhanceHtml(bodyHtml, topic, pageTitle) {
 </html>`;
 }
 
+// --- Positional Interpolation Algorithm ---
+function runPositionalInterpolation(sourceOfTruthText, wordTimestamps, links) {
+    const log = (message, data) => logger.log('PositionalInterpolation', message, data);
+    
+    if (!wordTimestamps || wordTimestamps.length === 0) {
+        log("Cannot run interpolation: No word timestamps provided.");
+        return [];
+    }
+    
+    const totalAudioDuration = wordTimestamps[wordTimestamps.length - 1].end;
+    const totalTextLength = sourceOfTruthText.length;
+    const timestamps = [];
+
+    log("Starting interpolation...", { totalAudioDuration, totalTextLength, linkCount: links.length });
+    
+    links.forEach(link => {
+        const markedLinkText = `*${link.text}*`;
+        const charIndex = sourceOfTruthText.indexOf(markedLinkText);
+
+        if (charIndex !== -1) {
+            const proportionalPosition = charIndex / totalTextLength;
+            const startTime = proportionalPosition * totalAudioDuration;
+            const endTime = startTime + 3; // Fixed 3-second duration
+
+            timestamps.push({
+                url: link.href,
+                text: link.text,
+                startTime: parseFloat(startTime.toFixed(3)),
+                endTime: parseFloat(endTime.toFixed(3))
+            });
+            
+            log(`Found link "${link.text}"`, { charIndex, proportionalPosition, startTime });
+        } else {
+            log(`Could not find marked link "${link.text}" in source of truth text.`);
+        }
+    });
+
+    log("Interpolation complete.", { finalTimestamps: timestamps });
+    return timestamps;
+}
+
+
 // --- Main Processing Functions ---
 
 export async function processGenerateCustomPageRequest(data) {
@@ -187,7 +225,6 @@ export async function processGenerateCustomPageRequest(data) {
     }
 
     try {
-        // --- PASS 1: Generate the initial page ---
         logger.log("PacketProcessor:CustomPage", "Starting initial page generation.");
         const generationResult = await llmService.callLLM('custom_page', { prompt, context });
         if (!generationResult.success || !generationResult.data) {
@@ -196,20 +233,16 @@ export async function processGenerateCustomPageRequest(data) {
         const initialHtml = generationResult.data;
         logger.log("PacketProcessor:CustomPage", "Initial page generated. Starting modification pass.");
 
-        // --- PASS 2: Analyze and modify the generated page ---
         const modificationResult = await llmService.callLLM('modify_html_for_completion', { htmlContent: initialHtml });
         if (!modificationResult.success || !modificationResult.data) {
             logger.warn("PacketProcessor:CustomPage", "Modification pass failed. Using initial HTML.", modificationResult.error);
-            // Fallback to using the initial HTML if the modification pass fails
         }
         const finalHtml = modificationResult.data || initialHtml;
         
-        // --- Finalize and package the result ---
         const contentB64 = arrayBufferToBase64(new TextEncoder().encode(finalHtml));
         const titleMatch = finalHtml.match(/<title[^>]*>([^<]+)<\/title>/i);
         const pageTitle = titleMatch ? titleMatch[1] : (prompt.substring(0, 50) + (prompt.length > 50 ? '...' : ''));
 
-        // Check if the completion trigger was added to determine if the page is interactive
         const isInteractive = finalHtml.includes("notifyExtensionOnCompletion()");
 
         const newContentItem = {
@@ -218,7 +251,7 @@ export async function processGenerateCustomPageRequest(data) {
             title: pageTitle,
             contentType: 'text/html',
             contentB64: contentB64,
-            interactionBasedCompletion: isInteractive // Set based on analysis
+            interactionBasedCompletion: isInteractive
         };
 
         logger.log("PacketProcessor:CustomPage", "Custom page processing complete.", { pageTitle, isInteractive });
@@ -240,7 +273,6 @@ export async function processCreatePacketRequestFromTab(initiatorTabId) {
             throw new Error("Cannot create a packet from the current page. Invalid or inaccessible URL.");
         }
 
-        // Create a content item for the source page itself
         const sourcePageContentItem = {
             type: 'external',
             url: tab.url,
@@ -250,14 +282,12 @@ export async function processCreatePacketRequestFromTab(initiatorTabId) {
 
         sendStencilProgressNotification(imageId, 'init', 'active', 'Analyzing page...', 5, 'Analyzing Page...');
 
-        // Step 1: Check config
         const activeModelConfig = await storage.getActiveModelConfig();
         const cloudStorageEnabled = await storage.isCloudStorageEnabled();
         if (!activeModelConfig || !cloudStorageEnabled || !(await cloudStorage.initialize())) {
             throw new Error('LLM and Cloud Storage must be fully configured in Settings.');
         }
 
-        // Step 2: Inject script to get page content
         const injectionResults = await chrome.scripting.executeScript({
             target: { tabId: tab.id },
             func: () => document.documentElement.outerHTML,
@@ -266,22 +296,18 @@ export async function processCreatePacketRequestFromTab(initiatorTabId) {
         if (!injectionResults || injectionResults.length === 0 || !injectionResults[0].result) {
             throw new Error("Could not retrieve page content. The page may be protected.");
         }
-        const originalHtmlBody = injectionResults[0].result; // This is the original HTML body
-        
-        // Use the offscreen document to parse the HTML and get main text
-        const plainText = await getAndParseHtml(originalHtmlBody); // This is the plain text used for TTS
+        const plainTextForTopic = await getAndParseHtml(injectionResults[0].result);
 
         sendStencilProgressNotification(imageId, 'analyze', 'active', 'Extracting topic...', 10);
-        const llmAnalysis = await llmService.callLLM('extract_topic_from_html', { htmlContent: plainText }); // Pass plainText to LLM for topic extraction
+        const llmAnalysis = await llmService.callLLM('extract_topic_from_html', { htmlContent: plainTextForTopic });
         if (!llmAnalysis.success || !llmAnalysis.data?.topic) {
             throw new Error(llmAnalysis.error || 'LLM failed to analyze page content.');
         }
         analysisResult = llmAnalysis.data;
         const topic = analysisResult.topic;
-        logger.log('PacketProcessor:FromTab', 'LLM analysis complete', { topic: topic });
+        logger.log('PacketProcessor:FromTab', 'LLM analysis complete', { topic });
         sendStencilProgressNotification(imageId, 'analyze', 'completed', 'Topic identified', 20, topic);
 
-        // Step 3: Find related articles and media
         sendStencilProgressNotification(imageId, 'articles', 'active', 'Finding articles...', 25, topic);
         const externalContentResponse = await llmService.callLLM('article_suggestions', { topic: topic, contentSummary: analysisResult.contentSummary });
         if (!externalContentResponse.success || !externalContentResponse.data?.contents) {
@@ -290,58 +316,25 @@ export async function processCreatePacketRequestFromTab(initiatorTabId) {
         const validatedExternalLinks = (externalContentResponse.data.contents || [])
             .filter(item => item?.url?.startsWith('https://en.wikipedia.org/wiki/') && item.title && item.relevance)
             .map(item => ({ type: 'external', url: decodeURIComponent(item.url), title: item.title, relevance: item.relevance }));
-        
+
         if (validatedExternalLinks.length === 0) {
             logger.warn('PacketProcessor:FromTab', `LLM returned no valid Wikipedia articles for "${topic}". Packet will be created without them.`);
         }
+        sendStencilProgressNotification(imageId, 'articles', 'completed', `Found ${validatedExternalLinks.length} articles`, 40, topic);
 
-        sendStencilProgressNotification(imageId, 'media', 'active', 'Finding media...', 35, topic);
-        const mediaResponse = await llmService.callLLM('extract_media', { htmlContent: plainText }); // Pass plainText to LLM for media extraction
-        let mediaContentItems = [];
-        if (mediaResponse.success && Array.isArray(mediaResponse.data?.media)) {
-            const pageUrl = new URL(tab.url); // The base URL of the page
-
-            for (const media of mediaResponse.data.media) {
-                if (media.url && media.title) {
-                    let absoluteUrl;
-                    try {
-                        // Create a new URL object, which will handle both absolute and relative URLs
-                        absoluteUrl = new URL(media.url, pageUrl.href).href;
-                    } catch (e) {
-                        logger.warn('PacketProcessor:FromTab', `Could not create a valid URL for media: "${media.url}"`, e);
-                        continue; // Skip this media item if the URL is invalid
-                    }
-
-                    const mediaHtml = `<h1>${media.title}</h1><p><a href="${absoluteUrl}" target="_blank" rel="noopener noreferrer">View media</a></p>`;
-                    const enhancedMediaHtml = enhanceHtml(mediaHtml, topic, media.title);
-                    mediaContentItems.push({
-                        type: 'generated',
-                        pageId: `media_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-                        title: media.title,
-                        contentType: 'text/html',
-                        contentB64: arrayBufferToBase64(new TextEncoder().encode(enhancedMediaHtml))
-                    });
-                }
-            }
-        }
-        sendStencilProgressNotification(imageId, 'articles_media', 'completed', `Found ${validatedExternalLinks.length} articles and ${mediaContentItems.length} media files`, 40, topic);
-
-        
-        // Step 4: Generate summary and quiz
         const summaryPageDef = { type: "generated", pageId: "summary-page", title: `${topic} Summary`, contentType: "text/html" };
         let audioMediaItem = null;
-        
-        const contentForSummaryPrompt = [...validatedExternalLinks, ...mediaContentItems];
 
         sendStencilProgressNotification(imageId, 'generate_summary', 'active', 'Generating summary...', 50, topic);
-        let summaryResponse = await llmService.callLLM('summary_page', { topic: topic, allPacketContents: contentForSummaryPrompt });
+        const summaryResponse = await llmService.callLLM('summary_page', { topic: topic, allPacketContents: validatedExternalLinks });
         if (!summaryResponse.success || !summaryResponse.data) throw new Error(summaryResponse.error || 'LLM failed to generate summary.');
+        const summaryHtmlBodyLLM = String(summaryResponse.data).trim();
         
-        // Generate audio for the summary
-        const summaryTextForTTS = await getAndParseHtml(summaryResponse.data); // This is the plain text from LLM-generated HTML summary
-        const ttsResponse = await ttsService.generateAudioAndTimestamps(summaryTextForTTS);
-        const summaryHtmlBodyLLM = String(summaryResponse.data).trim(); // The HTML content generated by the LLM for the summary
+        const plainTextForTTS = await getAndParseHtml(summaryHtmlBodyLLM, false);
+        const sourceOfTruthText = await getAndParseHtml(summaryHtmlBodyLLM, true);
         
+        const ttsResponse = await ttsService.generateAudioAndTimestamps(plainTextForTTS);
+
         if (ttsResponse.success && ttsResponse.audioBlob) {
             const audioBuffer = await ttsResponse.audioBlob.arrayBuffer();
             audioMediaItem = {
@@ -351,187 +344,35 @@ export async function processCreatePacketRequestFromTab(initiatorTabId) {
                 mimeType: 'audio/mpeg',
                 timestamps: []
             };
+
+            const links = await getLinksFromHtml(summaryHtmlBodyLLM);
+            const alignmentResponse = await ttsService.getAlignmentForExistingAudio(audioBuffer, plainTextForTTS);
             
-            // Extract links from the LLM-generated summary HTML
-            const links = await getLinksFromHtml(summaryHtmlBodyLLM); // Get links from LLM-generated HTML summary
-            const { wordTimestamps } = ttsResponse; // These are aligned to summaryTextForTTS
-            
-            const timestamps = [];
-            // Construct mergedTranscriptString from wordTimestamps for LLM input
-            const mergedTranscriptString = wordTimestamps.map(ts => ts.text).join(' ');
-
-            const debugData = {
-                rawTimestamps: wordTimestamps || [],
-                extractedLinks: links || [],
-            };
-            audioMediaItem.debug = debugData;
-
-            // --- Call LLM to get character offsets for links within mergedTranscriptString ---
-            logger.log("PacketProcessor:processCreatePacketRequestFromTab", "Calling LLM for link character offsets.");
-            const llmLinkOffsetsResponse = await llmService.callLLM(
-                'link_character_offsets',
-                {
-                    originalHtmlBody: summaryHtmlBodyLLM, // Pass the LLM-generated HTML as context
-                    mergedTranscriptString: mergedTranscriptString, // Pass the merged transcript for offsets
-                    links: links // Pass the parsed links
+            if (alignmentResponse.success && alignmentResponse.wordTimestamps) {
+                if (links.length > 0 && alignmentResponse.wordTimestamps.length > 0) {
+                     audioMediaItem.timestamps = runPositionalInterpolation(sourceOfTruthText, alignmentResponse.wordTimestamps, links);
                 }
-            );
-            
-            if (!llmLinkOffsetsResponse.success || !llmLinkOffsetsResponse.data?.linkOffsets) {
-                // Fallback to sequential matching if LLM call fails
-                logger.warn("PacketProcessor:processCreatePacketRequestFromTab", "LLM failed to provide link character offsets. Falling back to sequential matching algorithm.", llmLinkOffsetsResponse.error);
-                
-                const transcriptWords = wordTimestamps.map(ts => ts.text.toLowerCase().replace(/[.,!?;:]/g, ''));
-                let currentTranscriptWordIndex = 0; // Initialize pointer
-
-                // Iterate through links in the order they appear in the HTML
-                for (const link of links) {
-                    const linkSearchWords = link.text.toLowerCase().replace(/[.,!?;:]/g, '').split(/\s+/).filter(word => word);
-                    if (linkSearchWords.length === 0) {
-                        continue; // Skip empty link texts
-                    }
-
-                    let matchStartIndex = -1;
-                    // Search for the link's words *starting from the currentTranscriptWordIndex*
-                    for (let i = currentTranscriptWordIndex; i <= transcriptWords.length - linkSearchWords.length; i++) {
-                        let isMatch = true;
-                        for (let j = 0; j < linkSearchWords.length; j++) {
-                            if (transcriptWords[i + j] !== linkSearchWords[j]) {
-                                isMatch = false;
-                                break;
-                            }
-                        }
-                        if (isMatch) {
-                            matchStartIndex = i;
-                            break; // Found the first match after the current pointer
-                        }
-                    }
-
-                    if (matchStartIndex !== -1) {
-                        const startTime = wordTimestamps[matchStartIndex].start;
-                        const matchEndIndex = matchStartIndex + linkSearchWords.length - 1;
-                        const endTime = (matchEndIndex < wordTimestamps.length) ? wordTimestamps[matchEndIndex].end : wordTimestamps[wordTimestamps.length - 1].end;
-
-                        timestamps.push({
-                            url: link.href,
-                            text: link.text,
-                            startTime: startTime,
-                            endTime: endTime
-                        });
-                        // Advance the pointer to after the last matched word
-                        currentTranscriptWordIndex = matchEndIndex + 1;
-                    } else {
-                        logger.warn("PacketProcessor:Timestamping (Fallback)", `Could not find word sequence for link text "${link.text}" in transcript (after word index ${currentTranscriptWordIndex}).`);
-                    }
-                }
-
-            } else { // LLM call was successful
-                const llmIdentifiedOffsets = llmLinkOffsetsResponse.data.linkOffsets;
-                debugData.llmIdentifiedOffsets = llmIdentifiedOffsets; // Add LLM's output to debug data
-                
-                // Pre-calculate character offsets for each word in the transcript
-                let currentWordCharOffset = 0;
-                const wordCharOffsets = wordTimestamps.map(word => {
-                    const startChar = currentWordCharOffset;
-                    // Account for the space following the word that is part of character count,
-                    // but not part of word.text itself.
-                    const endChar = currentWordCharOffset + word.text.length;
-                    currentWordCharOffset = endChar + 1; // +1 for space or separator
-                    return { ...word, startChar, endChar };
-                });
-                
-                // Adjust for the very last word if plainText has no trailing space
-                // This 'currentWordCharOffset' would represent the total length of words + spaces
-                // If plainText doesn't end with a space, the last word's endChar should be plainText.length - 1 (or similar)
-                // A simpler way: if plainText is shorter than calculated currentWordCharOffset, then it means
-                // the last word in wordTimestamps is the actual end of text.
-                if (wordCharOffsets.length > 0 && mergedTranscriptString.length < currentWordCharOffset) {
-                    wordCharOffsets[wordCharOffsets.length - 1].endChar = mergedTranscriptString.length;
-                }
-
-                for (const llmOffset of llmIdentifiedOffsets) {
-                    const originalLink = links.find(l => l.href === llmOffset.url); // Use URL to find original link
-                    if (!originalLink) {
-                        logger.warn("PacketProcessor:Timestamping", `LLM returned offset for unknown link URL: ${llmOffset.url}`);
-                        continue;
-                    }
-
-                    let startTimestamp = null;
-                    let endTimestamp = null;
-                    let firstWordMatchedIndex = -1;
-                    let lastWordMatchedIndex = -1;
-
-                    // Find the words that cover the LLM's character range
-                    for (let i = 0; i < wordCharOffsets.length; i++) {
-                        const word = wordCharOffsets[i];
-                        const isMeaningfulWord = /\S/.test(word.text); // Check if it's a non-whitespace character/word
-                        
-                        // Check for overlap: word's start or end is within LLM's range, or LLM's range is within word's range
-                        const overlapStart = Math.max(word.startChar, llmOffset.charStart);
-                        const overlapEnd = Math.min(word.endChar, llmOffset.charEnd);
-
-                        if (overlapEnd > overlapStart) { // There is an actual overlap
-                            if (isMeaningfulWord) { // Only consider meaningful words for start/end points
-                                if (firstWordMatchedIndex === -1) { // This is the first word that overlaps
-                                    firstWordMatchedIndex = i;
-                                    startTimestamp = word.start;
-                                }
-                                lastWordMatchedIndex = i; // Keep track of the last overlapping word
-                                endTimestamp = word.end;
-                            }
-                        } else if (firstWordMatchedIndex !== -1 && word.startChar >= llmOffset.charEnd) {
-                            // We found overlapping words, and now we've passed the end of the LLM's range.
-                            break;
-                        }
-                    }
-                    
-                    if (startTimestamp !== null && endTimestamp !== null) {
-                        timestamps.push({
-                            url: originalLink.href,
-                            text: originalLink.text,
-                            startTime: startTimestamp,
-                            endTime: endTimestamp
-                        });
-                    } else {
-                        logger.warn("PacketProcessor:Timestamping", `LLM-provided character offset for link "${originalLink.text}" (URL: ${originalLink.href}) did not map to words in transcript. Offsets: [${llmOffset.charStart}, ${llmOffset.charEnd}]`);
-                    }
-                }
+            } else {
+                logger.warn("PacketProcessor:FromTab", "Forced alignment call failed, timestamps will be empty.", alignmentResponse.error);
             }
-            audioMediaItem.timestamps = timestamps; // Assign the collected timestamps
 
-            await indexedDbStorage.saveGeneratedContent(imageId, audioMediaItem.pageId, [{
-                name: 'audio.mp3',
-                content: audioBuffer,
-                contentType: 'audio/mpeg'
-            }]);
+            await indexedDbStorage.saveGeneratedContent(imageId, audioMediaItem.pageId, [{ name: 'audio.mp3', content: audioBuffer, contentType: 'audio/mpeg' }]);
             logger.log('PacketProcessor:FromTab', 'Successfully created media item for TTS audio and saved to IndexedDB.');
         } else {
-            logger.warn('PacketProcessor:FromTab', 'Failed to generate audio from ElevenLabs.', ttsResponse.error);
+            logger.warn('PacketProcessor:FromTab', 'Failed to generate audio from ElevenLabs.', ttsResponse?.error);
         }
 
-        summaryPageDef.contentB64 = arrayBufferToBase64(new TextEncoder().encode(enhanceHtml(summaryHtmlBodyLLM, topic, summaryPageDef.title))); // Use LLM-generated HTML for summary page
+        summaryPageDef.contentB64 = arrayBufferToBase64(new TextEncoder().encode(enhanceHtml(summaryHtmlBodyLLM, topic, summaryPageDef.title)));
         sendStencilProgressNotification(imageId, 'generate_summary', 'completed', 'Summary generated', 70, topic);
-        
-        // Step 5: Assemble and save PacketImage, with the source page first.
-        const summaryContent = {
-            type: 'alternative',
-            alternatives: [summaryPageDef]
-        };
-        if (audioMediaItem) {
-            summaryContent.alternatives.push(audioMediaItem);
-        }
 
-        const finalSourceContent = [
-            summaryContent,
-            ...validatedExternalLinks,
-            ...mediaContentItems,
-            sourcePageContentItem
-        ];
-        
-        const packetImage = { id: imageId, topic: topic, created: new Date().toISOString(), sourceContent: finalSourceContent };
+        const summaryContent = { type: 'alternative', alternatives: [summaryPageDef] };
+        if (audioMediaItem) summaryContent.alternatives.push(audioMediaItem);
+
+        const finalSourceContent = [summaryContent, ...validatedExternalLinks, sourcePageContentItem];
+        const packetImage = { id: imageId, topic, created: new Date().toISOString(), sourceContent: finalSourceContent };
         
         await storage.savePacketImage(packetImage);
-        logger.log('PacketProcessor:FromTab', 'Packet Image with embedded Base64 content saved successfully', { imageId });
+        logger.log('PacketProcessor:FromTab', 'Packet Image saved successfully', { imageId });
         sendStencilProgressNotification(imageId, 'local_save_final', 'completed', 'Packet ready in Library', 100, topic);
 
         sendProgressNotification('packet_image_created', { image: packetImage });
@@ -544,7 +385,6 @@ export async function processCreatePacketRequestFromTab(initiatorTabId) {
     }
 }
 
-
 export async function processCreatePacketRequest(data, initiatorTabId) {
     const { topic } = data;
     if (!topic) { return { success: false, error: "Topic is required." }; }
@@ -553,7 +393,6 @@ export async function processCreatePacketRequest(data, initiatorTabId) {
     logger.log('PacketProcessor:processCreatePacketRequest', 'Starting image creation for topic:', { topic, imageId });
 
     try {
-        // Send initial progress notification using the final imageId for tracking
         sendStencilProgressNotification(imageId, 'init', 'active', 'Preparing...', 5, topic);
 
         const activeModelConfig = await storage.getActiveModelConfig();
@@ -576,24 +415,18 @@ export async function processCreatePacketRequest(data, initiatorTabId) {
         }
         sendStencilProgressNotification(imageId, 'articles', 'completed', `Found ${validatedExternalLinks.length} articles`, 30);
         
-        // 1. Define generated content structure
         const summaryPageDef = { type: "generated", pageId: "summary-page", title: `${topic} Summary`, contentType: "text/html" };
 
-        // 2. Generate content for each defined item
         sendStencilProgressNotification(imageId, 'generate_summary', 'active', 'Generating summary...', 40);
         const summaryResponse = await llmService.callLLM('summary_page', { topic: topic, allPacketContents: validatedExternalLinks });
         if (!summaryResponse.success || !summaryResponse.data) throw new Error(summaryResponse.error || 'LLM failed to generate summary.');
-        const summaryHtmlBodyLLM = String(summaryResponse.data).trim(); // The HTML content generated by the LLM for the summary
+        const summaryHtmlBodyLLM = String(summaryResponse.data).trim();
         const finalSummaryHtml = enhanceHtml(summaryHtmlBodyLLM, topic, summaryPageDef.title);
         summaryPageDef.contentB64 = arrayBufferToBase64(new TextEncoder().encode(finalSummaryHtml));
         sendStencilProgressNotification(imageId, 'generate_summary', 'completed', 'Summary generated', 60);
 
-        // 3. Assemble the final PacketImage with embedded content
         const finalSourceContent = [
-            {
-                type: 'alternative',
-                alternatives: [summaryPageDef]
-            },
+            { type: 'alternative', alternatives: [summaryPageDef] },
             ...validatedExternalLinks,
         ];
 
@@ -602,14 +435,12 @@ export async function processCreatePacketRequest(data, initiatorTabId) {
         logger.log('PacketProcessor', 'Packet Image with embedded Base64 content saved successfully', { imageId });
         sendStencilProgressNotification(imageId, 'local_save_final', 'completed', 'Packet ready in Library', 100);
 
-        // Notify the sidebar that a new image has been created
         sendProgressNotification('packet_image_created', { image: packetImage });
 
         return { success: true, imageId: imageId };
 
     } catch (error) {
         logger.error('PacketProcessor:processCreatePacketRequest', `Error creating packet image for topic ${topic}`, error);
-        // Use the imageId for the failure notification as well
         sendProgressNotification('packet_creation_failed', { imageId: imageId, error: error.message });
         return { success: false, error: error.message };
     }
@@ -622,184 +453,42 @@ export async function processGenerateTimestampsRequest(data) {
     }
 
     try {
-        const htmlContent = new TextDecoder().decode(base64Decode(htmlContentB64)); // This is the originalHtmlBody for this context
+        const htmlContent = new TextDecoder().decode(base64Decode(htmlContentB64));
         
-        // 1. Get plain text and links from summary HTML
-        const [plainText, links] = await Promise.all([
-            getAndParseHtml(htmlContent), // This is the plain text used for TTS
-            getLinksFromHtml(htmlContent) // These are the links from HTML structure
+        const [plainTextForTTS, links, sourceOfTruthText] = await Promise.all([
+            getAndParseHtml(htmlContent, false),
+            getLinksFromHtml(htmlContent),
+            getAndParseHtml(htmlContent, true)
         ]);
 
         if (!links || links.length === 0) {
             return { success: true, updatedMediaItem: null, message: "No timestampable links found." };
         }
 
-        // 2. Fetch existing audio from IndexedDB
         const audioContent = await indexedDbStorage.getGeneratedContent(draftId, mediaPageId);
         if (!audioContent || audioContent.length === 0) {
             throw new Error(`Audio content not found in IndexedDB for pageId: ${mediaPageId}`);
         }
         const audioBuffer = audioContent[0].content;
 
-        // 3. Get word timestamps from the forced alignment API (aligned to plainText)
-        const alignmentResponse = await ttsService.getAlignmentForExistingAudio(audioBuffer, plainText);
+        const alignmentResponse = await ttsService.getAlignmentForExistingAudio(audioBuffer, plainTextForTTS);
         if (!alignmentResponse.success) {
             throw new Error(alignmentResponse.error || "Forced alignment service failed.");
         }
         
         const { wordTimestamps } = alignmentResponse;
-        
-        // 4. Match links to timestamps with the robust algorithm
-        const timestamps = [];
-        const debugData = {
-            rawTimestamps: wordTimestamps || [],
-            extractedLinks: links || []
-        };
+        let timestamps = [];
 
-        if (wordTimestamps) {
-            // Construct mergedTranscriptString from wordTimestamps for LLM input
-            const mergedTranscriptString = wordTimestamps.map(ts => ts.text).join(' ');
-
-            // --- Call LLM to get character offsets for links within mergedTranscriptString ---
-            logger.log("PacketProcessor:processGenerateTimestampsRequest", "Calling LLM for link character offsets.");
-            const llmLinkOffsetsResponse = await llmService.callLLM(
-                'link_character_offsets',
-                {
-                    originalHtmlBody: htmlContent, // Pass the original HTML as context
-                    mergedTranscriptString: mergedTranscriptString, // Pass the merged transcript for offsets
-                    links: links // Pass the parsed links
-                }
-            );
-            if (!llmLinkOffsetsResponse.success || !llmLinkOffsetsResponse.data?.linkOffsets) {
-                // Fallback to sequential matching if LLM call fails
-                logger.warn("PacketProcessor:processGenerateTimestampsRequest", "LLM failed to provide link character offsets. Falling back to sequential matching algorithm.", llmLinkOffsetsResponse.error);
-                
-                const transcriptWords = wordTimestamps.map(ts => ts.text.toLowerCase().replace(/[.,!?;:]/g, ''));
-                let currentTranscriptWordIndex = 0; // Initialize pointer
-
-                // Iterate through links in the order they appear in the HTML
-                for (const link of links) {
-                    const linkSearchWords = link.text.toLowerCase().replace(/[.,!?;:]/g, '').split(/\s+/).filter(word => word);
-                    if (linkSearchWords.length === 0) {
-                        continue; // Skip empty link texts
-                    }
-
-                    let matchStartIndex = -1;
-                    // Search for the link's words *starting from the currentTranscriptWordIndex*
-                    for (let i = currentTranscriptWordIndex; i <= transcriptWords.length - linkSearchWords.length; i++) {
-                        let isMatch = true;
-                        for (let j = 0; j < linkSearchWords.length; j++) {
-                            if (transcriptWords[i + j] !== linkSearchWords[j]) {
-                                isMatch = false;
-                                break;
-                            }
-                        }
-                        if (isMatch) {
-                            matchStartIndex = i;
-                            break; // Found the first match after the current pointer
-                        }
-                    }
-
-                    if (matchStartIndex !== -1) {
-                        const startTime = wordTimestamps[matchStartIndex].start;
-                        const matchEndIndex = matchStartIndex + linkSearchWords.length - 1;
-                        const endTime = (matchEndIndex < wordTimestamps.length) ? wordTimestamps[matchEndIndex].end : wordTimestamps[wordTimestamps.length - 1].end;
-
-                        timestamps.push({
-                            url: link.href,
-                            text: link.text,
-                            startTime: startTime,
-                            endTime: endTime
-                        });
-                        // Advance the pointer to after the last matched word
-                        currentTranscriptWordIndex = matchEndIndex + 1;
-                    } else {
-                        logger.warn("PacketProcessor:Timestamping (Fallback)", `Could not find word sequence for link text "${link.text}" in transcript (after word index ${currentTranscriptWordIndex}).`);
-                    }
-                }
-
-            } else { // LLM call was successful
-                const llmIdentifiedOffsets = llmLinkOffsetsResponse.data.linkOffsets;
-                debugData.llmIdentifiedOffsets = llmIdentifiedOffsets; // Add LLM's output to debug data
-                
-                // Pre-calculate character offsets for each word in the transcript
-                let currentWordCharOffset = 0;
-                const wordCharOffsets = wordTimestamps.map(word => {
-                    const startChar = currentWordCharOffset;
-                    // Account for the space following the word that is part of character count,
-                    // but not part of word.text itself.
-                    const endChar = currentWordCharOffset + word.text.length;
-                    currentWordCharOffset = endChar + 1; // +1 for space or separator
-                    return { ...word, startChar, endChar };
-                });
-                
-                // Adjust for the very last word if plainText has no trailing space
-                // This 'currentWordCharOffset' would represent the total length of words + spaces
-                // If plainText doesn't end with a space, the last word's endChar should be plainText.length - 1 (or similar)
-                // A simpler way: if plainText is shorter than calculated currentWordCharOffset, then it means
-                // the last word in wordTimestamps is the actual end of text.
-                if (wordCharOffsets.length > 0 && mergedTranscriptString.length < currentWordCharOffset) {
-                    wordCharOffsets[wordCharOffsets.length - 1].endChar = mergedTranscriptString.length;
-                }
-
-                for (const llmOffset of llmIdentifiedOffsets) {
-                    const originalLink = links.find(l => l.href === llmOffset.url); // Use URL to find original link
-                    if (!originalLink) {
-                        logger.warn("PacketProcessor:Timestamping", `LLM returned offset for unknown link URL: ${llmOffset.url}`);
-                        continue;
-                    }
-
-                    let startTimestamp = null;
-                    let endTimestamp = null;
-                    let firstWordMatchedIndex = -1;
-                    let lastWordMatchedIndex = -1;
-
-                    // Find the words that cover the LLM's character range
-                    for (let i = 0; i < wordCharOffsets.length; i++) {
-                        const word = wordCharOffsets[i];
-                        const isMeaningfulWord = /\S/.test(word.text); // Check if it's a non-whitespace character/word
-                        
-                        // Check for overlap: word's start or end is within LLM's range, or LLM's range is within word's range
-                        const overlapStart = Math.max(word.startChar, llmOffset.charStart);
-                        const overlapEnd = Math.min(word.endChar, llmOffset.charEnd);
-
-                        if (overlapEnd > overlapStart) { // There is an actual overlap
-                            if (isMeaningfulWord) { // Only consider meaningful words for start/end points
-                                if (firstWordMatchedIndex === -1) { // This is the first word that overlaps
-                                    firstWordMatchedIndex = i;
-                                    startTimestamp = word.start;
-                                }
-                                lastWordMatchedIndex = i; // Keep track of the last overlapping word
-                                endTimestamp = word.end;
-                            }
-                        } else if (firstWordMatchedIndex !== -1 && word.startChar >= llmOffset.charEnd) {
-                            // We found overlapping words, and now we've passed the end of the LLM's range.
-                            break;
-                        }
-                    }
-                    
-                    if (startTimestamp !== null && endTimestamp !== null) {
-                        timestamps.push({
-                            url: originalLink.href,
-                            text: originalLink.text,
-                            startTime: startTimestamp,
-                            endTime: endTimestamp
-                        });
-                    } else {
-                        logger.warn("PacketProcessor:Timestamping", `LLM-provided character offset for link "${originalLink.text}" (URL: ${originalLink.href}) did not map to words in transcript. Offsets: [${llmOffset.charStart}, ${llmOffset.charEnd}]`);
-                    }
-                }
-            }
+        if (wordTimestamps && wordTimestamps.length > 0) {
+            timestamps = runPositionalInterpolation(sourceOfTruthText, wordTimestamps, links);
         }
         
-        // 5. Create the updated media item data structure
         const updatedMediaItem = {
             type: 'media',
             pageId: mediaPageId,
-            title: "Summary Audio", // Or get from original item if needed
+            title: "Summary Audio",
             mimeType: 'audio/mpeg',
-            timestamps: timestamps,
-            debug: debugData
+            timestamps: timestamps
         };
 
         return { success: true, updatedMediaItem };
@@ -930,7 +619,6 @@ export async function instantiatePacket(imageId, preGeneratedInstanceId, initiat
         
         await storage.savePacketBrowserState({ instanceId: instanceId, tabGroupId: null, activeTabIds: [], lastActiveUrl: null });
         
-        // This will correctly do nothing if there are no generated items to create rules for
         await ruleManager.addOrUpdatePacketRules(packetInstance);
         
         logger.log('PacketProcessor:instantiatePacket', 'Final Packet Instance and BrowserState saved.', { instanceId });
@@ -956,8 +644,7 @@ export async function publishImageForSharing(imageId) {
         const packetImage = await storage.getPacketImage(imageId);
         if (!packetImage) return { success: false, error: `Packet image ${imageId} not found.` };
         
-        // --- FIX START: Embed media content into the export ---
-        const imageForExport = JSON.parse(JSON.stringify(packetImage)); // Deep copy to avoid modifying original
+        const imageForExport = JSON.parse(JSON.stringify(packetImage));
 
         for (const contentItem of imageForExport.sourceContent) {
             let itemsToProcess = [];
@@ -974,7 +661,6 @@ export async function publishImageForSharing(imageId) {
                 }
             }
         }
-        // --- FIX END ---
 
         const jsonString = JSON.stringify(imageForExport);
         const shareFileName = `shared/img_${imageId.replace(/^img_/, '')}_${Date.now()}.json`;
@@ -1014,7 +700,6 @@ export async function importImageFromUrl(url) {
         
         const importedPacketImage = { ...sharedImage, id: imageId, created: new Date().toISOString(), shareUrl: url };
         
-        // --- FIX START: Process imported media and save to IndexedDB ---
         for (const contentItem of importedPacketImage.sourceContent) {
             let itemsToProcess = [];
              if (contentItem.type === 'media') {
@@ -1033,11 +718,10 @@ export async function importImageFromUrl(url) {
                             contentType: mediaItem.mimeType
                         }]);
                     }
-                    delete mediaItem.contentB64; // Clean up after saving to DB
+                    delete mediaItem.contentB64;
                 }
             }
         }
-        // --- FIX END ---
 
         await storage.savePacketImage(importedPacketImage);
         logger.log('PacketProcessor:importImageFromUrl', 'Packet image imported and saved.', { newImageId: imageId, originalUrl: url });
@@ -1149,7 +833,6 @@ export async function processDeletePacketImageRequest(data) {
         errors.push(error.message);
     }
     
-    // Notify the UI that the image has been removed
     sendProgressNotification('packet_image_deleted', { imageId: imageId });
     
     return {
@@ -1212,17 +895,7 @@ export async function processDeletePacketsRequest(data, initiatorTabId = null) {
             logger.log('PacketProcessor:delete', `Removed redirect rules for: ${instanceId}`);
 
             sendProgressNotification('packet_instance_deleted', { packetId: instanceId, source: 'user_action' });
-
-            // if (imageId) {
-            //     const remainingInstances = await storage.getInstanceCountForImage(imageId);
-            //     if (remainingInstances === 0) {
-            //         logger.log('PacketProcessor:delete', `No other instances use image ${imageId}. Deleting image and its IDB content.`);
-            //         await storage.deletePacketImage(imageId).catch(e => logger.warn('PacketProcessor:delete', `Error deleting packet image ${imageId}`, e));
-            //         await indexedDbStorage.deleteGeneratedContentForImage(imageId).catch(e => logger.warn('PacketProcessor:delete', `Error deleting IDB content for image ${imageId}`, e));
-            //     } else {
-            //         logger.log('PacketProcessor:delete', `${remainingInstances} other instances still use image ${imageId}. Image and IDB content retained.`);
-            //     }
-            // }
+            
             deletedCount++;
         } catch (error) {
             logger.error('PacketProcessor:delete', `Error deleting packet ${instanceId}`, error);

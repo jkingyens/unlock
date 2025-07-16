@@ -122,14 +122,13 @@ function _parseJsonArticleResponse(contentStr, providerNameForLog) {
         if (parsedJson.topic && parsedJson.contentSummary) { // For extract_topic_from_html
             return parsedJson;
         }
-        // MODIFICATION START: Make the check more flexible
-        if (parsedJson && (Array.isArray(parsedJson.contents) || Array.isArray(parsedJson.podcasts) || Array.isArray(parsedJson.media) || Array.isArray(parsedJson.linkOffsets))) { // ADDED: || Array.isArray(parsedJson.linkOffsets)
+
+        if (parsedJson && (Array.isArray(parsedJson.contents) || Array.isArray(parsedJson.podcasts) || Array.isArray(parsedJson.media) || Array.isArray(parsedJson.linkOffsets))) {
             return parsedJson;
         }
-        // MODIFICATION END
 
-        logger.error(`LLMService:_parseJsonArticleResponse[${providerNameForLog}]`, `Parsed JSON does not contain the expected "contents", "podcasts", "media", or "linkOffsets" array.`, parsedJson); // UPDATED ERROR MESSAGE
-        throw new Error(`Parsed JSON is not in the expected format (missing "contents", "podcasts", "media", or "linkOffsets" array).`); // UPDATED ERROR MESSAGE
+        logger.error(`LLMService:_parseJsonArticleResponse[${providerNameForLog}]`, `Parsed JSON does not contain the expected "contents", "podcasts", "media", or "linkOffsets" array.`, parsedJson);
+        throw new Error(`Parsed JSON is not in the expected format (missing "contents", "podcasts", "media", or "linkOffsets" array).`);
 
     } catch (parseError) {
         logger.error(`LLMService:_parseJsonArticleResponse[${providerNameForLog}]`, `Failed to parse JSON. Content that caused error (first 500 chars): "${contentStr.substring(0,500)}"`, { parseError });
@@ -187,8 +186,8 @@ function getSummaryPromptText(context) {
 
 CRITICAL REQUIREMENTS:
 1.  **Output ONLY HTML BODY Content:** Your entire response MUST be only the HTML content that would go INSIDE the \`<body>\` tags. Do NOT include \`<!DOCTYPE html>\`, \`<html>\`, \`<head>\`, or \`<body>\` tags themselves.
-2.  **Narrative Structure:** Write in a conversational and engaging tone. Instead of a dry summary, act as a guide leading the user through the topic. Use headings (<h2>, <h3>) to create a logical flow.
-3.  **Interweave Links Naturally:** You MUST link to every provided article within the flow of the text. Do not just list the links at the end. Introduce each link contextually. For example, instead of "Here is a link about X," write something like, "To get a foundational understanding, a great place to start is the article on <a href='...' data-timestampable="true">The History of X</a>, which covers the key milestones..."
+2.  **Pure Narrative Flow:** Write in a conversational and engaging tone. Instead of using headers (like <h2> or <h3>) to create sections, weave the content into a single, flowing narrative. Use paragraphs (<p>) to structure the text.
+3.  **Interweave Links Naturally:** You MUST link to every provided article within the flow of the text. Introduce each link contextually. For example, instead of "Here is a link about X," write something like, "To get a foundational understanding, a great place to start is the article on <a href='...' data-timestampable="true">The History of X</a>, which covers the key milestones..."
 4.  **Synthesize, Don't Just List:** Your narrative should connect the ideas from the different articles, showing how they relate to each other to build a complete picture of the topic.
 5.  **Timestampable Links:** For each link you create, you MUST add the attribute \`data-timestampable="true"\`. This is critical for the extension to process the links.`;
 
@@ -199,7 +198,7 @@ ${articleSynthesisInfo || "No primary external articles provided."}
 **All Packet Contents Data (for context of what the user has):**
 ${allPacketContents.map(item => `- Title: ${item.title || 'Untitled'}, URL: ${item.predictedUrl || item.url || '#'}`).join('\n')}
 
-Follow ALL instructions from the system prompt precisely. Create an engaging narrative, not a simple list.`;
+Follow ALL instructions from the system prompt precisely. Create an engaging, flowing narrative without section headers.`;
     
     return { systemPrompt, userPrompt };
 }
@@ -326,39 +325,6 @@ ${htmlContent.substring(0, 15000)}
     return { systemPrompt, userPrompt };
 }
 
-// NEW: Prompt for getting character offsets of links
-function getLinkOffsetsPromptText(originalHtmlBody, mergedTranscriptString, links) { // UPDATED: Added originalHtmlBody and mergedTranscriptString
-    const linksJson = JSON.stringify(links.map(l => ({ text: l.text, url: l.href })));
-    const systemPrompt = `Your task is to identify the precise character offsets of specified link texts within a given plain text document.
-Prioritize finding the exact provided link text. If an exact match is not found, or if the link text is generic, infer the most appropriate character range in the plain text where the concept or topic related to that link's original text is being discussed.
-Your response MUST be a single, valid JSON object with a key "linkOffsets".
-The value of "linkOffsets" MUST be an array of objects.
-Each object in the "linkOffsets" array must have exactly these keys:
-- "url": The original URL of the link.
-- "charStart": The 0-indexed starting character position of the matched or inferred text in the plain text.
-- "charEnd": The 0-indexed ending character position of the matched or inferred text in the plain text (exclusive, i.e., charEnd - charStart = length).
-If a link text's concept or topic is not discussed in the document, or cannot be reasonably inferred, it should be omitted from the output.
-Do NOT include any introductory text, explanations, or markdown formatting around your JSON.
-Adhere strictly to this JSON output format.`;
-
-    const userPrompt = `Original HTML Document (for context and link identification):
----
-${originalHtmlBody.substring(0, 15000)}
----
-
-Plain Text Document (to get character offsets from - this is the audio transcript):
----
-${mergedTranscriptString.substring(0, 15000)}
----
-
-Links to find (exact text to match for offset calculation):
-${linksJson}
-
-Return the character offsets for these links within the "Plain Text Document".`; // UPDATED: Clarified source of offsets
-    return { systemPrompt, userPrompt };
-}
-
-
 const llmService = {
     prepareOpenAIPayload(promptType, context, activeModelConfig) {
         let systemPrompt, userPrompt;
@@ -384,10 +350,6 @@ const llmService = {
             ({ systemPrompt, userPrompt } = getCustomPagePromptText(context.prompt, context.context));
         } else if (promptType === 'modify_html_for_completion') {
             ({ systemPrompt, userPrompt } = getModificationPromptText(context.htmlContent));
-        } else if (promptType === 'link_character_offsets') { // NEW PROMPT TYPE
-            ({ systemPrompt, userPrompt } = getLinkOffsetsPromptText(context.originalHtmlBody, context.mergedTranscriptString, context.links)); // UPDATED context properties
-            responseFormat = { type: "json_object" };
-            maxTokensForTask = 2048; // Can be adjusted based on expected links/text size
         }
         else { throw new Error(`Invalid promptType for OpenAI: ${promptType}`); }
         
@@ -408,7 +370,7 @@ const llmService = {
         if (promptType === 'custom_page' || promptType === 'modify_html_for_completion') {
             return _cleanFullHtmlOutput(contentStr);
         }
-        if (promptType === 'article_suggestions' || promptType === 'extract_topic_from_html' || promptType === 'extract_media' || promptType === 'link_character_offsets') { // ADDED link_character_offsets
+        if (promptType === 'article_suggestions' || promptType === 'extract_topic_from_html' || promptType === 'extract_media') {
             return _parseJsonArticleResponse(contentStr, `OpenAI (${responseData.model || ''})`);
         }
         if (promptType === 'summary_page' || promptType === 'quiz_page') {
@@ -439,10 +401,6 @@ const llmService = {
              ({ systemPrompt, userPrompt } = getCustomPagePromptText(context.prompt, context.context));
         } else if (promptType === 'modify_html_for_completion') {
             ({ systemPrompt, userPrompt } = getModificationPromptText(context.htmlContent));
-        } else if (promptType === 'link_character_offsets') { // NEW PROMPT TYPE
-            ({ systemPrompt, userPrompt } = getLinkOffsetsPromptText(context.originalHtmlBody, context.mergedTranscriptString, context.links)); // UPDATED context properties
-            responseMimeType = "application/json";
-            maxOutputTokensForTask = 2048; // Adjust based on expected output size
         }
         else { throw new Error(`Invalid promptType for Gemini: ${promptType}`); }
         
@@ -469,7 +427,7 @@ const llmService = {
         if (promptType === 'custom_page' || promptType === 'modify_html_for_completion') {
             return _cleanFullHtmlOutput(contentStr);
         }
-        if (promptType === 'article_suggestions' || promptType === 'extract_topic_from_html' || promptType === 'extract_media' || promptType === 'link_character_offsets') return _parseJsonArticleResponse(contentStr, `Gemini (${responseData.model || ''})`); // ADDED link_character_offsets
+        if (promptType === 'article_suggestions' || promptType === 'extract_topic_from_html' || promptType === 'extract_media') return _parseJsonArticleResponse(contentStr, `Gemini (${responseData.model || ''})`);
         else if (promptType === 'summary_page' || promptType === 'quiz_page') return _cleanHtmlOutput(contentStr);
         else throw new Error(`Invalid promptType for Gemini parsing: ${promptType}`);
     },
@@ -492,9 +450,6 @@ const llmService = {
              ({ systemPrompt, userPrompt } = getCustomPagePromptText(context.prompt, context.context));
         } else if (promptType === 'modify_html_for_completion') {
             ({ systemPrompt, userPrompt } = getModificationPromptText(context.htmlContent));
-        } else if (promptType === 'link_character_offsets') { // NEW PROMPT TYPE
-            ({ systemPrompt, userPrompt } = getLinkOffsetsPromptText(context.originalHtmlBody, context.mergedTranscriptString, context.links)); // UPDATED context properties
-            userPrompt += "\n\nIMPORTANT: Your entire response MUST be only the valid JSON object as described, without any surrounding text or markdown.";
         }
         else { throw new Error(`Invalid promptType for Chrome AI: ${promptType}`); }
         fullPrompt = `${systemPrompt}\n\n${userPrompt}`;
@@ -504,7 +459,7 @@ const llmService = {
         if (promptType === 'custom_page' || promptType === 'modify_html_for_completion') {
             return _cleanFullHtmlOutput(responseString);
         }
-        if (promptType === 'article_suggestions' || promptType === 'extract_topic_from_html' || promptType === 'extract_media' || promptType === 'link_character_offsets') return _parseJsonArticleResponse(responseString, 'ChromeAI-Nano'); // ADDED link_character_offsets
+        if (promptType === 'article_suggestions' || promptType === 'extract_topic_from_html' || promptType === 'extract_media') return _parseJsonArticleResponse(responseString, 'ChromeAI-Nano');
         else if (promptType === 'summary_page' || promptType === 'quiz_page') return _cleanHtmlOutput(responseString);
         else throw new Error(`Invalid promptType for Chrome AI parsing: ${promptType}`);
     },
@@ -549,11 +504,6 @@ const llmService = {
             const { systemPrompt, userPrompt } = getModificationPromptText(context.htmlContent);
             systemPromptText = systemPrompt;
             userMessages = [{role: "user", content: userPrompt }];
-        } else if (promptType === 'link_character_offsets') { // NEW PROMPT TYPE
-            const { systemPrompt, userPrompt } = getLinkOffsetsPromptText(context.originalHtmlBody, context.mergedTranscriptString, context.links); // UPDATED context properties
-            systemPromptText = systemPrompt;
-            userMessages = [{role: "user", content: userPrompt }];
-            maxTokensForTask = 2048; // Adjust based on expected output size
         }
         else { throw new Error(`Invalid promptType for Anthropic: ${promptType}`); }
 
@@ -587,7 +537,7 @@ const llmService = {
         if (promptType === 'custom_page' || promptType === 'modify_html_for_completion') {
             return _cleanFullHtmlOutput(contentStr);
         }
-        if (promptType === 'article_suggestions' || promptType === 'extract_topic_from_html' || promptType === 'extract_media' || promptType === 'link_character_offsets') return _parseJsonArticleResponse(contentStr, `Anthropic (${responseData.model || ''})`); // ADDED link_character_offsets
+        if (promptType === 'article_suggestions' || promptType === 'extract_topic_from_html' || promptType === 'extract_media') return _parseJsonArticleResponse(contentStr, `Anthropic (${responseData.model || ''})`);
         else if (promptType === 'summary_page' || promptType === 'quiz_page') return _cleanHtmlOutput(contentStr);
         else throw new Error(`Invalid promptType for Anthropic parsing: ${promptType}`);
     },

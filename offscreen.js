@@ -13,11 +13,27 @@ function handleMessages(request, sender, sendResponse) {
       try {
         const parser = new DOMParser();
         const doc = parser.parseFromString(request.data, 'text/html');
-        // Use a more robust text extraction
         const reader = new readability.Readability(doc);
         const article = reader.parse();
         const textContent = article ? article.textContent : doc.body.innerText;
-        
+        sendResponse({ success: true, data: textContent });
+      } catch (error) {
+        sendResponse({ success: false, error: error.message });
+      }
+      break;
+
+    case 'parse-html-for-text-with-markers':
+      try {
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(request.data, 'text/html');
+        const clonedDoc = doc.cloneNode(true);
+        clonedDoc.querySelectorAll('a[data-timestampable="true"]').forEach(link => {
+            const markerText = document.createTextNode(`*${link.textContent.trim()}*`);
+            link.parentNode.replaceChild(markerText, link);
+        });
+        const reader = new readability.Readability(clonedDoc);
+        const article = reader.parse();
+        const textContent = article ? article.textContent : clonedDoc.body.innerText;
         sendResponse({ success: true, data: textContent });
       } catch (error) {
         sendResponse({ success: false, error: error.message });
@@ -39,7 +55,6 @@ function handleMessages(request, sender, sendResponse) {
       }
       break;
   }
-  // return true to indicate you wish to send a response asynchronously
   return true;
 }
 
@@ -48,8 +63,6 @@ const readability = {
     Readability: class {
         constructor(doc) { this.doc = doc; }
         parse() {
-            // This is a simplified stand-in. A real implementation would be complex.
-            // For now, it prioritizes <article>, <main>, or falls back to body.
             const articleEl = this.doc.querySelector('article');
             if (articleEl) return { textContent: articleEl.innerText };
             const mainEl = this.doc.querySelector('main');
