@@ -93,6 +93,7 @@ const CONFIG = {
     confettiEnabled: true,
     tabGroupsEnabled: true,
     preferAudio: false,
+    waveformLinkMarkersEnabled: true,
     visitThresholdSeconds: 5,
     elevenlabsApiKey: ''
   },

@@ -34,11 +34,12 @@ export function init(dependencies) {
  * @param {string} options.playedColor - Color for played bars.
  * @param {string} options.linkColor - Color for bars where a link starts.
  * @param {number} options.currentTime - The current playback time in seconds.
+ * @param {boolean} options.linkMarkersEnabled - Whether to show link markers.
  * @param {Array<object>} options.timestamps - Array of link timestamp objects.
  * @param {number} options.audioDuration - Total duration of the audio.
  */
-function drawWaveform(canvas, audioSamples, options) {
-    const { accentColor, playedColor, linkColor, currentTime, timestamps, audioDuration } = options;
+async function drawWaveform(canvas, audioSamples, options) {
+    const { accentColor, playedColor, linkColor, currentTime, linkMarkersEnabled, timestamps, audioDuration } = options;
     const dpr = window.devicePixelRatio || 1;
     const canvasWidth = canvas.clientWidth;
     const canvasHeight = canvas.clientHeight;
@@ -61,7 +62,7 @@ function drawWaveform(canvas, audioSamples, options) {
     for (let i = 0; i < numBars; i++) {
         const barStartTime = i * timePerBar;
         const isPlayed = barStartTime < currentTime;
-        const isLinkStart = linkStartTimes.some(lt => barStartTime >= lt && barStartTime < lt + timePerBar);
+        const isLinkStart = linkMarkersEnabled && linkStartTimes.some(lt => barStartTime >= lt && barStartTime < lt + timePerBar);
 
         if (isLinkStart) {
             ctx.fillStyle = linkColor;
@@ -177,12 +178,14 @@ export async function displayPacketContent(instance, currentPacketUrl) {
                             const samples = decodedData.getChannelData(0);
                             audioDataCache.set(`${instance.imageId}::${contentItem.pageId}`, samples);
                             
+                            const settings = await storage.getSettings();
                             const colorOptions = {
                                 accentColor: getComputedStyle(domRefs.packetDetailView).getPropertyValue('--packet-color-accent').trim(),
                                 playedColor: getComputedStyle(domRefs.packetDetailView).getPropertyValue('--packet-color-progress-fill').trim(),
                                 linkColor: getComputedStyle(domRefs.packetDetailView).getPropertyValue('--packet-color-link-marker').trim(),
                                 timestamps: contentItem.timestamps || [],
                                 currentTime: 0,
+                                linkMarkersEnabled: settings.waveformLinkMarkersEnabled,
                                 audioDuration: decodedData.duration
                             };
                             drawWaveform(canvas, samples, colorOptions);
@@ -438,11 +441,14 @@ async function playMediaInCard(card, contentItem, instance) {
         const audio = activeAudioElement;
         const audioSamples = audioDataCache.get(audioCacheKey);
         const sessionKey = `audio_progress_${instance.instanceId}_${contentItem.pageId}`;
+        
+        const settings = await storage.getSettings();
         const colorOptions = {
              accentColor: getComputedStyle(domRefs.packetDetailView).getPropertyValue('--packet-color-accent').trim(),
              playedColor: getComputedStyle(domRefs.packetDetailView).getPropertyValue('--packet-color-progress-fill').trim(),
              linkColor: getComputedStyle(domRefs.packetDetailView).getPropertyValue('--packet-color-link-marker').trim(),
-             timestamps: contentItem.timestamps || []
+             timestamps: contentItem.timestamps || [],
+             linkMarkersEnabled: settings.waveformLinkMarkersEnabled,
         };
         
         audio.onplay = () => { card.classList.add('playing'); };
