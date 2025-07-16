@@ -224,14 +224,10 @@ function createAlternativeGroupCard(groupItem, groupIndex) {
         groupCard.appendChild(innerCard);
     }
 
-    // --- REVISED: Always show button if both media and HTML exist ---
-    if (mediaItem && htmlItem) { // Removed the condition checking for existing timestamps
-        const timestampButton = document.createElement('button');
-        
-        // Determine button text based on whether timestamps already exist
+    if (mediaItem && htmlItem) {
         const hasTimestamps = mediaItem.timestamps && mediaItem.timestamps.length > 0;
+        const timestampButton = document.createElement('button');
         timestampButton.textContent = hasTimestamps ? 'Recalculate Timestamps' : 'Add Timestamps';
-        
         timestampButton.className = 'sidebar-action-button';
         timestampButton.style.marginTop = '8px';
         timestampButton.addEventListener('click', (e) => {
@@ -240,17 +236,29 @@ function createAlternativeGroupCard(groupItem, groupIndex) {
         });
         groupCard.appendChild(timestampButton);
 
-        // --- NEW: Display info about existing timestamps if present ---
         if (hasTimestamps) {
             const timestampInfo = document.createElement('p');
             timestampInfo.textContent = `Timestamps exist for ${mediaItem.timestamps.length} links.`;
             timestampInfo.style.fontSize = '0.85em';
             timestampInfo.style.color = 'var(--status-success-color)';
-            timestampInfo.style.margin = '4px 0 0'; // Adjust margin
+            timestampInfo.style.margin = '4px 0 0';
             groupCard.appendChild(timestampInfo);
         }
     }
-    // --- END REVISED SECTION ---
+
+    // --- NEW: Add "Auto-improve Audio" button ---
+    if (mediaItem) {
+        const improveAudioButton = document.createElement('button');
+        improveAudioButton.textContent = 'Auto-improve Audio';
+        improveAudioButton.className = 'sidebar-action-button';
+        improveAudioButton.style.marginTop = '8px';
+        improveAudioButton.addEventListener('click', (e) => {
+            e.stopPropagation();
+            handleImproveAudio(mediaItem, improveAudioButton);
+        });
+        groupCard.appendChild(improveAudioButton);
+    }
+    // --- END NEW SECTION ---
 
     return groupCard;
 }
@@ -327,7 +335,6 @@ async function toggleDraftAudioPlayback(item, card) {
         }
     }
 
-    // --- FIX START: Fetch audio from IndexedDB ---
     try {
         const audioContent = await indexedDbStorage.getGeneratedContent(draftPacket.id, item.pageId);
         if (!audioContent || audioContent.length === 0) {
@@ -352,10 +359,36 @@ async function toggleDraftAudioPlayback(item, card) {
         logger.error("CreateView:toggleDraftAudio", "Failed to load and play audio from IndexedDB", error);
         showRootViewStatus("Could not play audio preview.", "error");
     }
-    // --- FIX END ---
 }
 
 // --- Action Handlers ---
+
+// --- NEW: Handler for the "Auto-improve Audio" button ---
+async function handleImproveAudio(mediaItem, button) {
+    button.disabled = true;
+    button.textContent = 'Improving...';
+
+    try {
+        const response = await sendMessageToBackground({
+            action: 'improve_draft_audio',
+            data: {
+                draftId: draftPacket.id,
+                mediaPageId: mediaItem.pageId
+            }
+        });
+
+        if (response.success) {
+            showRootViewStatus("Audio improved successfully!", "success");
+        } else {
+            throw new Error(response.error || "Failed to improve audio.");
+        }
+    } catch (error) {
+        showRootViewStatus(`Error: ${error.message}`, "error");
+    } finally {
+        button.disabled = false;
+        button.textContent = 'Auto-improve Audio';
+    }
+}
 
 async function handleGenerateTimestamps(groupItem, button) {
     const mediaItem = groupItem.alternatives.find(alt => alt.type === 'media');
@@ -436,15 +469,7 @@ async function handleSaveDraftPacket() {
         packetToSave.created = new Date().toISOString();
         
         // Move content in IndexedDB from draft key to final key
-        for (const item of packetToSave.sourceContent) {
-            if (item.type === 'media') {
-                const content = await indexedDbStorage.getGeneratedContent(originalDraftId, item.pageId);
-                if (content) {
-                    await indexedDbStorage.saveGeneratedContent(packetToSave.id, item.pageId, content);
-                    await indexedDbStorage.deleteGeneratedContent(originalDraftId, item.pageId);
-                }
-            }
-        }
+        await indexedDbStorage.transferDraftContent(originalDraftId, packetToSave.id);
     }
 
     try {

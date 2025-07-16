@@ -22,14 +22,11 @@ let creatingOffscreenDocument; // A Promise that resolves when the offscreen doc
 
 async function hasOffscreenDocument() {
     if (typeof chrome.runtime.getManifest === 'function' && chrome.runtime.getManifest().offscreen) {
-        // Correct check for Manifest V3
         const contexts = await chrome.runtime.getContexts({
             contextTypes: ['OFFSCREEN_DOCUMENT']
         });
         return contexts.length > 0;
     } else {
-         // Fallback for older environments or where the API might not be fully supported
-         // This path is less reliable.
         for (const client of await self.clients.matchAll()) {
             if (client.url.endsWith('/offscreen.html')) {
                 return true;
@@ -46,8 +43,8 @@ async function setupOffscreenDocument() {
     } else {
         creatingOffscreenDocument = chrome.offscreen.createDocument({
             url: 'offscreen.html',
-            reasons: ['DOM_PARSER'],
-            justification: 'Parse HTML string to extract text content and links.',
+            reasons: ['DOM_PARSER', 'BLOBS'],
+            justification: 'Parse HTML and process audio blob data.',
         });
         await creatingOffscreenDocument;
         creatingOffscreenDocument = null;
@@ -85,6 +82,33 @@ async function getLinksFromHtml(html) {
         throw new Error(response.error || 'Failed to parse HTML for links in offscreen document.');
     }
 }
+
+// --- Audio Post-Processing function using offscreen document ---
+async function normalizeAudioOffscreen(audioBlob) {
+    await setupOffscreenDocument();
+    try {
+        const arrayBuffer = await audioBlob.arrayBuffer();
+        const base64String = arrayBufferToBase64(arrayBuffer);
+
+        const response = await chrome.runtime.sendMessage({
+            type: 'normalize-audio',
+            target: 'offscreen',
+            data: { base64: base64String, type: audioBlob.type }
+        });
+
+        if (response && response.success) {
+            const processedBuffer = base64Decode(response.data.base64);
+            return new Blob([processedBuffer], { type: response.data.type });
+        } else {
+            logger.error('PacketProcessor:normalizeAudioOffscreen', 'Offscreen normalization failed.', response?.error);
+            return audioBlob; // Fallback to original
+        }
+    } catch (error) {
+        logger.error('PacketProcessor:normalizeAudioOffscreen', 'Error sending audio to offscreen doc', error);
+        return audioBlob; // Fallback to original
+    }
+}
+
 
 // Helper to send targeted progress messages for stencil updates to the sidebar
 function sendStencilProgressNotification(imageId, step, status, text, progressPercent, topic = null) {
@@ -218,6 +242,40 @@ function runPositionalInterpolation(sourceOfTruthText, wordTimestamps, links) {
 
 // --- Main Processing Functions ---
 
+export async function processImproveDraftAudio(data) {
+    const { draftId, mediaPageId } = data;
+    if (!draftId || !mediaPageId) {
+        return { success: false, error: "Missing draftId or mediaPageId for audio improvement." };
+    }
+
+    try {
+        const audioContent = await indexedDbStorage.getGeneratedContent(draftId, mediaPageId);
+        if (!audioContent || audioContent.length === 0) {
+            throw new Error(`Audio content not found in IndexedDB for pageId: ${mediaPageId}`);
+        }
+        
+        const originalBlob = new Blob([audioContent[0].content], { type: audioContent[0].contentType });
+        const normalizedBlob = await normalizeAudioOffscreen(originalBlob);
+        
+        const updatedBuffer = await normalizedBlob.arrayBuffer();
+
+        // Overwrite the existing audio in IndexedDB with the improved version
+        await indexedDbStorage.saveGeneratedContent(draftId, mediaPageId, [{
+            name: 'audio.wav', // Saving as WAV as that's what our encoder produces
+            content: updatedBuffer,
+            contentType: 'audio/wav'
+        }]);
+
+        logger.log("PacketProcessor:processImproveDraftAudio", "Successfully improved and saved audio.", { draftId, mediaPageId });
+        return { success: true };
+
+    } catch (error) {
+        logger.error("PacketProcessor:processImproveDraftAudio", "Error during audio improvement", error);
+        return { success: false, error: error.message };
+    }
+}
+
+
 export async function processGenerateCustomPageRequest(data) {
     const { prompt, context } = data;
     if (!prompt) {
@@ -331,18 +389,18 @@ export async function processCreatePacketRequestFromTab(initiatorTabId) {
         const summaryHtmlBodyLLM = String(summaryResponse.data).trim();
         
         const plainTextForTTS = await getAndParseHtml(summaryHtmlBodyLLM, false);
-        const sourceOfTruthText = await getAndParseHtml(summaryHtmlBodyLLM, true);
-        
         const ttsResponse = await ttsService.generateAudioAndTimestamps(plainTextForTTS);
 
         if (ttsResponse.success && ttsResponse.audioBlob) {
-            const audioBuffer = await ttsResponse.audioBlob.arrayBuffer();
+            const normalizedAudioBlob = await normalizeAudioOffscreen(ttsResponse.audioBlob);
+            const audioBuffer = await normalizedAudioBlob.arrayBuffer();
             audioMediaItem = {
                 type: 'media',
                 pageId: `audio_summary_${Date.now()}`,
                 title: summaryPageDef.title,
-                mimeType: 'audio/mpeg',
-                timestamps: []
+                mimeType: 'audio/wav',
+                timestamps: [],
+                published: true
             };
 
             const links = await getLinksFromHtml(summaryHtmlBodyLLM);
@@ -350,13 +408,14 @@ export async function processCreatePacketRequestFromTab(initiatorTabId) {
             
             if (alignmentResponse.success && alignmentResponse.wordTimestamps) {
                 if (links.length > 0 && alignmentResponse.wordTimestamps.length > 0) {
+                     const sourceOfTruthText = await getAndParseHtml(summaryHtmlBodyLLM, true);
                      audioMediaItem.timestamps = runPositionalInterpolation(sourceOfTruthText, alignmentResponse.wordTimestamps, links);
                 }
             } else {
                 logger.warn("PacketProcessor:FromTab", "Forced alignment call failed, timestamps will be empty.", alignmentResponse.error);
             }
 
-            await indexedDbStorage.saveGeneratedContent(imageId, audioMediaItem.pageId, [{ name: 'audio.mp3', content: audioBuffer, contentType: 'audio/mpeg' }]);
+            await indexedDbStorage.saveGeneratedContent(imageId, audioMediaItem.pageId, [{ name: 'audio.wav', content: audioBuffer, contentType: 'audio/wav' }]);
             logger.log('PacketProcessor:FromTab', 'Successfully created media item for TTS audio and saved to IndexedDB.');
         } else {
             logger.warn('PacketProcessor:FromTab', 'Failed to generate audio from ElevenLabs.', ttsResponse?.error);
@@ -587,19 +646,19 @@ export async function instantiatePacket(imageId, preGeneratedInstanceId, initiat
                 const cachedContent = await indexedDbStorage.getGeneratedContent(imageId, pageId);
 
                 if (!cachedContent || cachedContent.length === 0) {
-                    logger.warn('PacketProcessor:instantiate', `Media item ${pageId} is missing from IndexedDB. Cannot publish.`);
+                    logger.warn('PacketProcessor:instantiate', `Media item ${pageId} is missing from IndexedDB, so it cannot be published.`);
                     item.published = false;
                     item.url = null;
                 } else {
                     const fileContent = cachedContent[0].content;
-                    const fileExtension = mimeType === 'audio/mpeg' ? '.mp3' : '';
+                    const fileExtension = mimeType === 'audio/wav' ? '.wav' : (mimeType === 'audio/mpeg' ? '.mp3' : '');
                     const fileName = sanitizeForFileName(title) + fileExtension;
                     const filePath = `packets/${instanceId}/${pageId}/${fileName}`;
                     
                     const uploadResult = await cloudStorage.uploadFile(filePath, fileContent, mimeType, 'private');
                     if (uploadResult.success) {
                         item.url = uploadResult.fileName;
-                        item.published = true;
+                        item.published = true; // Set published to true only on successful upload
                         item.publishContext = {
                             storageConfigId: activeCloudConfig.id,
                             provider: activeCloudConfig.provider,
@@ -607,6 +666,8 @@ export async function instantiatePacket(imageId, preGeneratedInstanceId, initiat
                             bucket: activeCloudConfig.bucket
                         };
                     } else {
+                        item.published = false;
+                        item.url = null;
                         throw new Error(`Failed to publish media ${title}: ${uploadResult.error}`);
                     }
                 }
@@ -713,7 +774,7 @@ export async function importImageFromUrl(url) {
                     const audioBuffer = base64Decode(mediaItem.contentB64);
                     if (audioBuffer) {
                         await indexedDbStorage.saveGeneratedContent(imageId, mediaItem.pageId, [{
-                            name: 'audio.mp3',
+                            name: 'audio.wav',
                             content: audioBuffer,
                             contentType: mediaItem.mimeType
                         }]);
