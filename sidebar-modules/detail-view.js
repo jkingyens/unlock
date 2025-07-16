@@ -351,6 +351,18 @@ export function pauseAndClearActiveAudio() {
     }
 }
 
+/**
+ * Checks if the currently playing audio belongs to a packet that was just deleted.
+ * If so, it stops the audio.
+ * @param {string} deletedPacketId - The instanceId of the packet that was deleted.
+ */
+export function stopAudioIfPacketDeleted(deletedPacketId) {
+    if (activeAudioElement && activeAudioElement.dataset.instanceId === deletedPacketId) {
+        logger.log('DetailView', `Stopping audio because its packet (${deletedPacketId}) was deleted.`);
+        pauseAndClearActiveAudio();
+    }
+}
+
 
 async function playMediaInCard(card, contentItem, instance) {
     const waveformContainer = card.querySelector('.media-waveform-container');
