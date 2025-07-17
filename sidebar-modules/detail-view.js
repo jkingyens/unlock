@@ -51,7 +51,12 @@ async function triggerImmediateSave() {
 
 // --- Waveform Generation and Drawing ---
 async function drawWaveform(canvas, audioSamples, options) {
-    const { accentColor, playedColor, linkColor, currentTime, linkMarkersEnabled, timestamps, audioDuration } = options;
+    const { 
+        accentColor, playedColor, linkColor, currentTime, 
+        linkMarkersEnabled, timestamps, audioDuration,
+        visitedUrlsSet,
+        visitedLinkColor
+    } = options;
     const dpr = window.devicePixelRatio || 1;
     const canvasWidth = canvas.clientWidth;
     const canvasHeight = canvas.clientHeight;
@@ -69,15 +74,20 @@ async function drawWaveform(canvas, audioSamples, options) {
     const samplesPerBar = Math.floor(audioSamples.length / numBars);
     const timePerBar = audioDuration / numBars;
 
-    const linkStartTimes = timestamps.map(t => t.startTime);
+    const links = timestamps.map(t => ({ startTime: t.startTime, url: t.url }));
 
     for (let i = 0; i < numBars; i++) {
         const barStartTime = i * timePerBar;
         const isPlayed = barStartTime < currentTime;
-        const isLinkStart = linkMarkersEnabled && linkStartTimes.some(lt => barStartTime >= lt && barStartTime < lt + timePerBar);
+        
+        const activeLink = linkMarkersEnabled ? links.find(lt => barStartTime >= lt.startTime && barStartTime < lt.startTime + timePerBar) : null;
 
-        if (isLinkStart) {
-            ctx.fillStyle = linkColor;
+        if (activeLink) {
+            if (visitedUrlsSet && visitedUrlsSet.has(activeLink.url)) {
+                ctx.fillStyle = visitedLinkColor;
+            } else {
+                ctx.fillStyle = linkColor;
+            }
         } else if (isPlayed) {
             ctx.fillStyle = playedColor;
         } else {
@@ -97,6 +107,50 @@ async function drawWaveform(canvas, audioSamples, options) {
         ctx.fillRect(i * (barWidth + barGap), y, barWidth, barHeight);
     }
 }
+
+// --- NEW: Function to redraw waveforms on state update ---
+async function redrawAllVisibleWaveforms() {
+    if (!currentDetailInstance || !domRefs.packetDetailView) return;
+
+    const mediaCards = domRefs.packetDetailView.querySelectorAll('.card.media');
+    if (mediaCards.length === 0) return;
+    
+    const settings = await storage.getSettings();
+    const colorOptions = {
+        accentColor: getComputedStyle(domRefs.packetDetailView).getPropertyValue('--packet-color-accent').trim(),
+        playedColor: getComputedStyle(domRefs.packetDetailView).getPropertyValue('--packet-color-progress-fill').trim(),
+        linkColor: getComputedStyle(domRefs.packetDetailView).getPropertyValue('--packet-color-link-marker').trim(),
+        visitedLinkColor: '#81c995',
+        linkMarkersEnabled: settings.waveformLinkMarkersEnabled,
+        visitedUrlsSet: new Set(currentDetailInstance.visitedUrls || [])
+    };
+
+    for (const card of mediaCards) {
+        const pageId = card.dataset.pageId;
+        const canvas = card.querySelector('.waveform-canvas');
+        const contentItem = currentDetailInstance.contents.find(item => item.pageId === pageId);
+        const audioCacheKey = `${currentDetailInstance.imageId}::${pageId}`;
+        const audioSamples = audioDataCache.get(audioCacheKey);
+
+        if (canvas && contentItem && audioSamples) {
+            // Use the currently playing audio's time if it matches, otherwise use 0
+            const currentTime = (activeAudioElement && activeAudioElement.dataset.pageId === pageId) 
+                ? activeAudioElement.currentTime 
+                : 0;
+            const audioDuration = activeAudioElement && activeAudioElement.dataset.pageId === pageId 
+                ? activeAudioElement.duration
+                : (audioSamples.length / 44100); // Fallback estimate
+
+            drawWaveform(canvas, audioSamples, { 
+                ...colorOptions, 
+                timestamps: contentItem.timestamps || [],
+                currentTime,
+                audioDuration
+            });
+        }
+    }
+}
+
 
 // --- Main Rendering Function ---
 export async function displayPacketContent(instance, currentPacketUrl) {
@@ -152,6 +206,9 @@ export async function displayPacketContent(instance, currentPacketUrl) {
             if (progressBar) progressBar.style.width = `${progressPercentage}%`;
             const progressBarContainer = domRefs.detailProgressContainer?.querySelector('.progress-bar-container');
             if (progressBarContainer) progressBarContainer.title = `${progressPercentage}% Complete`;
+            
+            // --- CHANGE: Redraw waveforms on any state update ---
+            await redrawAllVisibleWaveforms();
 
         } else {
             const colorName = packetUtils.getColorForTopic(instance.topic);
@@ -192,10 +249,12 @@ export async function displayPacketContent(instance, currentPacketUrl) {
                                 accentColor: getComputedStyle(domRefs.packetDetailView).getPropertyValue('--packet-color-accent').trim(),
                                 playedColor: getComputedStyle(domRefs.packetDetailView).getPropertyValue('--packet-color-progress-fill').trim(),
                                 linkColor: getComputedStyle(domRefs.packetDetailView).getPropertyValue('--packet-color-link-marker').trim(),
+                                visitedLinkColor: '#81c995',
                                 timestamps: contentItem.timestamps || [],
                                 currentTime: 0,
                                 linkMarkersEnabled: settings.waveformLinkMarkersEnabled,
-                                audioDuration: decodedData.duration
+                                audioDuration: decodedData.duration,
+                                visitedUrlsSet: new Set(instance.visitedUrls || [])
                             };
                             drawWaveform(canvas, samples, colorOptions);
                         } catch (err) {
@@ -482,15 +541,6 @@ async function playMediaInCard(card, contentItem, instance) {
         
         let pageAlreadyMarkedVisited = (instance.visitedGeneratedPageIds || []).includes(contentItem.pageId);
         
-        const settings = await storage.getSettings();
-        const colorOptions = {
-             accentColor: getComputedStyle(domRefs.packetDetailView).getPropertyValue('--packet-color-accent').trim(),
-             playedColor: getComputedStyle(domRefs.packetDetailView).getPropertyValue('--packet-color-progress-fill').trim(),
-             linkColor: getComputedStyle(domRefs.packetDetailView).getPropertyValue('--packet-color-link-marker').trim(),
-             timestamps: contentItem.timestamps || [],
-             linkMarkersEnabled: settings.waveformLinkMarkersEnabled,
-        };
-        
         audio.onplay = () => { card.classList.add('playing'); };
         audio.onpause = async () => {
             card.classList.remove('playing');
@@ -501,6 +551,17 @@ async function playMediaInCard(card, contentItem, instance) {
         audio.ontimeupdate = async () => {
              if (!audio.duration || isNaN(audio.duration) || !audioSamples) return;
              
+             const settings = await storage.getSettings();
+             const colorOptions = {
+                 accentColor: getComputedStyle(domRefs.packetDetailView).getPropertyValue('--packet-color-accent').trim(),
+                 playedColor: getComputedStyle(domRefs.packetDetailView).getPropertyValue('--packet-color-progress-fill').trim(),
+                 linkColor: getComputedStyle(domRefs.packetDetailView).getPropertyValue('--packet-color-link-marker').trim(),
+                 visitedLinkColor: '#81c995',
+                 timestamps: contentItem.timestamps || [],
+                 linkMarkersEnabled: settings.waveformLinkMarkersEnabled,
+                 visitedUrlsSet: new Set(currentDetailInstance.visitedUrls || [])
+             };
+
              drawWaveform(canvas, audioSamples, { ...colorOptions, currentTime: audio.currentTime, audioDuration: audio.duration });
              
              if (!currentDetailInstance) return;
@@ -555,9 +616,9 @@ async function playMediaInCard(card, contentItem, instance) {
                         if (mediaCardElement) {
                             mediaCardElement.classList.add('visited');
                         }
-
+                        
                         await triggerImmediateSave();
-
+                        
                         await sendMessageToBackground({ 
                             action: 'media_playback_complete', 
                             data: { instanceId: instance.instanceId, pageId: contentItem.pageId } 
