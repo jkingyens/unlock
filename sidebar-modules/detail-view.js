@@ -9,10 +9,15 @@ import { calculateInstanceProgress } from './root-view.js'; // We can reuse this
 let isDisplayingPacketContent = false;
 let queuedDisplayRequest = null;
 let activeAudioElement = null;
-const audioDataCache = new Map(); // Cache decoded audio data
-let currentDetailInstance = null; // Module-level reference to the current instance
-let mentionedLinks = new Set(); // In-memory set for the current view
+const audioDataCache = new Map();
+let currentDetailInstance = null;
+let mentionedLinks = new Set();
 const MENTIONED_LINKS_SESSION_KEY_PREFIX = 'mentioned_links_';
+const MENTIONED_MEDIA_LINKS_KEY_PREFIX = 'mentioned_media_links_';
+// --- NEW: Module-level state for active media progress ---
+let activeMediaPageId = null;
+let activeMentionedMediaLinks = new Set();
+let activeMediaTotalLinks = 0;
 
 
 // Functions to be imported from the new, lean sidebar.js
@@ -127,6 +132,13 @@ export async function displayPacketContent(instance, currentPacketUrl) {
 
         const isAlreadyRendered = container.querySelector(`#detail-cards-container[data-instance-id="${instance.instanceId}"]`);
 
+        // *** FIX START: Check for active audio and include its progress in calculations ***
+        let mediaProgress = {};
+        if (activeAudioElement && !activeAudioElement.paused && activeMediaPageId && activeMediaTotalLinks > 0) {
+            mediaProgress[activeMediaPageId] = activeMentionedMediaLinks.size / activeMediaTotalLinks;
+        }
+        // *** FIX END ***
+
         if (isAlreadyRendered) {
             const visitedUrlsSet = new Set(instance.visitedUrls || []);
             const visitedGeneratedIds = new Set(instance.visitedGeneratedPageIds || []);
@@ -136,7 +148,10 @@ export async function displayPacketContent(instance, currentPacketUrl) {
                 card.classList.toggle('visited', isVisited);
             });
             updateActiveCardHighlight(currentPacketUrl);
-            const { progressPercentage } = calculateInstanceProgress(instance);
+            
+            // *** FIX: Use the calculated media progress here as well ***
+            const { progressPercentage } = calculateInstanceProgress(instance, mediaProgress);
+
             const progressBar = domRefs.detailProgressContainer?.querySelector('.progress-bar');
             if (progressBar) {
                 progressBar.style.width = `${progressPercentage}%`;
@@ -155,7 +170,7 @@ export async function displayPacketContent(instance, currentPacketUrl) {
             container.style.setProperty('--packet-color-link-marker', colors.link);
             
             const fragment = document.createDocumentFragment();
-            fragment.appendChild(createProgressSection(instance));
+            fragment.appendChild(createProgressSection(instance, mediaProgress)); // *** FIX: Pass media progress
             fragment.appendChild(await createActionButtons(instance));
             const cardsWrapper = await createCardsSection(instance, mentionedLinks);
             cardsWrapper.dataset.instanceId = instance.instanceId;
@@ -209,6 +224,7 @@ export async function displayPacketContent(instance, currentPacketUrl) {
     }
 }
 
+
 function processQueuedDisplayRequest() {
     if (queuedDisplayRequest) {
         const { instance, currentPacketUrl } = queuedDisplayRequest;
@@ -220,8 +236,8 @@ function processQueuedDisplayRequest() {
 
 // --- UI Element Creation ---
 
-function createProgressSection(instance) {
-    const { progressPercentage } = calculateInstanceProgress(instance);
+function createProgressSection(instance, mediaProgress = {}) { // *** FIX: Accept media progress
+    const { progressPercentage } = calculateInstanceProgress(instance, mediaProgress); // *** FIX: Pass media progress
     const progressWrapper = document.createElement('div');
     progressWrapper.id = 'detail-progress-container';
     progressWrapper.innerHTML = `<div class="progress-bar-container" title="${progressPercentage}% Complete"><div class="progress-bar" style="width: ${progressPercentage}%"></div></div>`;
@@ -338,8 +354,23 @@ async function createContentCard(contentItem, visitedUrlsSet, visitedGeneratedId
 
     if (isClickable) {
         card.classList.add('clickable');
-        if (type === 'media') playMediaInCard(card, contentItem, instance);
-        else card.addEventListener('click', () => openUrl(urlToOpen, instance.instanceId));
+        if (type === 'media') {
+            playMediaInCard(card, contentItem, instance);
+        } else {
+            card.addEventListener('click', () => {
+                // *** FIX: This is where we calculate and update progress on click ***
+                if (activeMediaPageId && currentDetailInstance && activeMediaTotalLinks > 0) {
+                    const mediaItemProgress = activeMentionedMediaLinks.size / activeMediaTotalLinks;
+                    const overallProgress = calculateInstanceProgress(currentDetailInstance, { [activeMediaPageId]: mediaItemProgress });
+                    const progressBar = domRefs.detailProgressContainer?.querySelector('.progress-bar');
+                    if (progressBar) {
+                        progressBar.style.width = `${overallProgress.progressPercentage}%`;
+                        progressBar.parentElement.title = `${overallProgress.progressPercentage}% Complete`;
+                    }
+                }
+                openUrl(urlToOpen, instance.instanceId);
+            });
+        }
     }
     if (isVisited) card.classList.add('visited');
     
@@ -391,6 +422,9 @@ export function pauseAndClearActiveAudio() {
         activeAudioElement.src = ''; 
         activeAudioElement.load(); 
         activeAudioElement = null;
+        activeMediaPageId = null;
+        activeMentionedMediaLinks.clear();
+        activeMediaTotalLinks = 0;
     }
 }
 
@@ -433,7 +467,15 @@ async function playMediaInCard(card, contentItem, instance) {
         
         const audio = activeAudioElement;
         const audioSamples = audioDataCache.get(audioCacheKey);
-        const sessionKey = `audio_progress_${instance.instanceId}_${contentItem.pageId}`;
+        const progressSessionKey = `audio_progress_${instance.instanceId}_${contentItem.pageId}`;
+        const mentionedMediaLinksKey = `${MENTIONED_MEDIA_LINKS_KEY_PREFIX}${instance.instanceId}_${contentItem.pageId}`;
+        const mentionedLinksSessionData = await storage.getSession(mentionedMediaLinksKey);
+        
+        activeMediaPageId = contentItem.pageId;
+        activeMentionedMediaLinks = new Set(mentionedLinksSessionData[mentionedMediaLinksKey] || []);
+        activeMediaTotalLinks = contentItem.timestamps?.length || 1;
+        
+        let pageAlreadyMarkedVisited = (instance.visitedGeneratedPageIds || []).includes(contentItem.pageId);
         
         const settings = await storage.getSettings();
         const colorOptions = {
@@ -445,7 +487,7 @@ async function playMediaInCard(card, contentItem, instance) {
         };
         
         audio.onplay = () => { card.classList.add('playing'); };
-        audio.onpause = async () => { card.classList.remove('playing'); await storage.setSession({ [sessionKey]: audio.currentTime }); };
+        audio.onpause = async () => { card.classList.remove('playing'); await storage.setSession({ [progressSessionKey]: audio.currentTime }); };
         
         audio.ontimeupdate = async () => {
              if (!audio.duration || isNaN(audio.duration) || !audioSamples) return;
@@ -454,18 +496,18 @@ async function playMediaInCard(card, contentItem, instance) {
              
              if (!currentDetailInstance) return;
 
-             if (contentItem.timestamps) {
+             if (contentItem.timestamps && contentItem.timestamps.length > 0 && !pageAlreadyMarkedVisited) {
                 const mentionSessionKey = `${MENTIONED_LINKS_SESSION_KEY_PREFIX}${instance.instanceId}`;
-                let stateChanged = false;
+                let cardRevealStateChanged = false;
+                let mentionedMediaLinksStateChanged = false;
     
                 for (const ts of contentItem.timestamps) {
                     if (audio.currentTime >= ts.startTime && !mentionedLinks.has(ts.url)) {
                         mentionedLinks.add(ts.url);
-                        stateChanged = true;
-
+                        cardRevealStateChanged = true;
+    
                         const itemToReveal = currentDetailInstance.contents.find(item => item.url === ts.url);
                         let cardToReveal = null;
-
                         if (itemToReveal) {
                             if (itemToReveal.pageId) {
                                 cardToReveal = domRefs.detailCardsContainer.querySelector(`.card[data-page-id="${itemToReveal.pageId}"]`);
@@ -479,9 +521,37 @@ async function playMediaInCard(card, contentItem, instance) {
                             cardToReveal.classList.remove('hidden-by-rule');
                         }
                     }
+
+                    if (audio.currentTime >= ts.startTime && !activeMentionedMediaLinks.has(ts.url)) {
+                        activeMentionedMediaLinks.add(ts.url);
+                        mentionedMediaLinksStateChanged = true;
+                    }
                 }
-                if (stateChanged) {
+
+                if (cardRevealStateChanged) {
                     await storage.setSession({ [mentionSessionKey]: Array.from(mentionedLinks) });
+                }
+
+                if (mentionedMediaLinksStateChanged) {
+                    await storage.setSession({ [mentionedMediaLinksKey]: Array.from(activeMentionedMediaLinks) });
+                    
+                    const mediaItemProgress = activeMentionedMediaLinks.size / activeMediaTotalLinks;
+                    const overallProgress = calculateInstanceProgress(currentDetailInstance, { [contentItem.pageId]: mediaItemProgress });
+                    
+                    const progressBar = domRefs.detailProgressContainer?.querySelector('.progress-bar');
+                    if (progressBar) {
+                        progressBar.style.width = `${overallProgress.progressPercentage}%`;
+                        progressBar.parentElement.title = `${overallProgress.progressPercentage}% Complete`;
+                    }
+                    
+                    if (activeMentionedMediaLinks.size === contentItem.timestamps.length) {
+                        logger.log('DetailView', `All ${contentItem.timestamps.length} links for media ${contentItem.pageId} have been mentioned. Marking as visited.`);
+                        pageAlreadyMarkedVisited = true;
+                        await sendMessageToBackground({ 
+                            action: 'media_playback_complete', 
+                            data: { instanceId: instance.instanceId, pageId: contentItem.pageId } 
+                        });
+                    }
                 }
             }
 
@@ -513,19 +583,24 @@ async function playMediaInCard(card, contentItem, instance) {
 
         audio.onended = async () => {
             card.classList.remove('playing');
-            storage.removeSession(sessionKey);
-            await sendMessageToBackground({ action: 'media_playback_complete', data: { instanceId: instance.instanceId, pageId: contentItem.pageId } });
+            storage.removeSession(progressSessionKey);
+            if (!contentItem.timestamps || contentItem.timestamps.length === 0) {
+                 await sendMessageToBackground({ 
+                    action: 'media_playback_complete', 
+                    data: { instanceId: instance.instanceId, pageId: contentItem.pageId } 
+                });
+            }
         };
         
         audio.onloadedmetadata = async () => {
-            const sessionData = await storage.getSession(sessionKey);
-            const savedTime = sessionData[sessionKey];
+            const sessionData = await storage.getSession(progressSessionKey);
+            const savedTime = sessionData[progressSessionKey];
             if (savedTime && isFinite(savedTime)) audio.currentTime = savedTime;
             audio.play();
         };
         if (audio.readyState >= 1) {
-             const sessionData = await storage.getSession(sessionKey);
-             const savedTime = sessionData[sessionKey];
+             const sessionData = await storage.getSession(progressSessionKey);
+             const savedTime = sessionData[progressSessionKey];
              if (savedTime && isFinite(savedTime)) audio.currentTime = savedTime;
              audio.play();
         }
