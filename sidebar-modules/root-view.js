@@ -3,6 +3,7 @@
 // and "Completed" packet lists and their associated actions.
 
 import { domRefs } from './dom-references.js';
+// *** FIX: Import the progress calculation function from utils ***
 import { logger, storage, packetUtils, isTabGroupsAvailable, shouldUseTabGroups } from '../utils.js';
 import { showConfirmDialog, showImportDialog, exportPacketAndShowDialog } from './dialog-handler.js';
 
@@ -198,7 +199,7 @@ function createInstanceRow(instance) {
     let progressPercentage = 0, progressBarTitle = '';
     
     if (!isStencil) {
-        const progressData = calculateInstanceProgress(instance);
+        const progressData = packetUtils.calculateInstanceProgress(instance);
         progressPercentage = progressData.progressPercentage;
         progressBarTitle = `${progressPercentage}% Complete`;
     }
@@ -267,9 +268,8 @@ export function updateInstanceRowUI(instance) {
 
     const existingRow = sourceList?.querySelector(`tr[data-instance-id="${instance.instanceId}"]`);
 
-    // If the row exists and isn't moving to a different list, update it non-destructively.
     if (existingRow && sourceList === targetList) {
-        const progressData = calculateInstanceProgress(instance);
+        const progressData = packetUtils.calculateInstanceProgress(instance);
         const progressBar = existingRow.querySelector('.progress-bar');
         const progressBarContainer = existingRow.querySelector('.progress-bar-container');
         
@@ -284,15 +284,13 @@ export function updateInstanceRowUI(instance) {
             existingRow.style.opacity = '0.8';
             existingRow.title = "Packet completed!";
         }
-        return; // Done with the non-destructive update.
+        return;
     }
 
-    // --- Fallback to destructive update if the row is new or moving lists ---
     const newRow = createInstanceRow(instance);
     newRow.dataset.created = instance.created || instance.instantiated || new Date(0).toISOString();
 
     if (existingRow) {
-        // This path is now only for moving between lists (e.g., In Progress -> Completed)
         existingRow.remove();
         insertRowSorted(newRow, targetList);
         checkAndRenderEmptyState(sourceList, sourceList === domRefs.inProgressList ? "No packets Started." : "No completed packets yet.");
@@ -369,18 +367,14 @@ async function handleStartPacket(imageId) {
         const incompleteInstance = instancesForImage.find(inst => !packetUtils.isPacketInstanceCompleted(inst));
 
         if (incompleteInstance) {
-            // An incomplete instance exists, navigate to it.
             showRootViewStatus('Navigating to your in-progress packet.', 'success');
             navigateTo('packet-detail', incompleteInstance.instanceId);
         } else {
-            // No incomplete instances exist (either none at all, or all are complete). Start a new one.
             showRootViewStatus(`Starting new packet...`, 'info', false);
             await sendMessageToBackground({
                 action: 'instantiate_packet',
                 data: { imageId }
             });
-            // The background script will send a message back ('packet_instance_created')
-            // which the main sidebar.js will handle, triggering navigation.
         }
     } catch (err) {
         showRootViewStatus(`Error: ${err.message}`, 'error');
@@ -425,7 +419,6 @@ async function showLibraryActionDialog(imageId, topic) {
     if (dialog) {
         dialog.querySelector('#library-action-title').textContent = topic;
 
-        // Check if cloud storage is enabled and update the export button
         const exportBtn = dialog.querySelector('#lib-action-export-btn');
         if (exportBtn) {
             const cloudStorageEnabled = await storage.isCloudStorageEnabled();
@@ -585,41 +578,6 @@ function insertRowSorted(row, listElement) {
     if (!inserted) listElement.appendChild(row);
 }
 
-export function calculateInstanceProgress(instance, mediaProgress = {}) {
-    if (!instance || !Array.isArray(instance.contents)) return { visitedCount: 0, totalCount: 0, progressPercentage: 0 };
-    
-    const trackableItems = instance.contents.filter(item => 
-        (item.type === 'external' && item.url) || 
-        ((item.type === 'generated' || item.type === 'media') && item.pageId)
-    );
-
-    const totalCount = trackableItems.length;
-    if (totalCount === 0) return { visitedCount: 0, totalCount: 0, progressPercentage: 0 };
-    
-    const visitedUrlsSet = new Set(instance.visitedUrls || []);
-    const visitedGeneratedIds = new Set(instance.visitedGeneratedPageIds || []);
-    let visitedCount = 0;
-    
-    trackableItems.forEach(item => {
-        if ((item.type === 'generated' || item.type === 'media') && item.pageId) {
-            if (visitedGeneratedIds.has(item.pageId)) {
-                visitedCount++;
-            } else if (mediaProgress[item.pageId]) {
-                // --- NEW: Add fractional progress for media being played ---
-                visitedCount += mediaProgress[item.pageId];
-            }
-        } else if (item.type === 'external' && item.url && visitedUrlsSet.has(item.url)) {
-            visitedCount++;
-        }
-    });
-    
-    return {
-        visitedCount,
-        totalCount,
-        progressPercentage: totalCount > 0 ? Math.round((visitedCount / totalCount) * 100) : 0
-    };
-}
-
 /**
  * Creates or updates a placeholder "stencil" for a packet image being created.
  * @param {object} data - The progress data from the background.
@@ -642,7 +600,6 @@ export function renderOrUpdateImageStencil(data) {
         row = document.createElement('tr');
         row.dataset.imageId = imageId;
         row.classList.add('stencil-packet');
-        // The table has one column, so we use colspan="1"
         row.innerHTML = `<td colspan="1"></td>`;
 
         const contentCell = row.querySelector('td');
@@ -690,30 +647,17 @@ export function removeImageStencil(imageId) {
 
 // --- New Stencil State Management Functions ---
 
-/**
- * Adds or updates an in-progress stencil in the in-memory map.
- * If the root view is active, it also updates the DOM.
- * @param {object} data - The stencil data from the background message.
- */
 export function addOrUpdateInProgressStencil(data) {
     if (!data || !data.imageId) return;
     inProgressStencils.set(data.imageId, data);
-
-    // If the root view is currently visible, update the DOM immediately.
     if (domRefs.rootView && !domRefs.rootView.classList.contains('hidden')) {
         renderOrUpdateImageStencil(data);
     }
 }
 
-/**
- * Removes an in-progress stencil from the in-memory map.
- * If the root view is active, it also removes the stencil from the DOM.
- * @param {string} imageId - The ID of the stencil to remove.
- */
 export function removeInProgressStencil(imageId) {
     if (inProgressStencils.has(imageId)) {
         inProgressStencils.delete(imageId);
-        
         if (domRefs.rootView && !domRefs.rootView.classList.contains('hidden')) {
             removeImageStencil(imageId);
         }

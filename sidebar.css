@@ -274,6 +274,14 @@ body.dark-mode .creation-stage-text {
   opacity: 0.85;
 }
 
+/* --- THE FIX IS HERE --- */
+/* Style for visited media cards */
+#detail-cards-container .card.media.visited {
+  border: 1px solid var(--card-border-visited);
+  opacity: 0.85;
+}
+
+
 #detail-cards-container .card.active {
   border: 2px solid var(--card-border-active);
   background-color: var(--bg-accent);

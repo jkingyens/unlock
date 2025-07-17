@@ -132,14 +132,14 @@ async function handleGetPageDetailsFromDOM(sender, sendResponse) {
 }
 
 async function handleOpenContent(data, sender, sendResponse) {
-    const { packetId: instanceId, url, clickedUrl } = data;
+    const { packetId: instanceId, url, clickedUrl, instanceData: freshInstanceData } = data;
     const targetCanonicalUrl = clickedUrl || url;
     let resultingTabId = null;
-    logger.log('MessageHandler:handleOpenContent', 'Processing request', { instanceId, targetCanonicalUrl });
+    logger.log('MessageHandler:handleOpenContent', 'Processing request', { instanceId, targetCanonicalUrl, hasFreshData: !!freshInstanceData });
     if (!instanceId || !targetCanonicalUrl) { sendResponse({ success: false, error: 'Missing instanceId or targetCanonicalUrl' }); return; }
 
     try {
-        const instance = await storage.getPacketInstance(instanceId);
+        const instance = freshInstanceData || await storage.getPacketInstance(instanceId);
         if (!instance) throw new Error(`Packet instance ${instanceId} not found`);
 
         const contentItem = instance.contents.find(item => item.url === targetCanonicalUrl);
@@ -194,7 +194,8 @@ async function handleOpenContent(data, sender, sendResponse) {
 
             interimContextMap.set(resultingTabId, {
                 instanceId: instanceId,
-                packetUrl: packetUrlForContext
+                packetUrl: packetUrlForContext,
+                instanceData: instance
             });
             logger.log(`MessageHandler:handleOpenContent`, `Stored interim context in MAP for new Tab ${resultingTabId}`);
 
@@ -217,11 +218,8 @@ async function handleOpenContent(data, sender, sendResponse) {
             const groupId = finalBrowserState?.tabGroupId;
 
             if (groupId) {
-                // A group exists (it may have been just created), so trigger the focus logic.
                 logger.log('MessageHandler:handleOpenContent', `A group (${groupId}) exists for this packet. Triggering focus logic.`);
                 await tabGroupHandler.handleFocusTabGroup({ focusedGroupId: groupId });
-
-                // Continue with other group management tasks
                 await deduplicateUrlInGroup(groupId, instanceId, resultingTabId);
                 await tabGroupHandler.orderTabsInGroup(groupId, instance);
             }
@@ -380,7 +378,6 @@ export function handleMessage(message, sender, sendResponse) {
             isAsync = true;
             break;
         case 'navigate_to_view':
-            // This is handled by the sidebar's listener, but we can acknowledge it here.
             sendResponse({ success: true });
             break;
         case 'generate_custom_page':

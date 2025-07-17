@@ -97,10 +97,10 @@ async function processNavigationEvent(tabId, finalUrl, sourceEventName, details 
         if (packetContext) {
             await setPacketContext(tabId, packetContext.instanceId, packetContext.packetUrl, decodedFinalUrl);
         }
-        interimContextMap.delete(tabId);
     }
 
     if (!packetContext || !packetContext.instanceId) {
+        if(interimContextMap.has(tabId)) interimContextMap.delete(tabId);
         logger.log(logPrefix, `No valid PacketContext found. Tab not tracked.`);
         await sidebarHandler.updateActionForTab(tabId);
         return;
@@ -112,7 +112,10 @@ async function processNavigationEvent(tabId, finalUrl, sourceEventName, details 
 
     logger.log(logPrefix, `Context found (Inst: ${instanceId}). Evt: ${sourceEventName}, URL: ${finalUrl}, Type: ${transitionType}, Quals: ${transitionQualifiers.join(',')}`);
     
-    let instance = await storage.getPacketInstance(instanceId);
+    // Use the fresh data from the map if it exists, otherwise fetch from storage
+    let instance = packetContext.instanceData || await storage.getPacketInstance(instanceId);
+    interimContextMap.delete(tabId); // Clean up the map after use
+
     if (!instance) {
         logger.warn(logPrefix, `Instance ${instanceId} not found. Clearing context.`);
         await clearPacketContext(tabId);

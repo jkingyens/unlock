@@ -85,18 +85,15 @@ export async function navigateTo(viewName, instanceId = null, data = null) {
         nextNavigationRequest = { viewName, instanceId, data };
         return;
     }
+    isNavigating = true;
 
-    // Before leaving the settings view, trigger an immediate save of any pending changes.
     if (currentView === 'settings' && viewName !== 'settings') {
         settingsView.triggerPendingSave();
     }
-
-    // NEW: Before leaving any view that might play audio, pause and clear it
+    
     if (currentView === 'packet-detail' && viewName !== 'packet-detail') {
-        detailView.pauseAndClearActiveAudio();
+        await detailView.pauseAndClearActiveAudio();
     }
-
-    isNavigating = true;
 
     [domRefs.rootView, domRefs.createView, domRefs.packetDetailView, domRefs.settingsView].forEach(v => v?.classList.add('hidden'));
     
@@ -156,18 +153,20 @@ export async function navigateTo(viewName, instanceId = null, data = null) {
 // --- State & Context Updates ---
 
 async function updateSidebarContext(contextData) {
-    if (currentView === 'create') return; // Ignore context updates while creating a packet
+    if (currentView === 'create') return;
 
     const newInstanceId = contextData?.instanceId ?? null;
     const newPacketUrl = contextData?.packetUrl ?? null;
-    const newInstanceData = contextData?.instance ?? null;
+    let newInstanceData = contextData?.instance ?? null;
 
     if (currentView === 'packet-detail' && newInstanceId === currentInstanceId) {
+        // If the update is for the current packet, just update the data and re-render
         currentInstanceData = newInstanceData;
         currentPacketUrl = newPacketUrl;
         await detailView.displayPacketContent(currentInstanceData, currentPacketUrl);
     }
     else if (newInstanceId !== currentInstanceId) {
+        // If the instance ID has changed, navigate to the new packet's detail view
         currentInstanceId = newInstanceId;
         currentInstanceData = newInstanceData;
         currentPacketUrl = newPacketUrl;
@@ -178,6 +177,7 @@ async function updateSidebarContext(contextData) {
         }
     }
     else if (currentView === 'packet-detail' && newInstanceId === null) {
+        // If we were on a detail view and the context is now null, go back to the root
         navigateTo('root');
     }
 }
@@ -216,15 +216,12 @@ async function handleBackgroundMessage(message) {
             await updateSidebarContext(data);
             break;
         case 'packet_creation_progress':
-            // The root view module is now stateful and will handle this unconditionally.
             rootView.addOrUpdateInProgressStencil(data);
             break;
         case 'packet_image_created':
             dialogHandler.hideImportDialog();
-            // Always tell the root view to remove the stencil from its state.
             rootView.removeInProgressStencil(data.image.id);
             if (currentView === 'root') {
-                // Refresh the view from storage to show the final packet.
                 await rootView.displayRootNavigation();
             }
             showRootViewStatus(`New packet "${data.image.topic}" ready in Library.`, 'success');
@@ -236,31 +233,28 @@ async function handleBackgroundMessage(message) {
             break;
         case 'packet_creation_failed':
             dialogHandler.hideImportDialog();
-            // Always tell the root view to remove the stencil from its state.
             rootView.removeInProgressStencil(data.imageId);
             showRootViewStatus(`Creation failed: ${data?.error || 'Unknown'}`, 'error');
             break;
         case 'packet_instance_created':
             showRootViewStatus(`Started packet '${data.instance.topic}'.`, 'success');
-            // If the user is not in the create view, navigate to the new packet.
             if (currentView !== 'create') {
                 navigateTo('packet-detail', data.instance.instanceId);
             }
             break;
         case 'packet_instance_updated':
+            // This is now the primary way state is synchronized
             if (currentView === 'root') {
                 rootView.updateInstanceRowUI(data.instance);
             } else if (currentView === 'packet-detail' && currentInstanceId === data.instance.instanceId) {
-                currentInstanceData = data.instance;
-                await detailView.displayPacketContent(data.instance, currentPacketUrl);
+                await updateSidebarContext({ instanceId: data.instance.instanceId, instance: data.instance, packetUrl: currentPacketUrl });
             }
             break;
         case 'packet_instance_deleted':
             if (currentView === 'root') {
                 rootView.removeInstanceRow(data.packetId);
             }
-            // NEW: Stop audio if the deleted packet was playing
-            if (data?.packetId) { // Ensure packetId exists
+            if (data?.packetId) {
                 detailView.stopAudioIfPacketDeleted(data.packetId);
             }
             break;
@@ -321,7 +315,7 @@ function showSettingsStatus(message, type, autoClear) {
 async function showConfetti(topic) {
     const settings = await storage.getSettings();
     if (settings.confettiEnabled === false) {
-        return; // Exit if confetti is disabled
+        return; 
     }
 
     const colorName = packetUtils.getColorForTopic(topic);
