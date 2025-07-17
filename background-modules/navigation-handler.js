@@ -89,7 +89,6 @@ async function processNavigationEvent(tabId, finalUrl, sourceEventName, details 
     clearPendingVisitTimer(tabId);
 
     let packetContext = await getPacketContext(tabId);
-    // FIX: Keep the full URL, do not strip the hash here.
     const decodedFinalUrl = decodeURIComponent(finalUrl);
 
     if ((!packetContext || !packetContext.instanceId) && interimContextMap.has(tabId)) {
@@ -124,36 +123,32 @@ async function processNavigationEvent(tabId, finalUrl, sourceEventName, details 
     
     let packetUrlForSidebar = originalPacketUrl;
     
-    if (sourceEventName === 'HistoryStateUpdated' || transitionType === 'client_redirect') {
+    // --- FIX START: The logic for client_redirect is simplified ---
+    const isClientRedirect = transitionType === 'client_redirect' || (transitionType === 'link' && transitionQualifiers.includes('client_redirect'));
+
+    if (sourceEventName === 'HistoryStateUpdated' || isClientRedirect) {
         logger.log(logPrefix, `Non-breaking navigation event ('${sourceEventName}', type: '${transitionType}'). Updating currentUrl only.`);
+        // Only update the current URL in the context, preserving the originalPacketUrl.
+        // packetUrlForSidebar is already set to originalPacketUrl and should not be changed here.
         await setPacketContext(tabId, instanceId, originalPacketUrl, decodedFinalUrl);
-        const matchedItem = packetUtils.isUrlInPacket(decodedFinalUrl, instance, { returnItem: true });
-        if (matchedItem) {
-            packetUrlForSidebar = matchedItem.url;
-        }
+    // --- FIX END ---
 
     } else if (sourceEventName === 'Committed') {
         const clearlyNavigatingAwayTypes = ['typed', 'auto_bookmark', 'generated', 'keyword', 'form_submit'];
         
-        if (clearlyNavigatingAwayTypes.includes(transitionType) || (transitionType === 'link' && !transitionQualifiers.includes('client_redirect'))) {
-            // FIX: Pass the full URL to isUrlInPacket
+        if (clearlyNavigatingAwayTypes.includes(transitionType) || (transitionType === 'link' && !isClientRedirect)) {
             const isNewUrlInPacket = packetUtils.isUrlInPacket(decodedFinalUrl, instance);
             
             if (!isNewUrlInPacket) {
                 logger.log(logPrefix, `Context-breaking user transition: '${transitionType}'. URL is not in packet. Clearing context.`);
-
-                 // --- FIX START: Eject the tab from its group immediately ---
                 if (await shouldUseTabGroups()) {
                     await tabGroupHandler.ejectTabFromGroup(tabId, instanceId);
                 }
-                // --- FIX END ---
-                
                 await clearPacketContext(tabId);
                 await sidebarHandler.updateActionForTab(tabId);
                 if (sidebarHandler.isSidePanelAvailable()) sidebarHandler.notifySidebar('update_sidebar_context', { tabId: tabId, instanceId: null });
                 return; 
             } else {
-                // FIX: Pass the full URL to isUrlInPacket
                 const matchedContentItem = packetUtils.isUrlInPacket(decodedFinalUrl, instance, { returnItem: true });
                 if (matchedContentItem) {
                     packetUrlForSidebar = matchedContentItem.url;
@@ -172,12 +167,10 @@ async function processNavigationEvent(tabId, finalUrl, sourceEventName, details 
         });
     }
 
-    // --- FIX START: Restore the visit timer logic for navigation events ---
     const canonicalUrlToVisit = packetUrlForSidebar;
     const itemToVisit = instance.contents.find(item => item.url && decodeURIComponent(item.url) === decodeURIComponent(canonicalUrlToVisit));
 
     if (itemToVisit && !itemToVisit.interactionBasedCompletion) {
-
         const settings = await storage.getSettings();
         const visitThresholdMs = (settings.visitThresholdSeconds ?? 5) * 1000;
         const visitTimer = setTimeout(async () => {
@@ -207,9 +200,7 @@ async function processNavigationEvent(tabId, finalUrl, sourceEventName, details 
         pendingVisitTimers.set(tabId, visitTimer);
         logger.log(logPrefix, `Scheduled visit check for tab ${tabId} in ${visitThresholdMs}ms.`);
     }
-    // --- FIX END ---
 }
-
 
 async function updateBrowserStateAndGroups(tabId, instanceId, instance, currentBrowserUrl, currentPacketUrl) {
     if (!instance) return; 

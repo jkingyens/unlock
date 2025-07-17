@@ -144,9 +144,8 @@ function handleMessages(request, sender, sendResponse) {
             const markerText = document.createTextNode(`*${link.textContent.trim()}*`);
             link.parentNode.replaceChild(markerText, link);
         });
-        const reader = new readability.Readability(clonedDoc);
-        const article = reader.parse();
-        const textContent = article ? article.textContent : clonedDoc.body.innerText;
+        // --- FIX: Use textContent directly for consistency with the link parser ---
+        const textContent = clonedDoc.body.textContent || "";
         sendResponse({ success: true, data: textContent });
       } catch (error) {
         sendResponse({ success: false, error: error.message });
