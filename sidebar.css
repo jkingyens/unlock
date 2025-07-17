@@ -681,3 +681,37 @@ body.dark-mode .llm-model-item button:hover {
     margin-bottom: 0;
     box-shadow: none;
 }
+
+/* New class to hide cards by rule */
+#detail-cards-container .card.hidden-by-rule {
+  opacity: 0;
+  max-height: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+  margin-bottom: 0;
+  border-width: 0;
+  pointer-events: none;
+  transform: translateY(-10px);
+}
+
+#detail-cards-container .card {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  background-color: var(--bg-secondary);
+  border-radius: 6px;
+  padding: 12px;
+  margin-bottom: 10px;
+  box-shadow: 0 1px 2px var(--card-shadow);
+  cursor: default;
+  border: 1px solid var(--border-secondary);
+  position: relative;
+  border-left: 3px solid var(--border-primary);
+  padding-left: 10px;
+  /* Add transition for smooth reveal */
+  transition: opacity 0.4s ease-out, max-height 0.5s ease-out, transform 0.4s ease-out, margin 0.5s, padding 0.5s;
+  transform: translateY(0);
+  opacity: 1;
+  max-height: 200px; /* Set a max-height for transition */
+  overflow: hidden;
+}

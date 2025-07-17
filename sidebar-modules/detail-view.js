@@ -11,6 +11,9 @@ let queuedDisplayRequest = null;
 let activeAudioElement = null;
 const audioDataCache = new Map(); // Cache decoded audio data
 let currentDetailInstance = null; // Module-level reference to the current instance
+let mentionedLinks = new Set(); // In-memory set for the current view
+const MENTIONED_LINKS_SESSION_KEY_PREFIX = 'mentioned_links_';
+
 
 // Functions to be imported from the new, lean sidebar.js
 let sendMessageToBackground;
@@ -80,7 +83,6 @@ async function drawWaveform(canvas, audioSamples, options) {
                 max = sample;
             }
         }
-        // --- CHANGE: Increased the multiplier from 1.2 to 1.8 to make the waveform taller ---
         const barHeight = Math.max(1, max * canvasHeight * 1.8);
         const y = (canvasHeight - barHeight) / 2;
         ctx.fillRect(i * (barWidth + barGap), y, barWidth, barHeight);
@@ -116,9 +118,13 @@ export async function displayPacketContent(instance, currentPacketUrl) {
         pauseAndClearActiveAudio();
     }
     
-    currentDetailInstance = instance; // Always update the module-level instance
+    currentDetailInstance = instance;
 
     try {
+        const sessionKey = `${MENTIONED_LINKS_SESSION_KEY_PREFIX}${instance.instanceId}`;
+        const sessionData = await storage.getSession(sessionKey);
+        mentionedLinks = new Set(sessionData[sessionKey] || []);
+
         const isAlreadyRendered = container.querySelector(`#detail-cards-container[data-instance-id="${instance.instanceId}"]`);
 
         if (isAlreadyRendered) {
@@ -130,8 +136,6 @@ export async function displayPacketContent(instance, currentPacketUrl) {
                 card.classList.toggle('visited', isVisited);
             });
             updateActiveCardHighlight(currentPacketUrl);
-
-            // Always update the progress bar on any instance update
             const { progressPercentage } = calculateInstanceProgress(instance);
             const progressBar = domRefs.detailProgressContainer?.querySelector('.progress-bar');
             if (progressBar) {
@@ -143,7 +147,6 @@ export async function displayPacketContent(instance, currentPacketUrl) {
             }
 
         } else {
-            // --- Full render path (for initial load) ---
             const colorName = packetUtils.getColorForTopic(instance.topic);
             const colors = { grey: { accent: '#90a4ae', progress: '#546e7a', link: '#FFFFFF' }, blue: { accent: '#64b5f6', progress: '#1976d2', link: '#FFFFFF' }, red: { accent: '#e57373', progress: '#d32f2f', link: '#FFFFFF' }, yellow: { accent: '#fff176', progress: '#fbc02d', link: '#000000' }, green: { accent: '#81c784', progress: '#388e3c', link: '#FFFFFF' }, pink: { accent: '#f06292', progress: '#c2185b', link: '#FFFFFF' }, purple: { accent: '#ba68c8', progress: '#7b1fa2', link: '#FFFFFF' }, cyan: { accent: '#4dd0e1', progress: '#0097a7', link: '#FFFFFF' }, orange: { accent: '#ffb74d', progress: '#f57c00', link: '#FFFFFF' } }[colorName] || { accent: '#90a4ae', progress: '#546e7a', link: '#FFFFFF' };
             
@@ -154,14 +157,13 @@ export async function displayPacketContent(instance, currentPacketUrl) {
             const fragment = document.createDocumentFragment();
             fragment.appendChild(createProgressSection(instance));
             fragment.appendChild(await createActionButtons(instance));
-            const cardsWrapper = await createCardsSection(instance);
+            const cardsWrapper = await createCardsSection(instance, mentionedLinks);
             cardsWrapper.dataset.instanceId = instance.instanceId;
             fragment.appendChild(cardsWrapper);
 
             container.innerHTML = '';
             container.appendChild(fragment);
 
-            // Draw waveforms after the cards are in the DOM
             const mediaCards = container.querySelectorAll('.card.media');
             for (const mediaCard of mediaCards) {
                 const pageId = mediaCard.dataset.pageId;
@@ -255,7 +257,7 @@ async function createActionButtons(instance) {
     return actionButtonContainer;
 }
 
-async function createCardsSection(instance) {
+async function createCardsSection(instance, mentionedLinks) {
     const cardsWrapper = document.createElement('div');
     cardsWrapper.id = 'detail-cards-container';
     const visitedUrlsSet = new Set(instance.visitedUrls || []);
@@ -263,7 +265,7 @@ async function createCardsSection(instance) {
 
     if (instance.contents && instance.contents.length > 0) {
         const cardPromises = instance.contents.map(item =>
-            createContentCard(item, visitedUrlsSet, visitedGeneratedIds, instance)
+            createContentCard(item, visitedUrlsSet, visitedGeneratedIds, instance, mentionedLinks)
         );
         
         const cards = await Promise.all(cardPromises);
@@ -280,7 +282,7 @@ async function createCardsSection(instance) {
     return cardsWrapper;
 }
 
-async function createContentCard(contentItem, visitedUrlsSet, visitedGeneratedIds, instance) {
+async function createContentCard(contentItem, visitedUrlsSet, visitedGeneratedIds, instance, mentionedLinks) {
     if (!contentItem || !contentItem.type) return null;
 
     if (contentItem.type === 'alternative') {
@@ -291,62 +293,53 @@ async function createContentCard(contentItem, visitedUrlsSet, visitedGeneratedId
             ? contentItem.alternatives.find(a => a.type === 'media')
             : contentItem.alternatives.find(a => a.type === 'generated');
 
-        return chosenItem ? createContentCard(chosenItem, visitedUrlsSet, visitedGeneratedIds, instance) : null;
+        return chosenItem ? createContentCard(chosenItem, visitedUrlsSet, visitedGeneratedIds, instance, mentionedLinks) : null;
     }
 
 
     const card = document.createElement('div');
     card.className = 'card';
     let { url: urlToOpen, title = 'Untitled', relevance = '', type } = contentItem;
-    let displayUrl = urlToOpen || '(URL missing)', iconHTML = '?', isClickable = false, isVisited = false;
+    let displayUrl = urlToOpen || '(URL missing)', iconHTML = '?', isClickable = false;
 
     if (contentItem.url) card.dataset.url = contentItem.url;
     if (contentItem.pageId) card.dataset.pageId = contentItem.pageId;
 
     if (type === 'external') {
         iconHTML = '🔗';
-        if (urlToOpen) {
-            isClickable = true;
-            isVisited = visitedUrlsSet.has(urlToOpen);
-        }
+        if (urlToOpen) isClickable = true;
         card.innerHTML = `<div class="card-icon">${iconHTML}</div><div class="card-text"><div class="card-title">${title}</div><div class="card-url">${displayUrl}</div>${relevance ? `<div class="card-relevance">${relevance}</div>` : ''}</div>`;
-
     } else if (type === 'generated') {
         iconHTML = '📄';
         if (urlToOpen && contentItem.published) {
             isClickable = true;
-            isVisited = visitedGeneratedIds.has(contentItem.pageId);
             displayUrl = title; 
         } else {
             card.style.opacity = '0.7';
             displayUrl = contentItem.published ? '(Error: URL missing)' : '(Not Published)';
         }
         card.innerHTML = `<div class="card-icon">${iconHTML}</div><div class="card-text"><div class="card-title">${title}</div><div class="card-url">${displayUrl}</div>${relevance ? `<div class="card-relevance">${relevance}</div>` : ''}</div>`;
-
     } else if (type === 'media') {
         card.classList.add('media');
-        if (contentItem.published) {
-            isClickable = true;
-            isVisited = visitedGeneratedIds.has(contentItem.pageId);
-        } else {
-            card.style.opacity = '0.7';
-        }
-        
+        if (contentItem.published) isClickable = true;
+        else card.style.opacity = '0.7';
         card.innerHTML = `
             <div class="media-waveform-container">
                  <canvas class="waveform-canvas" style="width: 100%; height: 100%;"></canvas>
-            </div>
-        `;
+            </div>`;
     }
 
+    const isVisited = (contentItem.url && visitedUrlsSet.has(contentItem.url)) || (contentItem.pageId && visitedGeneratedIds.has(contentItem.pageId));
+    const isMentioned = contentItem.url && mentionedLinks.has(contentItem.url);
+    const isVisible = type === 'media' || isVisited || isMentioned;
+    if (!isVisible) {
+        card.classList.add('hidden-by-rule');
+    }
 
     if (isClickable) {
         card.classList.add('clickable');
-        if (type === 'media') {
-            playMediaInCard(card, contentItem, instance);
-        } else {
-            card.addEventListener('click', () => openUrl(urlToOpen, instance.instanceId));
-        }
+        if (type === 'media') playMediaInCard(card, contentItem, instance);
+        else card.addEventListener('click', () => openUrl(urlToOpen, instance.instanceId));
     }
     if (isVisited) card.classList.add('visited');
     
@@ -460,6 +453,37 @@ async function playMediaInCard(card, contentItem, instance) {
              drawWaveform(canvas, audioSamples, { ...colorOptions, currentTime: audio.currentTime, audioDuration: audio.duration });
              
              if (!currentDetailInstance) return;
+
+             if (contentItem.timestamps) {
+                const mentionSessionKey = `${MENTIONED_LINKS_SESSION_KEY_PREFIX}${instance.instanceId}`;
+                let stateChanged = false;
+    
+                for (const ts of contentItem.timestamps) {
+                    if (audio.currentTime >= ts.startTime && !mentionedLinks.has(ts.url)) {
+                        mentionedLinks.add(ts.url);
+                        stateChanged = true;
+
+                        const itemToReveal = currentDetailInstance.contents.find(item => item.url === ts.url);
+                        let cardToReveal = null;
+
+                        if (itemToReveal) {
+                            if (itemToReveal.pageId) {
+                                cardToReveal = domRefs.detailCardsContainer.querySelector(`.card[data-page-id="${itemToReveal.pageId}"]`);
+                            }
+                            if (!cardToReveal) {
+                                cardToReveal = domRefs.detailCardsContainer.querySelector(`.card[data-url="${itemToReveal.url}"]`);
+                            }
+                        }
+                        
+                        if (cardToReveal) {
+                            cardToReveal.classList.remove('hidden-by-rule');
+                        }
+                    }
+                }
+                if (stateChanged) {
+                    await storage.setSession({ [mentionSessionKey]: Array.from(mentionedLinks) });
+                }
+            }
 
              let currentActiveLinkUrl = null;
              if (contentItem.timestamps) {
