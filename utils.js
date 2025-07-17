@@ -85,10 +85,8 @@ const CONFIG = {
         apiEndpoint: null
       }
     ],
-    // --- REVISED STORAGE CONFIGURATION ---
-    activeStorageId: null, // ID of the currently active storage configuration
-    storageConfigs: [],   // Array of storage configuration objects
-    // --- END REVISION ---
+    activeStorageId: null,
+    storageConfigs: [],
     themePreference: 'auto',
     confettiEnabled: true,
     tabGroupsEnabled: true,
@@ -105,7 +103,6 @@ const CONFIG = {
 
 export const GROUP_TITLE_PREFIX = "PKT-";
 
-// Define MPI_PARAMS for event signaling URL structure
 export const MPI_PARAMS = {
   MARKER: 'MPI',
   INSTANCE_ID: 'instanceId',
@@ -162,10 +159,8 @@ function getDb() {
       const openRequest = indexedDB.open(CONFIG.INDEXED_DB.NAME, CONFIG.INDEXED_DB.VERSION);
       openRequest.onupgradeneeded = (event) => {
         const db = event.target.result;
-        logger.log('IndexedDB', `Upgrade needed from version ${event.oldVersion} to ${event.newVersion}`);
         if (!db.objectStoreNames.contains(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT)) {
           db.createObjectStore(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT);
-           logger.log('IndexedDB', `Created object store: ${CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT}`);
         }
       };
       openRequest.onerror = (event) => {
@@ -173,7 +168,6 @@ function getDb() {
         dbPromise = null; reject(event.target.error);
       };
       openRequest.onsuccess = (event) => {
-        logger.log('IndexedDB', 'Database initialized successfully');
         resolve(event.target.result);
       };
     });
@@ -193,9 +187,7 @@ const indexedDbStorage = {
             request.onerror = () => reject(request.error);
             tx.oncomplete = resolve;
             tx.onerror = () => reject(tx.error);
-            tx.onabort = () => reject(new Error('Transaction aborted'));
         });
-        logger.log('IndexedDB', 'Saved generated content', { key });
         return true;
     } catch (error) {
         logger.error('IndexedDB', 'Error saving generated content', { key, error });
@@ -210,14 +202,8 @@ const indexedDbStorage = {
         const store = tx.objectStore(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT);
         const request = store.get(key);
         return await new Promise((resolve, reject) => {
-             request.onerror = (event) => {
-                 logger.error('IndexedDB', 'Read request error', { key, error: event.target.error });
-                 reject(event.target.error);
-             };
-             request.onsuccess = (event) => {
-                 const result = event.target.result;
-                 resolve(Array.isArray(result) ? result : null);
-             };
+             request.onerror = (event) => reject(event.target.error);
+             request.onsuccess = (event) => resolve(event.target.result || null);
         });
     } catch (error) {
         logger.error('IndexedDB', 'Error getting generated content', { key, error });
@@ -230,15 +216,11 @@ const indexedDbStorage = {
            const db = await getDb();
            const tx = db.transaction(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT, 'readwrite');
            const store = tx.objectStore(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT);
-           const request = store.delete(key);
+           store.delete(key);
            await new Promise((resolve, reject) => {
-               request.onsuccess = resolve;
-               request.onerror = () => reject(request.error);
                tx.oncomplete = resolve;
                tx.onerror = () => reject(tx.error);
-               tx.onabort = () => reject(new Error('Transaction aborted'));
            });
-           logger.log('IndexedDB', 'Deleted generated content', { key });
            return true;
        } catch (error) {
            logger.error('IndexedDB', 'Error deleting generated content', { key, error });
@@ -251,27 +233,22 @@ const indexedDbStorage = {
             const tx = db.transaction(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT, 'readwrite');
             const store = tx.objectStore(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT);
             const request = store.openCursor();
-            let deleteCount = 0;
             await new Promise((resolve, reject) => {
                 request.onsuccess = event => {
                     const cursor = event.target.result;
                     if (cursor) {
                         if (String(cursor.key).startsWith(`${imageId}::`)) {
                             cursor.delete();
-                            deleteCount++;
                         }
                         cursor.continue();
                     } else { resolve(); }
                 };
-                request.onerror = event => { reject(event.target.error); };
-                 tx.oncomplete = resolve;
+                request.onerror = event => reject(event.target.error);
                  tx.onerror = () => reject(tx.error);
-                 tx.onabort = () => reject(new Error('Transaction aborted'));
             });
-            logger.log('IndexedDB', `Deleted ${deleteCount} generated content entries for image`, { imageId });
             return true;
         } catch (error) {
-             logger.error('IndexedDB', 'Error deleting generated content for image', { imageId, error });
+             logger.error('IndexedDB', 'Error deleting content for image', { imageId, error });
              return false;
         }
    }
@@ -281,261 +258,188 @@ const storage = {
   async getLocal(key) {
     return new Promise((resolve, reject) => {
       chrome.storage.local.get(key, (result) => {
-        if (chrome.runtime.lastError) { reject(chrome.runtime.lastError); } else { resolve(result); }
+        if (chrome.runtime.lastError) reject(chrome.runtime.lastError); else resolve(result);
       });
     });
   },
   async setLocal(data) {
     return new Promise((resolve, reject) => {
       chrome.storage.local.set(data, () => {
-        if (chrome.runtime.lastError) { reject(chrome.runtime.lastError); } else { resolve(); }
+        if (chrome.runtime.lastError) reject(chrome.runtime.lastError); else resolve();
       });
     });
   },
   async removeLocal(key) {
-    if (typeof key !== 'string' && !Array.isArray(key)) { logger.error('Storage:removeLocal', 'Invalid key type provided', { key }); return Promise.reject(new Error('Invalid key type for removeLocal')); }
     return new Promise((resolve, reject) => {
-      chrome.storage.local.remove(key, () => { if (chrome.runtime.lastError) { reject(chrome.runtime.lastError); } else { resolve(); } });
+      chrome.storage.local.remove(key, () => { if (chrome.runtime.lastError) reject(chrome.runtime.lastError); else resolve(); });
     });
   },
   async getPacketImages() {
-    try { const data = await this.getLocal(CONFIG.STORAGE_KEYS.PACKET_IMAGES); return data[CONFIG.STORAGE_KEYS.PACKET_IMAGES] || {}; }
-    catch (error) { logger.error('Storage', 'Error getting packet images', error); return {}; }
+    const data = await this.getLocal(CONFIG.STORAGE_KEYS.PACKET_IMAGES);
+    return data[CONFIG.STORAGE_KEYS.PACKET_IMAGES] || {};
   },
   async getPacketImage(imageId) {
-      try { const images = await this.getPacketImages(); return images[imageId] || null; }
-      catch (error) { logger.error('Storage', 'Error getting single packet image', { imageId, error }); return null; }
+      const images = await this.getPacketImages();
+      return images[imageId] || null;
   },
   async savePacketImage(image) {
-      if (!image || !image.id) { logger.error('Storage', 'Attempted to save invalid packet image', image); return false; }
-      try { const images = await this.getPacketImages(); images[image.id] = image; await this.setLocal({ [CONFIG.STORAGE_KEYS.PACKET_IMAGES]: images }); return true; }
-      catch (error) { logger.error('Storage', 'Error saving packet image', { imageId: image.id, error }); return false; }
+      const images = await this.getPacketImages();
+      images[image.id] = image;
+      await this.setLocal({ [CONFIG.STORAGE_KEYS.PACKET_IMAGES]: images });
+      return true;
   },
   async deletePacketImage(imageId) {
-       if (!imageId) return false;
-       try { const images = await this.getPacketImages(); let deleted = false; if (images[imageId]) { delete images[imageId]; await this.setLocal({ [CONFIG.STORAGE_KEYS.PACKET_IMAGES]: images }); deleted = true; } logger.log('Storage', `Packet image ${deleted ? 'deleted' : 'not found'}`, { imageId }); return deleted; }
-       catch (error) { logger.error('Storage', 'Error deleting packet image', { imageId, error }); return false; }
+       const images = await this.getPacketImages();
+       if (images[imageId]) {
+           delete images[imageId];
+           await this.setLocal({ [CONFIG.STORAGE_KEYS.PACKET_IMAGES]: images });
+           return true;
+       }
+       return false;
   },
   async getPacketInstances() {
-    try { const data = await this.getLocal(CONFIG.STORAGE_KEYS.PACKET_INSTANCES); const instances = data[CONFIG.STORAGE_KEYS.PACKET_INSTANCES] || {}; Object.values(instances).forEach(inst => { inst.contents = Array.isArray(inst.contents) ? inst.contents : []; inst.visitedUrls = Array.isArray(inst.visitedUrls) ? inst.visitedUrls : []; if (!Array.isArray(inst.visitedGeneratedPageIds)) inst.visitedGeneratedPageIds = []; delete inst.tabGroupId; }); return instances; }
-    catch (error) { logger.error('Storage', 'Error getting packet instances', error); return {}; }
+    const data = await this.getLocal(CONFIG.STORAGE_KEYS.PACKET_INSTANCES);
+    return data[CONFIG.STORAGE_KEYS.PACKET_INSTANCES] || {};
   },
   async getPacketInstance(instanceId) {
-      try { const instances = await this.getPacketInstances(); const instance = instances[instanceId] || null; if (instance) delete instance.tabGroupId; return instance; }
-      catch (error) { logger.error('Storage', 'Error getting single packet instance', { instanceId, error }); return null; }
+      const instances = await this.getPacketInstances();
+      return instances[instanceId] || null;
   },
   async savePacketInstance(instance) {
-      if (!instance || !instance.instanceId) { logger.error('Storage', 'Attempted to save invalid packet instance', instance); return false; }
-      try { const coreInstance = { ...instance }; coreInstance.contents = Array.isArray(coreInstance.contents) ? coreInstance.contents : []; coreInstance.visitedUrls = Array.isArray(coreInstance.visitedUrls) ? coreInstance.visitedUrls : []; coreInstance.visitedGeneratedPageIds = Array.isArray(coreInstance.visitedGeneratedPageIds) ? coreInstance.visitedGeneratedPageIds : []; delete coreInstance.tabGroupId; const instances = await this.getPacketInstances(); instances[coreInstance.instanceId] = coreInstance; await this.setLocal({ [CONFIG.STORAGE_KEYS.PACKET_INSTANCES]: instances }); return true; }
-      catch (error) { logger.error('Storage', 'Error saving packet instance', { instanceId: instance.instanceId, error }); return false; }
+      const instances = await this.getPacketInstances();
+      instances[instance.instanceId] = instance;
+      await this.setLocal({ [CONFIG.STORAGE_KEYS.PACKET_INSTANCES]: instances });
+      return true;
   },
   async deletePacketInstance(instanceId) {
-       if (!instanceId) return false;
-       try { const instances = await this.getPacketInstances(); let deleted = false; if (instances[instanceId]) { delete instances[instanceId]; await this.setLocal({ [CONFIG.STORAGE_KEYS.PACKET_INSTANCES]: instances }); deleted = true; } logger.log('Storage', `Packet instance ${deleted ? 'deleted' : 'not found'}`, { instanceId }); return deleted; }
-       catch (error) { logger.error('Storage', 'Error deleting packet instance', { instanceId, error }); return false; }
+       const instances = await this.getPacketInstances();
+       if (instances[instanceId]) {
+           delete instances[instanceId];
+           await this.setLocal({ [CONFIG.STORAGE_KEYS.PACKET_INSTANCES]: instances });
+           return true;
+       }
+       return false;
   },
-  async getInstanceCountForImage(imageId) {
-       if (!imageId) return 0;
-       try { const instances = await this.getPacketInstances(); let count = 0; for (const instanceId in instances) { if (instances[instanceId]?.imageId === imageId) count++; } return count; }
-       catch (error) { logger.error('Storage', 'Error counting instances for image', { imageId, error }); return 0; }
+    async getInstanceCountForImage(imageId) {
+       const instances = await this.getPacketInstances();
+       return Object.values(instances).filter(inst => inst.imageId === imageId).length;
   },
   async getAllPacketBrowserStates() {
-    try { const data = await this.getLocal(CONFIG.STORAGE_KEYS.PACKET_BROWSER_STATES); const states = data[CONFIG.STORAGE_KEYS.PACKET_BROWSER_STATES] || {}; Object.values(states).forEach(state => { state.instanceId = state.instanceId || null; state.tabGroupId = typeof state.tabGroupId === 'number' ? state.tabGroupId : null; state.activeTabIds = Array.isArray(state.activeTabIds) ? state.activeTabIds : []; state.lastActiveUrl = typeof state.lastActiveUrl === 'string' ? state.lastActiveUrl : null; }); return states; }
-    catch (error) { logger.error('Storage', 'Error getting all packet browser states', error); return {}; }
+    const data = await this.getLocal(CONFIG.STORAGE_KEYS.PACKET_BROWSER_STATES);
+    return data[CONFIG.STORAGE_KEYS.PACKET_BROWSER_STATES] || {};
   },
   async getPacketBrowserState(instanceId) {
-      if (!instanceId) return null;
-      try { const states = await this.getAllPacketBrowserStates(); const state = states[instanceId] || null; return state; }
-      catch (error) { logger.error('Storage', 'Error getting single packet browser state', { instanceId, error }); return null; }
+      const states = await this.getAllPacketBrowserStates();
+      return states[instanceId] || null;
   },
   async savePacketBrowserState(state) {
-      if (!state || !state.instanceId) { logger.error('Storage', 'Attempted to save invalid packet browser state', state); return false; }
-      try { const stateToSave = { instanceId: state.instanceId, tabGroupId: typeof state.tabGroupId === 'number' ? state.tabGroupId : null, activeTabIds: Array.isArray(state.activeTabIds) ? state.activeTabIds : [], lastActiveUrl: typeof state.lastActiveUrl === 'string' ? state.lastActiveUrl : null }; const states = await this.getAllPacketBrowserStates(); states[state.instanceId] = stateToSave; await this.setLocal({ [CONFIG.STORAGE_KEYS.PACKET_BROWSER_STATES]: states }); return true; }
-      catch (error) { logger.error('Storage', 'Error saving packet browser state', { instanceId: state.instanceId, error }); return false; }
+      const states = await this.getAllPacketBrowserStates();
+      states[state.instanceId] = state;
+      await this.setLocal({ [CONFIG.STORAGE_KEYS.PACKET_BROWSER_STATES]: states });
+      return true;
   },
   async deletePacketBrowserState(instanceId) {
-       if (!instanceId) return false;
-       try { const states = await this.getAllPacketBrowserStates(); let deleted = false; if (states[instanceId]) { delete states[instanceId]; await this.setLocal({ [CONFIG.STORAGE_KEYS.PACKET_BROWSER_STATES]: states }); deleted = true; } logger.log('Storage', `Packet browser state ${deleted ? 'deleted' : 'not found'}`, { instanceId }); return deleted; }
-       catch (error) { logger.error('Storage', 'Error deleting packet browser state', { instanceId, error }); return false; }
+       const states = await this.getAllPacketBrowserStates();
+       if (states[instanceId]) {
+           delete states[instanceId];
+           await this.setLocal({ [CONFIG.STORAGE_KEYS.PACKET_BROWSER_STATES]: states });
+           return true;
+       }
+       return false;
   },
   async getSettings() {
-    try {
-      const data = await this.getLocal(CONFIG.STORAGE_KEYS.SETTINGS);
-      const storedSettings = data[CONFIG.STORAGE_KEYS.SETTINGS] || {};
-      const defaults = JSON.parse(JSON.stringify(CONFIG.DEFAULT_SETTINGS));
-
-      let mergedSettings = { ...defaults, ...storedSettings };
-
-      // Deep merge for llmModels to preserve defaults if stored is empty/invalid
-      if (!Array.isArray(mergedSettings.llmModels) || mergedSettings.llmModels.length === 0) {
-        mergedSettings.llmModels = defaults.llmModels;
-      }
-      mergedSettings.llmModels = mergedSettings.llmModels.filter(model =>
-        model && typeof model.id === 'string' && typeof model.name === 'string' && typeof model.providerType === 'string'
-      );
-      const selectedModelExists = mergedSettings.llmModels.some(m => m.id === mergedSettings.selectedModelId);
-      if (!mergedSettings.selectedModelId || !selectedModelExists) {
-          mergedSettings.selectedModelId = mergedSettings.llmModels.length > 0 ? mergedSettings.llmModels[0].id : null;
-      }
-
-      // Ensure storageConfigs is an array
-      if (!Array.isArray(mergedSettings.storageConfigs)) {
-        mergedSettings.storageConfigs = defaults.storageConfigs;
-      }
-      mergedSettings.storageConfigs = mergedSettings.storageConfigs.filter(sc => 
-        sc && typeof sc.id === 'string' && typeof sc.name === 'string' && typeof sc.provider === 'string'
-      );
-      const activeStorageExists = mergedSettings.storageConfigs.some(sc => sc.id === mergedSettings.activeStorageId);
-      if (!mergedSettings.activeStorageId || !activeStorageExists) {
-        mergedSettings.activeStorageId = mergedSettings.storageConfigs.length > 0 ? mergedSettings.storageConfigs[0].id : null;
-      }
-
-      // Clean up old, flat storage provider settings if they exist
-      delete mergedSettings.storageProvider;
-      delete mergedSettings.digitalOcean;
-      delete mergedSettings.awsS3;
-
-      if (!['auto', 'light', 'dark'].includes(mergedSettings.themePreference)) {
-        mergedSettings.themePreference = defaults.themePreference;
-      }
-      if (typeof mergedSettings.tabGroupsEnabled !== 'boolean') {
-        mergedSettings.tabGroupsEnabled = defaults.tabGroupsEnabled;
-      }
-      if (typeof mergedSettings.preferAudio !== 'boolean') {
-        mergedSettings.preferAudio = defaults.preferAudio;
-      }
-      return mergedSettings;
-    } catch (error) {
-      logger.error('Storage', 'Error getting settings, returning full defaults', error);
-      return JSON.parse(JSON.stringify(CONFIG.DEFAULT_SETTINGS));
-    }
+    const data = await this.getLocal(CONFIG.STORAGE_KEYS.SETTINGS);
+    const storedSettings = data[CONFIG.STORAGE_KEYS.SETTINGS] || {};
+    return { ...CONFIG.DEFAULT_SETTINGS, ...storedSettings };
   },
   async saveSettings(settings) {
-    try {
-      // Validate LLM models
-      if (!Array.isArray(settings.llmModels)) {
-        settings.llmModels = CONFIG.DEFAULT_SETTINGS.llmModels;
-      }
-      const validModelIds = settings.llmModels.map(m => m.id);
-      if (!settings.selectedModelId || !validModelIds.includes(settings.selectedModelId)) {
-        settings.selectedModelId = validModelIds.length > 0 ? validModelIds[0] : null;
-      }
-
-      // Validate Storage configs
-      if (!Array.isArray(settings.storageConfigs)) {
-        settings.storageConfigs = CONFIG.DEFAULT_SETTINGS.storageConfigs;
-      }
-       const validStorageIds = settings.storageConfigs.map(s => s.id);
-      if (!settings.activeStorageId || !validStorageIds.includes(settings.activeStorageId)) {
-        settings.activeStorageId = validStorageIds.length > 0 ? validStorageIds[0] : null;
-      }
-
-      const data = { [CONFIG.STORAGE_KEYS.SETTINGS]: settings };
-      await this.setLocal(data);
-      logger.log('Storage', 'Settings saved.');
-      return true;
-    } catch (error) {
-      logger.error('Storage', 'Error saving settings', error);
-      return false;
-    }
+    await this.setLocal({ [CONFIG.STORAGE_KEYS.SETTINGS]: settings });
+    return true;
   },
   async getActiveModelConfig() {
-    try {
-      const settings = await this.getSettings();
-      if (!settings.selectedModelId || !Array.isArray(settings.llmModels)) {
-        logger.warn('Storage:getActiveModelConfig', 'No selectedModelId or llmModels array found in settings.');
-        return null;
-      }
-      const activeModel = settings.llmModels.find(model => model.id === settings.selectedModelId);
-      if (!activeModel) {
-        logger.warn('Storage:getActiveModelConfig', `Selected model ID '${settings.selectedModelId}' not found in llmModels.`, {llmModels: settings.llmModels});
-        if (settings.llmModels.length > 0) {
-            logger.warn('Storage:getActiveModelConfig', `Falling back to the first available model: ${settings.llmModels[0].name}`);
-            return settings.llmModels[0];
-        }
-        return null;
-      }
-      return {
-          id: activeModel.id,
-          name: activeModel.name,
-          providerType: activeModel.providerType,
-          apiKey: activeModel.apiKey || (activeModel.providerType === 'chrome-ai-gemini-nano' ? null : ''),
-          modelName: activeModel.modelName || (activeModel.providerType === 'chrome-ai-gemini-nano' ? 'gemini-nano' : ''),
-          apiEndpoint: activeModel.apiEndpoint || (activeModel.providerType === 'chrome-ai-gemini-nano' ? null : ''),
-      };
-    } catch (error) {
-      logger.error('Storage', 'Error getting active model config', error);
-      return null;
-    }
+    const settings = await this.getSettings();
+    return settings.llmModels.find(model => model.id === settings.selectedModelId) || null;
   },
   async isCloudStorageEnabled() {
-    try {
-      const settings = await this.getSettings();
-      if (!settings.activeStorageId || !Array.isArray(settings.storageConfigs) || settings.storageConfigs.length === 0) {
-        return false;
-      }
-      const activeConfig = settings.storageConfigs.find(c => c.id === settings.activeStorageId);
-      if (!activeConfig) return false;
-      
-      const creds = activeConfig.credentials;
-      return !!(creds && creds.accessKey && creds.secretKey && activeConfig.bucket && activeConfig.region);
-    } catch (error) {
-      logger.error('Storage', 'Error checking Cloud Storage status', error);
-      return false;
-    }
+    const settings = await this.getSettings();
+    const config = settings.storageConfigs.find(c => c.id === settings.activeStorageId);
+    return !!(config?.credentials?.accessKey && config?.credentials?.secretKey);
   },
   async getActiveCloudStorageConfig() {
-    try {
-      const settings = await this.getSettings();
-      if (!settings.activeStorageId || !Array.isArray(settings.storageConfigs)) {
-        return null;
-      }
-      return settings.storageConfigs.find(c => c.id === settings.activeStorageId) || null;
-    } catch (error) {
-      logger.error('Storage', 'Error getting active cloud storage config', error);
-      return null;
-    }
+    const settings = await this.getSettings();
+    return settings.storageConfigs.find(c => c.id === settings.activeStorageId) || null;
   },
   async getSession(key) {
-    return new Promise((resolve, reject) => { if (!chrome.storage?.session) return resolve({}); chrome.storage.session.get(key, (result) => { if (chrome.runtime.lastError) { if (chrome.runtime.lastError.message?.includes('QUOTA_BYTES_PER_SESSION')) { resolve({}); } else { reject(chrome.runtime.lastError); } } else { resolve(result || {}); } }); });
+    return new Promise(resolve => {
+      if (!chrome.storage?.session) return resolve({});
+      chrome.storage.session.get(key, result => resolve(result || {}));
+    });
   },
   async setSession(data) {
-    return new Promise((resolve, reject) => { if (!chrome.storage?.session) return resolve(false); chrome.storage.session.set(data, () => { if (chrome.runtime.lastError) { if (chrome.runtime.lastError.message?.includes('QUOTA_BYTES_PER_SESSION')) { resolve(false); } else { reject(chrome.runtime.lastError); } } else { resolve(true); } }); });
+    return new Promise(resolve => {
+      if (!chrome.storage?.session) return resolve(false);
+      chrome.storage.session.set(data, () => resolve(!chrome.runtime.lastError));
+    });
   },
   async removeSession(key) {
-    if (typeof key !== 'string' && !Array.isArray(key)) return Promise.reject(new Error('Invalid key type'));
-    return new Promise((resolve, reject) => { if (!chrome.storage?.session) return resolve(); chrome.storage.session.remove(key, () => { if (chrome.runtime.lastError) { reject(chrome.runtime.lastError); } else { resolve(); } }); });
+    return new Promise(resolve => {
+      if (!chrome.storage?.session) return resolve();
+      chrome.storage.session.remove(key, () => resolve());
+    });
   }
 };
 
 const packetUtils = {
-  isPacketInstanceCompleted(instance) {
-    if (!instance || !Array.isArray(instance.contents)) return false;
-
-    // FIX: A PacketInstance's contents are resolved and do not contain 'alternative' wrappers.
-    // The list of trackable items is simply all items that have a URL or a pageId.
-    const trackableItems = instance.contents.filter(item => 
-        (item.type === 'external' && item.url) || 
-        ((item.type === 'generated' || item.type === 'media') && item.pageId)
-    );
-    
-    const totalCount = trackableItems.length;
-    if (totalCount === 0) return false;
-
-    const visitedUrlsSet = new Set(instance.visitedUrls || []);
-    const visitedGeneratedIdsSet = new Set(instance.visitedGeneratedPageIds || []);
-    let visitedCount = 0;
-    
-    trackableItems.forEach(item => {
-        if ((item.type === 'generated' || item.type === 'media') && item.pageId && visitedGeneratedIdsSet.has(item.pageId)) {
-            visitedCount++;
-        } else if (item.type === 'external' && item.url && visitedUrlsSet.has(item.url)) {
-            visitedCount++;
+    calculateInstanceProgress(instance) {
+        if (!instance || !Array.isArray(instance.contents)) {
+            return { visitedCount: 0, totalCount: 0, progressPercentage: 0 };
         }
-    });
-    
-    return visitedCount >= totalCount;
-  },
+        
+        const trackableItems = instance.contents.filter(item => 
+            (item.type === 'external' && item.url) || 
+            ((item.type === 'generated' || item.type === 'media') && item.pageId)
+        );
+
+        const totalCount = trackableItems.length;
+        if (totalCount === 0) {
+            return { visitedCount: 0, totalCount: 0, progressPercentage: 0 };
+        }
+        
+        const visitedUrlsSet = new Set(instance.visitedUrls || []);
+        const visitedGeneratedIds = new Set(instance.visitedGeneratedPageIds || []);
+        const mentionedLinksSet = new Set(instance.mentionedMediaLinks || []);
+        let completedCheckpoints = 0;
+        
+        trackableItems.forEach(item => {
+            if ((item.type === 'generated' || item.type === 'media') && item.pageId && visitedGeneratedIds.has(item.pageId)) {
+                completedCheckpoints++;
+            } else if (item.type === 'external' && item.url && visitedUrlsSet.has(item.url)) {
+                completedCheckpoints++;
+            } 
+            else if (item.type === 'media' && item.pageId && Array.isArray(item.timestamps) && item.timestamps.length > 0) {
+                const totalLinksInMedia = item.timestamps.length;
+                let mentionedInMedia = 0;
+                item.timestamps.forEach(ts => {
+                    if (mentionedLinksSet.has(ts.url)) {
+                        mentionedInMedia++;
+                    }
+                });
+                completedCheckpoints += (mentionedInMedia / totalLinksInMedia);
+            }
+        });
+        
+        return {
+            visitedCount: completedCheckpoints,
+            totalCount,
+            progressPercentage: totalCount > 0 ? Math.round((completedCheckpoints / totalCount) * 100) : 0
+        };
+    },
+
+    isPacketInstanceCompleted(instance) {
+        if (!instance) return false;
+        const { progressPercentage } = this.calculateInstanceProgress(instance);
+        return progressPercentage >= 100;
+    },
 
   isUrlInPacket(loadedUrl, instance, options = {}) {
     if (!loadedUrl || !instance || !Array.isArray(instance.contents)) {
@@ -554,30 +458,22 @@ const packetUtils = {
             if (!item.url) continue;
 
             if (item.type === 'external') {
-                const itemCanonicalReference = decodeURIComponent(item.url);
-                if (urlToCompare === itemCanonicalReference) {
+                if (urlToCompare === decodeURIComponent(item.url)) {
                     return options.returnItem ? item : true;
                 }
             } else if (item.type === 'generated' || item.type === 'media') {
                 try {
                     const loadedUrlObj = new URL(urlToCompare);
                     const { publishContext } = item;
-
                     if (publishContext) {
-                        let expectedPathname;
-                        if (publishContext.provider === 'google') {
-                            expectedPathname = `/${publishContext.bucket}/${item.url}`;
-                        } else {
-                            expectedPathname = `/${item.url}`;
-                        }
-
+                        let expectedPathname = (publishContext.provider === 'google')
+                            ? `/${publishContext.bucket}/${item.url}`
+                            : `/${item.url}`;
                         if (loadedUrlObj.pathname === expectedPathname) {
                             return options.returnItem ? item : true;
                         }
                     }
-                } catch (e) {
-                    logger.warn('Utils:isUrlInPacket', 'Could not parse loaded URL', { url: urlToCompare, error: e.message });
-                }
+                } catch (e) { /* ignore */ }
             }
         }
     }
@@ -587,206 +483,130 @@ const packetUtils = {
   getColorForTopic(topic) {
     const colors = ['grey', 'blue', 'red', 'yellow', 'green', 'pink', 'purple', 'cyan', 'orange'];
     if (!topic) return colors[0];
-    let hash = 0; for (let i = 0; i < topic.length; i++) { hash = ((hash << 5) - hash) + topic.charCodeAt(i); hash |= 0; }
+    let hash = 0;
+    for (let i = 0; i < topic.length; i++) {
+        hash = ((hash << 5) - hash) + topic.charCodeAt(i);
+        hash |= 0;
+    }
     return colors[Math.abs(hash) % colors.length];
   },
   async markUrlAsVisited(instanceId, url) {
-    if (!instanceId || !url) {
-        logger.warn('PacketUtils:markUrlAsVisited', 'Missing instanceId or url', { instanceId, url });
-        return { success: false, error: 'Missing instanceId or url', instance: null, modified: false, alreadyVisited: false, notTrackable: false, justCompleted: false };
+    let instance = await storage.getPacketInstance(instanceId);
+    if (!instance) return { success: false, error: 'Packet instance not found' };
+
+    const wasCompletedBefore = this.isPacketInstanceCompleted(instance);
+    const foundItem = this.isUrlInPacket(url, instance, { returnItem: true });
+
+    if (!foundItem) return { success: true, notTrackable: true };
+
+    const isGenerated = (foundItem.type === 'generated' || foundItem.type === 'media');
+    const alreadyVisited = isGenerated
+        ? (instance.visitedGeneratedPageIds || []).includes(foundItem.pageId)
+        : (instance.visitedUrls || []).includes(url);
+
+    if (alreadyVisited) return { success: true, alreadyVisited: true };
+    
+    if (isGenerated) {
+        instance.visitedGeneratedPageIds = [...(instance.visitedGeneratedPageIds || []), foundItem.pageId];
+    } else {
+        instance.visitedUrls = [...(instance.visitedUrls || []), url];
     }
-    let instance = null; let instanceModified = false; let isGenerated = false; let pageIdToMark = null; let alreadyVisited = false; let isTrackable = false; let foundItem = null; let justCompleted = false;
-    try {
-        instance = await storage.getPacketInstance(instanceId);
-        if (!instance) throw new Error('Packet instance not found');
-        const wasCompletedBefore = this.isPacketInstanceCompleted(instance);
 
-        // Directly find the item by its canonical URL (S3 key or external URL)
-        foundItem = instance.contents.find(item => item.url === url);
-        // If not found in the main list, check inside "alternative" content wrappers
-        if (!foundItem) {
-            for (const altWrapper of instance.contents.filter(i => i.type === 'alternative')) {
-                if (altWrapper.alternatives) {
-                    foundItem = altWrapper.alternatives.find(alt => alt.url === url);
-                    if (foundItem) break;
-                }
-            }
-        }
+    await storage.savePacketInstance(instance);
+    const justCompleted = !wasCompletedBefore && this.isPacketInstanceCompleted(instance);
 
-        if (foundItem) {
-             isTrackable = true;
-             pageIdToMark = foundItem.pageId;
-             if ((foundItem.type === 'generated' || foundItem.type === 'media') && pageIdToMark) {
-                 isGenerated = true;
-                 alreadyVisited = (instance.visitedGeneratedPageIds || []).includes(pageIdToMark);
-             } else if (foundItem.type === 'external') {
-                 isGenerated = false;
-                 alreadyVisited = (instance.visitedUrls || []).includes(url);
-             } else {
-                 logger.warn('PacketUtils:markUrlAsVisited', 'Found item has unexpected structure or missing pageId for generated type', { item: foundItem });
-                 isTrackable = false;
-             }
-        } else {
-            logger.log('PacketUtils:markUrlAsVisited', 'URL not found in instance contents when trying to mark visit.', { urlToMark: url, instanceId });
-        }
-
-        if (!isTrackable) {
-            return { success: true, instance, modified: false, notTrackable: true, alreadyVisited: false, justCompleted: false };
-        }
-
-        if (!alreadyVisited) {
-             if (isGenerated && pageIdToMark) {
-                 if (!instance.visitedGeneratedPageIds) instance.visitedGeneratedPageIds = [];
-                 instance.visitedGeneratedPageIds.push(pageIdToMark);
-                 logger.log('PacketUtils:markUrlAsVisited', 'Marking GENERATED page ID as visited', { pageId: pageIdToMark, instanceId });
-             } else {
-                 if (!instance.visitedUrls) instance.visitedUrls = [];
-                 instance.visitedUrls.push(url);
-                 logger.log('PacketUtils:markUrlAsVisited', 'Marking EXTERNAL URL as visited', { url, instanceId });
-             }
-             instanceModified = true;
-             const saved = await storage.savePacketInstance(instance);
-              if (!saved) {
-                  logger.error('PacketUtils:markUrlAsVisited', 'Failed to save instance after marking visit.');
-                  if (isGenerated && pageIdToMark) {
-                    const index = instance.visitedGeneratedPageIds.lastIndexOf(pageIdToMark);
-                    if (index > -1) instance.visitedGeneratedPageIds.splice(index, 1);
-                  } else {
-                    const index = instance.visitedUrls.lastIndexOf(url);
-                    if (index > -1) instance.visitedUrls.splice(index, 1);
-                  }
-                  instanceModified = false;
-                  throw new Error('Failed to save instance after marking visit.');
-              }
-              logger.log('PacketUtils:markUrlAsVisited', 'Instance saved after marking visit.');
-              const isCompletedAfter = this.isPacketInstanceCompleted(instance);
-              if (isCompletedAfter && !wasCompletedBefore) {
-                  justCompleted = true;
-                  logger.log('PacketUtils:markUrlAsVisited', `Packet ${instanceId} just completed!`);
-              }
-        } else {
-            logger.log('PacketUtils:markUrlAsVisited', 'Item already marked as visited', { url: url, pageId: pageIdToMark, instanceId });
-        }
-        return { success: true, instance, modified: instanceModified, alreadyVisited: alreadyVisited, notTrackable: !isTrackable, justCompleted: justCompleted };
-    } catch (error) {
-         logger.error('PacketUtils:markUrlAsVisited', `Error marking item visited for ${instanceId}, url ${url}`, error);
-         return { success: false, instance: instance, modified: false, error: error.message, alreadyVisited: false, notTrackable: false, justCompleted: false };
-    }
+    return { success: true, modified: true, instance, justCompleted };
   },
   async markPageIdAsVisited(instanceId, pageId) {
-    if (!instanceId || !pageId) {
-        logger.warn('PacketUtils:markPageIdAsVisited', 'Missing instanceId or pageId', { instanceId, pageId });
-        return { success: false, error: 'Missing instanceId or pageId' };
-    }
-    try {
-        const instance = await storage.getPacketInstance(instanceId);
-        if (!instance) throw new Error('Packet instance not found');
+    let instance = await storage.getPacketInstance(instanceId);
+    if (!instance) return { success: false, error: 'Packet instance not found' };
 
-        const wasCompletedBefore = this.isPacketInstanceCompleted(instance);
-        
-        if (!instance.visitedGeneratedPageIds) instance.visitedGeneratedPageIds = [];
-        
-        if (instance.visitedGeneratedPageIds.includes(pageId)) {
-            logger.log('PacketUtils:markPageIdAsVisited', 'Page ID already marked as visited', { pageId, instanceId });
-            return { success: true, instance, modified: false, alreadyVisited: true, justCompleted: false };
-        }
+    const wasCompletedBefore = this.isPacketInstanceCompleted(instance);
+    instance.visitedGeneratedPageIds = [...new Set([...(instance.visitedGeneratedPageIds || []), pageId])];
+    
+    await storage.savePacketInstance(instance);
+    const justCompleted = !wasCompletedBefore && this.isPacketInstanceCompleted(instance);
 
-        instance.visitedGeneratedPageIds.push(pageId);
-        const saved = await storage.savePacketInstance(instance);
-        if (!saved) {
-            throw new Error('Failed to save instance after marking page ID as visited.');
-        }
-
-        const isCompletedAfter = this.isPacketInstanceCompleted(instance);
-        const justCompleted = isCompletedAfter && !wasCompletedBefore;
-        if (justCompleted) {
-            logger.log('PacketUtils:markPageIdAsVisited', `Packet ${instanceId} just completed by visiting pageId ${pageId}!`);
-        }
-
-        return { success: true, instance, modified: true, alreadyVisited: false, justCompleted };
-    } catch (error) {
-        logger.error('PacketUtils:markPageIdAsVisited', `Error marking pageId ${pageId} visited for ${instanceId}`, error);
-        return { success: false, error: error.message };
-    }
+    return { success: true, modified: true, instance, justCompleted };
   },
   getDefaultGeneratedPageUrl(instance) {
-    if (!instance || !Array.isArray(instance.contents)) return null;
-    const generatedPage = this.getGeneratedPages(instance)[0];
-    return generatedPage ? generatedPage.url : null;
+    const page = this.getGeneratedPages(instance)[0];
+    return page ? page.url : null;
   },
   getGeneratedPages(instance) {
-      if (!instance || !Array.isArray(instance.contents)) return [];
-      
-      const pages = [];
-      instance.contents.forEach(item => {
-          if (item.type === 'generated') {
-              pages.push(item);
-          } else if (item.type === 'alternative') {
-              pages.push(...item.alternatives.filter(alt => alt.type === 'generated'));
-          }
-      });
-      return pages;
+      if (!instance?.contents) return [];
+      return instance.contents.flatMap(item => 
+          item.type === 'generated' ? [item] :
+          (item.type === 'alternative' ? item.alternatives.filter(alt => alt.type === 'generated') : [])
+      );
   }
 };
 
 function getPacketContextKey(tabId) { return `${CONFIG.STORAGE_KEYS.PACKET_CONTEXT_PREFIX}${tabId}`; }
-async function getPacketContext(tabId) { if (typeof tabId !== 'number') return null; const storageKey = getPacketContextKey(tabId); try { const data = await storage.getLocal(storageKey); return (data && data[storageKey]) ? data[storageKey] : null; } catch (error) { logger.error('Utils:getPacketContext', 'Error getting context', { tabId, error }); return null; } }
-async function setPacketContext(tabId, instanceId, packetUrl, currentUrl) { if (typeof tabId !== 'number' || !instanceId || !packetUrl || !currentUrl) { logger.error('Utils:setPacketContext', 'Invalid arguments', {tabId, instanceId, packetUrl, currentUrl}); return false; } const storageKey = getPacketContextKey(tabId); try { const contextToStore = { instanceId, packetUrl, currentUrl }; await storage.setLocal({ [storageKey]: contextToStore }); return true; } catch (error) { logger.error('Utils:setPacketContext', 'Error setting context', { tabId, error }); return false; } }
-async function clearPacketContext(tabId) { if (typeof tabId !== 'number') return; const storageKey = getPacketContextKey(tabId); try { const data = await storage.getLocal(storageKey); if (data && data[storageKey]) await storage.removeLocal(storageKey); } catch (error) { logger.error('Utils:clearPacketContext', 'Error clearing context', { key: storageKey, error }); } }
+async function getPacketContext(tabId) {
+    const key = getPacketContextKey(tabId);
+    const data = await storage.getLocal(key);
+    return data[key] || null;
+}
+async function setPacketContext(tabId, instanceId, packetUrl, currentUrl) {
+    await storage.setLocal({ [getPacketContextKey(tabId)]: { instanceId, packetUrl, currentUrl } });
+    return true;
+}
+async function clearPacketContext(tabId) {
+    await storage.removeLocal(getPacketContextKey(tabId));
+}
 
-function isTabGroupsAvailable() { return typeof chrome?.tabGroups?.update === 'function' && typeof chrome?.tabs?.group === 'function'; }
+function isTabGroupsAvailable() { return typeof chrome?.tabGroups?.update === 'function'; }
 function isSidePanelAvailable() { return typeof chrome?.sidePanel?.open === 'function'; }
 
 export async function isChromeAiAvailable() {
-  if (typeof globalThis.LanguageModel?.create === 'function') {
-    try {
-      return true;
-    } catch (e) {
-      logger.warn('Utils:isChromeAiAvailable', 'Error during Chrome AI availability check (e.g. model not available/loaded)', e);
-      return false;
-    }
-  }
-  return false;
+  return typeof globalThis.LanguageModel?.create === 'function';
 }
 
 let currentThemeListener = null;
-async function applyThemeMode() { try { const settings = await storage.getSettings(); const preference = settings.themePreference || 'auto'; if (typeof window !== 'undefined' && typeof document !== 'undefined' && document.body) { const prefersDark = window.matchMedia('(prefers-color-scheme: dark)'); let darkModeEnabled = (preference === 'dark') || (preference === 'auto' && prefersDark.matches); document.body.classList.toggle('dark-mode', darkModeEnabled); document.body.classList.toggle('light-mode', !darkModeEnabled); if (currentThemeListener) { prefersDark.removeEventListener('change', currentThemeListener); currentThemeListener = null; } if (preference === 'auto') { currentThemeListener = () => applyThemeMode(); prefersDark.addEventListener('change', currentThemeListener); } } } catch (error) { logger.error('Utils:applyThemeMode', 'Error applying theme mode', error); if (typeof document !== 'undefined' && document.body) { document.body.classList.remove('dark-mode'); document.body.classList.add('light-mode'); } } }
+async function applyThemeMode() {
+    const settings = await storage.getSettings();
+    const preference = settings.themePreference || 'auto';
+    if (typeof window !== 'undefined' && document.body) {
+        const prefersDark = window.matchMedia('(prefers-color-scheme: dark)');
+        const darkModeEnabled = (preference === 'dark') || (preference === 'auto' && prefersDark.matches);
+        document.body.classList.toggle('dark-mode', darkModeEnabled);
+        document.body.classList.toggle('light-mode', !darkModeEnabled);
 
-async function shouldUseTabGroups() { if (!isTabGroupsAvailable()) return false; try { const settings = await storage.getSettings(); return typeof settings.tabGroupsEnabled === 'boolean' ? settings.tabGroupsEnabled : true; } catch (error) { logger.error('Utils:shouldUseTabGroups', 'Error getting settings, defaulting to false', error); return false; } }
+        if (currentThemeListener) prefersDark.removeEventListener('change', currentThemeListener);
+        if (preference === 'auto') {
+            currentThemeListener = () => applyThemeMode();
+            prefersDark.addEventListener('change', currentThemeListener);
+        }
+    }
+}
+
+async function shouldUseTabGroups() {
+    if (!isTabGroupsAvailable()) return false;
+    const settings = await storage.getSettings();
+    return settings.tabGroupsEnabled;
+}
 
 function arrayBufferToBase64(buffer) {
     let binary = '';
     const bytes = new Uint8Array(buffer);
-    const len = bytes.byteLength;
-    for (let i = 0; i < len; i++) {
+    for (let i = 0; i < bytes.byteLength; i++) {
         binary += String.fromCharCode(bytes[i]);
     }
     return btoa(binary);
 }
 
 function base64Decode(base64) {
-    try {
-        const binaryString = atob(base64);
-        const len = binaryString.length;
-        const bytes = new Uint8Array(len);
-        for (let i = 0; i < len; i++) {
-            bytes[i] = binaryString.charCodeAt(i);
-        }
-        return bytes.buffer;
-    } catch (error) {
-        logger.error('Utils:base64Decode', 'Error decoding base64', error);
-        return null;
+    const binaryString = atob(base64);
+    const bytes = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
     }
+    return bytes.buffer;
 }
 
 function sanitizeForFileName(input) {
-  if (!input) return '';
-  return input
-    .toLowerCase()
-    .replace(/\s+/g, '-') // Replace spaces with hyphens
-    .replace(/[^a-z0-9_.-]/g, '') // Remove all non-alphanumeric characters except underscore, dot, hyphen
-    .replace(/-+/g, '-') // Replace multiple hyphens with a single one
-    .replace(/^-+|-+$/g, ''); // Remove leading/trailing hyphens
+  return (input || '').toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9_.-]/g, '').replace(/-+/g, '-').replace(/^-+|-+$/g, '');
 }
 
 
