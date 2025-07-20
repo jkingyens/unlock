@@ -1,6 +1,10 @@
 // ext/offscreen.js
 
-// --- NEW: Helper to convert Base64 string to ArrayBuffer ---
+// --- Persistent Audio Player Logic ---
+let audio = null;
+let timeUpdateInterval = null;
+
+// Helper to convert Base64 string to ArrayBuffer
 function base64ToAb(base64) {
     const binary_string = window.atob(base64);
     const len = binary_string.length;
@@ -10,6 +14,88 @@ function base64ToAb(base64) {
     }
     return bytes.buffer;
 }
+
+function setupAudioElement() {
+    if (audio) return;
+
+    audio = new Audio();
+
+    audio.onplay = () => {
+        // Start sending time updates back to the background script
+        if (timeUpdateInterval) clearInterval(timeUpdateInterval);
+        timeUpdateInterval = setInterval(() => {
+            if (!audio.paused) {
+                chrome.runtime.sendMessage({
+                    action: 'audio_time_update',
+                    data: {
+                        currentTime: audio.currentTime,
+                        duration: audio.duration,
+                        pageId: audio.dataset.pageId
+                    }
+                });
+            }
+        }, 250); // Send updates 4 times a second
+    };
+
+    audio.onpause = () => {
+        // Stop sending time updates when not playing
+        if (timeUpdateInterval) clearInterval(timeUpdateInterval);
+        timeUpdateInterval = null;
+    };
+
+    audio.onended = () => {
+        if (timeUpdateInterval) clearInterval(timeUpdateInterval);
+        timeUpdateInterval = null;
+        
+        // Notify the background script that playback has completed
+        chrome.runtime.sendMessage({
+            action: 'media_playback_complete',
+            data: {
+                instanceId: audio.dataset.instanceId,
+                pageId: audio.dataset.pageId
+            }
+        });
+    };
+}
+
+async function handleAudioControl(request) {
+    setupAudioElement();
+    const { command, data } = request;
+
+    switch (command) {
+        case 'play':
+            // If it's a new track, create a blob URL and load it
+            if (audio.dataset.pageId !== data.pageId) {
+                // Decode the Base64 audio data received from the background script
+                const audioBuffer = base64ToAb(data.audioB64);
+                const blob = new Blob([audioBuffer], { type: data.mimeType });
+                const audioUrl = URL.createObjectURL(blob);
+
+                // Revoke the old object URL to prevent memory leaks
+                if (audio.src && audio.src.startsWith('blob:')) {
+                    URL.revokeObjectURL(audio.src);
+                }
+
+                audio.src = audioUrl;
+                audio.dataset.pageId = data.pageId;
+                audio.dataset.instanceId = data.instanceId;
+                audio.load();
+            }
+            audio.play();
+            break;
+        case 'pause':
+            audio.pause();
+            break;
+        case 'toggle':
+            if (audio.paused) {
+                audio.play();
+            } else {
+                audio.pause();
+            }
+            break;
+    }
+}
+
 
 // --- Audio processing functions ---
 
@@ -122,6 +208,10 @@ function handleMessages(request, sender, sendResponse) {
   }
 
   switch (request.type) {
+    case 'control-audio':
+        handleAudioControl(request.data);
+        sendResponse({ success: true });
+        break;
     case 'parse-html-for-text':
       try {
         const parser = new DOMParser();
@@ -144,7 +234,6 @@ function handleMessages(request, sender, sendResponse) {
             const markerText = document.createTextNode(`*${link.textContent.trim()}*`);
             link.parentNode.replaceChild(markerText, link);
         });
-        // --- FIX: Use textContent directly for consistency with the link parser ---
         const textContent = clonedDoc.body.textContent || "";
         sendResponse({ success: true, data: textContent });
       } catch (error) {
@@ -167,13 +256,11 @@ function handleMessages(request, sender, sendResponse) {
       }
       break;
     
-    // --- Case for handling audio normalization ---
     case 'normalize-audio':
       if (request.data && request.data.base64) {
         const audioBuffer = base64ToAb(request.data.base64);
         normalizeAudio(audioBuffer)
           .then(processedBuffer => {
-            // Convert processed buffer back to Base64 for the response
             const processedBase64 = btoa(new Uint8Array(processedBuffer).reduce((data, byte) => data + String.fromCharCode(byte), ''));
             sendResponse({ success: true, data: { base64: processedBase64, type: 'audio/wav' } });
           })

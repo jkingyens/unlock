@@ -7,16 +7,9 @@ import { logger, storage, packetUtils, indexedDbStorage } from '../utils.js';
 // --- Module-specific State & Dependencies ---
 let isDisplayingPacketContent = false;
 let queuedDisplayRequest = null;
-let activeAudioElement = null;
 const audioDataCache = new Map();
 let currentDetailInstance = null;
 let saveStateDebounceTimer = null; // Timer for debounced state saving
-let isClearingAudio = false; // "Lock" flag to prevent race conditions
-
-// --- In-memory state for the currently playing audio ---
-let activeMediaPageId = null;
-let activeMentionedMediaLinks = new Set();
-let activeMediaTotalLinks = 0;
 
 // Functions to be imported from the new, lean sidebar.js
 let sendMessageToBackground;
@@ -28,6 +21,45 @@ let sendMessageToBackground;
 export function init(dependencies) {
     sendMessageToBackground = dependencies.sendMessageToBackground;
 }
+
+// --- NEW: UI update handler called from sidebar.js ---
+export function updatePlaybackUI(state) {
+    if (!currentDetailInstance || !domRefs.packetDetailView) return;
+
+    // Update play/pause icon on all media cards
+    const allMediaCards = domRefs.packetDetailView.querySelectorAll('.card.media');
+    allMediaCards.forEach(card => {
+        const cardPageId = card.dataset.pageId;
+        const isPlayingThisCard = state.isPlaying && state.pageId === cardPageId;
+        card.classList.toggle('playing', isPlayingThisCard);
+    });
+
+    // Reveal mentioned cards
+    if (state.mentionedMediaLinks && state.mentionedMediaLinks.length > 0) {
+        const mentionedUrlsSet = new Set(state.mentionedMediaLinks);
+        const cards = domRefs.packetDetailView.querySelectorAll('.card[data-url]');
+
+        cards.forEach(card => {
+            const url = card.dataset.url;
+            const wasHidden = card.classList.contains('hidden-by-rule');
+
+            if (mentionedUrlsSet.has(url)) {
+                card.classList.remove('hidden-by-rule');
+                if (wasHidden) {
+                    // Highlight the newly revealed card
+                    card.classList.add('link-mentioned');
+                    setTimeout(() => card.classList.remove('link-mentioned'), 2000);
+                }
+            }
+        });
+    }
+
+    // Update waveform for the active track
+    if (state.pageId) {
+        redrawAllVisibleWaveforms(state);
+    }
+}
+
 
 // --- Debounced Save Function ---
 function requestDebouncedStateSave() {
@@ -51,8 +83,8 @@ async function triggerImmediateSave() {
 
 // --- Waveform Generation and Drawing ---
 async function drawWaveform(canvas, audioSamples, options) {
-    const { 
-        accentColor, playedColor, linkColor, currentTime, 
+    const {
+        accentColor, playedColor, linkColor, currentTime,
         linkMarkersEnabled, timestamps, audioDuration,
         visitedUrlsSet,
         visitedLinkColor
@@ -63,7 +95,7 @@ async function drawWaveform(canvas, audioSamples, options) {
 
     canvas.width = canvasWidth * dpr;
     canvas.height = canvasHeight * dpr;
-    
+
     const ctx = canvas.getContext('2d');
     ctx.scale(dpr, dpr);
     ctx.clearRect(0, 0, canvasWidth, canvasHeight);
@@ -79,7 +111,7 @@ async function drawWaveform(canvas, audioSamples, options) {
     for (let i = 0; i < numBars; i++) {
         const barStartTime = i * timePerBar;
         const isPlayed = barStartTime < currentTime;
-        
+
         const activeLink = linkMarkersEnabled ? links.find(lt => barStartTime >= lt.startTime && barStartTime < lt.startTime + timePerBar) : null;
 
         if (activeLink) {
@@ -108,13 +140,13 @@ async function drawWaveform(canvas, audioSamples, options) {
     }
 }
 
-// --- NEW: Function to redraw waveforms on state update ---
-async function redrawAllVisibleWaveforms() {
+// --- Function to redraw waveforms on state update ---
+async function redrawAllVisibleWaveforms(playbackState = {}) {
     if (!currentDetailInstance || !domRefs.packetDetailView) return;
 
     const mediaCards = domRefs.packetDetailView.querySelectorAll('.card.media');
     if (mediaCards.length === 0) return;
-    
+
     const settings = await storage.getSettings();
     const colorOptions = {
         accentColor: getComputedStyle(domRefs.packetDetailView).getPropertyValue('--packet-color-accent').trim(),
@@ -133,16 +165,12 @@ async function redrawAllVisibleWaveforms() {
         const audioSamples = audioDataCache.get(audioCacheKey);
 
         if (canvas && contentItem && audioSamples) {
-            // Use the currently playing audio's time if it matches, otherwise use 0
-            const currentTime = (activeAudioElement && activeAudioElement.dataset.pageId === pageId) 
-                ? activeAudioElement.currentTime 
-                : 0;
-            const audioDuration = activeAudioElement && activeAudioElement.dataset.pageId === pageId 
-                ? activeAudioElement.duration
-                : (audioSamples.length / 44100); // Fallback estimate
+            const isTheActiveTrack = playbackState.pageId === pageId;
+            const currentTime = isTheActiveTrack ? (playbackState.currentTime || 0) : 0;
+            const audioDuration = isTheActiveTrack && playbackState.duration > 0 ? playbackState.duration : (audioSamples.length / 44100);
 
-            drawWaveform(canvas, audioSamples, { 
-                ...colorOptions, 
+            drawWaveform(canvas, audioSamples, {
+                ...colorOptions,
                 timestamps: contentItem.timestamps || [],
                 currentTime,
                 audioDuration
@@ -171,8 +199,9 @@ export async function displayPacketContent(instance, currentPacketUrl) {
         return;
     }
 
-    if (activeAudioElement && activeAudioElement.dataset.instanceId !== instance?.instanceId) {
-        await pauseAndClearActiveAudio(); 
+    const currentState = await sendMessageToBackground({ action: 'get_playback_state' });
+    if (currentState.instanceId && currentState.instanceId !== instance.instanceId) {
+        await stopAndClearActiveAudio(); 
     }
     
     currentDetailInstance = instance;
@@ -197,7 +226,10 @@ export async function displayPacketContent(instance, currentPacketUrl) {
                 card.classList.toggle('visited', isVisited);
                 const url = card.dataset.url;
                 if (url && !isVisited && !card.classList.contains('media')) {
-                    card.classList.toggle('hidden-by-rule', !mentionedLinks.has(url));
+                    const isMentioned = mentionedLinks.has(url);
+                    if (isMentioned) {
+                        card.classList.remove('hidden-by-rule');
+                    }
                 }
             });
             updateActiveCardHighlight(currentPacketUrl);
@@ -207,17 +239,16 @@ export async function displayPacketContent(instance, currentPacketUrl) {
             const progressBarContainer = domRefs.detailProgressContainer?.querySelector('.progress-bar-container');
             if (progressBarContainer) progressBarContainer.title = `${progressPercentage}% Complete`;
             
-            // --- CHANGE: Redraw waveforms on any state update ---
-            await redrawAllVisibleWaveforms();
+            await redrawAllVisibleWaveforms(currentState);
 
         } else {
             const colorName = packetUtils.getColorForTopic(instance.topic);
             const colors = { grey: { accent: '#90a4ae', progress: '#546e7a', link: '#FFFFFF' }, blue: { accent: '#64b5f6', progress: '#1976d2', link: '#FFFFFF' }, red: { accent: '#e57373', progress: '#d32f2f', link: '#FFFFFF' }, yellow: { accent: '#fff176', progress: '#fbc02d', link: '#000000' }, green: { accent: '#81c784', progress: '#388e3c', link: '#FFFFFF' }, pink: { accent: '#f06292', progress: '#c2185b', link: '#FFFFFF' }, purple: { accent: '#ba68c8', progress: '#7b1fa2', link: '#FFFFFF' }, cyan: { accent: '#4dd0e1', progress: '#0097a7', link: '#FFFFFF' }, orange: { accent: '#ffb74d', progress: '#f57c00', link: '#FFFFFF' } }[colorName] || { accent: '#90a4ae', progress: '#546e7a', link: '#FFFFFF' };
-            
+
             container.style.setProperty('--packet-color-accent', colors.accent);
             container.style.setProperty('--packet-color-progress-fill', colors.progress);
             container.style.setProperty('--packet-color-link-marker', colors.link);
-            
+
             const fragment = document.createDocumentFragment();
             fragment.appendChild(createProgressSection(instance));
             fragment.appendChild(await createActionButtons(instance));
@@ -227,7 +258,8 @@ export async function displayPacketContent(instance, currentPacketUrl) {
 
             container.innerHTML = '';
             container.appendChild(fragment);
-
+            updatePlaybackUI(currentState);
+            
             const mediaCards = container.querySelectorAll('.card.media');
             for (const mediaCard of mediaCards) {
                 const pageId = mediaCard.dataset.pageId;
@@ -240,23 +272,12 @@ export async function displayPacketContent(instance, currentPacketUrl) {
                         try {
                             const audioData = audioContent[0].content;
                             const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-                            const decodedData = await audioContext.decodeAudioData(audioData.slice(0)); 
+                            const decodedData = await audioContext.decodeAudioData(audioData.slice(0));
                             const samples = decodedData.getChannelData(0);
                             audioDataCache.set(`${instance.imageId}::${contentItem.pageId}`, samples);
                             
-                            const settings = await storage.getSettings();
-                            const colorOptions = {
-                                accentColor: getComputedStyle(domRefs.packetDetailView).getPropertyValue('--packet-color-accent').trim(),
-                                playedColor: getComputedStyle(domRefs.packetDetailView).getPropertyValue('--packet-color-progress-fill').trim(),
-                                linkColor: getComputedStyle(domRefs.packetDetailView).getPropertyValue('--packet-color-link-marker').trim(),
-                                visitedLinkColor: '#81c995',
-                                timestamps: contentItem.timestamps || [],
-                                currentTime: 0,
-                                linkMarkersEnabled: settings.waveformLinkMarkersEnabled,
-                                audioDuration: decodedData.duration,
-                                visitedUrlsSet: new Set(instance.visitedUrls || [])
-                            };
-                            drawWaveform(canvas, samples, colorOptions);
+                            redrawAllVisibleWaveforms(currentState);
+
                         } catch (err) {
                             logger.error("DetailView", "Failed to draw initial waveform post-render", err);
                         }
@@ -296,7 +317,7 @@ function createProgressSection(instance) {
 async function createActionButtons(instance) {
     const actionButtonContainer = document.createElement('div');
     actionButtonContainer.id = 'detail-action-button-container';
-    
+
     const isCompleted = packetUtils.isPacketInstanceCompleted(instance);
     let browserState = instance.instanceId ? await storage.getPacketBrowserState(instance.instanceId) : null;
     const tabGroupId = browserState?.tabGroupId;
@@ -316,7 +337,7 @@ async function createActionButtons(instance) {
         closeGroupBtn.addEventListener('click', () => handleCloseTabGroup(tabGroupId));
         actionButtonContainer.appendChild(closeGroupBtn);
     }
-    
+
     domRefs.detailActionButtonContainer = actionButtonContainer;
     return actionButtonContainer;
 }
@@ -332,7 +353,7 @@ async function createCardsSection(instance) {
         const cardPromises = instance.contents.map(item =>
             createContentCard(item, visitedUrlsSet, visitedGeneratedIds, instance, mentionedLinks)
         );
-        
+
         const cards = await Promise.all(cardPromises);
         cards.forEach(card => {
             if (card) {
@@ -342,7 +363,7 @@ async function createCardsSection(instance) {
     } else {
         cardsWrapper.innerHTML = '<div class="empty-state">This packet has no content items.</div>';
     }
-    
+
     domRefs.detailCardsContainer = cardsWrapper;
     return cardsWrapper;
 }
@@ -353,8 +374,8 @@ async function createContentCard(contentItem, visitedUrlsSet, visitedGeneratedId
     if (contentItem.type === 'alternative') {
         const settings = await storage.getSettings();
         const preferAudio = settings.elevenlabsApiKey && contentItem.alternatives.some(a => a.type === 'media');
-        
-        const chosenItem = preferAudio 
+
+        const chosenItem = preferAudio
             ? contentItem.alternatives.find(a => a.type === 'media')
             : contentItem.alternatives.find(a => a.type === 'generated');
 
@@ -378,7 +399,7 @@ async function createContentCard(contentItem, visitedUrlsSet, visitedGeneratedId
         iconHTML = '📄';
         if (urlToOpen && contentItem.published) {
             isClickable = true;
-            displayUrl = title; 
+            displayUrl = title;
         } else {
             card.style.opacity = '0.7';
             displayUrl = contentItem.published ? '(Error: URL missing)' : '(Not Published)';
@@ -408,7 +429,7 @@ async function createContentCard(contentItem, visitedUrlsSet, visitedGeneratedId
 
     const isMentioned = contentItem.url && mentionedLinks.has(contentItem.url);
     const isVisible = type === 'media' || isVisited || isMentioned;
-    
+
     if (!isVisible) {
         card.classList.add('hidden-by-rule');
     }
@@ -426,7 +447,7 @@ async function createContentCard(contentItem, visitedUrlsSet, visitedGeneratedId
             });
         }
     }
-    
+
     return card;
 }
 
@@ -438,13 +459,13 @@ export function updateActiveCardHighlight(packetUrlToHighlight) {
 
     let activeCardElement = null;
     cardsContainer.querySelectorAll('.card').forEach(card => {
-        card.classList.remove('active');
-        if (packetUrlToHighlight && card.dataset.url === packetUrlToHighlight) {
-            card.classList.add('active');
+        const isActive = (packetUrlToHighlight && card.dataset.url === packetUrlToHighlight);
+        card.classList.toggle('active', isActive);
+        if (isActive) {
             activeCardElement = card;
         }
     });
-    
+
     if (activeCardElement) {
         activeCardElement.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     }
@@ -454,7 +475,7 @@ export function updateActiveCardHighlight(packetUrlToHighlight) {
 
 async function openUrl(url, instanceId) {
     if (!url || !instanceId) return;
-    
+
     await triggerImmediateSave();
 
     sendMessageToBackground({
@@ -470,229 +491,37 @@ function handleCloseTabGroup(tabGroupId) {
     }).catch(err => logger.error("DetailView", `Error closing group: ${err.message}`));
 }
 
-export async function pauseAndClearActiveAudio() {
-    if (isClearingAudio) return;
-
-    if (activeAudioElement) {
-        isClearingAudio = true; 
-        
-        logger.log('DetailView', 'Pausing and clearing active audio element.');
-        activeAudioElement.pause();
-        
-        await triggerImmediateSave();
-
-        if (activeAudioElement) {
-            activeAudioElement.src = ''; 
-            activeAudioElement.load(); 
-            activeAudioElement = null; 
-        }
-
-        activeMediaPageId = null;
-        activeMentionedMediaLinks.clear();
-        activeMediaTotalLinks = 0;
-
-        isClearingAudio = false;
-    }
+export async function stopAndClearActiveAudio() {
+    sendMessageToBackground({ action: 'stop_track' });
+    await triggerImmediateSave();
 }
 
 export function stopAudioIfPacketDeleted(deletedPacketId) {
-    if (activeAudioElement && activeAudioElement.dataset.instanceId === deletedPacketId) {
-        logger.log('DetailView', `Stopping audio because its packet (${deletedPacketId}) was deleted.`);
-        pauseAndClearActiveAudio();
-    }
+    // This logic is now managed by the background script,
+    // but we can keep a client-side check just in case.
+    const playingCards = document.querySelectorAll('.card.media.playing');
+    playingCards.forEach(card => {
+        // A bit indirect, but if the instance was deleted, we won't have it.
+        if (!currentDetailInstance || currentDetailInstance.instanceId === deletedPacketId) {
+             card.classList.remove('playing');
+        }
+    });
 }
 
 async function playMediaInCard(card, contentItem, instance) {
-    const canvas = card.querySelector('.waveform-canvas');
-    if (!canvas) return;
-
-    const audioCacheKey = `${instance.imageId}::${contentItem.pageId}`;
-    
-    const initializeAndPlayAudio = async () => {
-        if (activeAudioElement && activeAudioElement.dataset.pageId !== contentItem.pageId) {
-            await pauseAndClearActiveAudio();
-        }
-        
-        card.classList.add('playing');
-
-        if (!activeAudioElement || activeAudioElement.dataset.pageId !== contentItem.pageId) {
-            const audio = new Audio();
-            audio.dataset.pageId = contentItem.pageId;
-            audio.dataset.instanceId = instance.instanceId;
-            activeAudioElement = audio;
-            
-            const cachedAudio = await indexedDbStorage.getGeneratedContent(instance.imageId, contentItem.pageId);
-            if (cachedAudio && cachedAudio[0]?.content) {
-                const blob = new Blob([cachedAudio[0].content], { type: contentItem.mimeType });
-                audio.src = URL.createObjectURL(blob);
-            } else {
-                 logger.error("DetailView", "Could not find cached audio data to play.", {key: audioCacheKey});
-                 return;
-            }
-        }
-        
-        const audio = activeAudioElement;
-        const audioSamples = audioDataCache.get(audioCacheKey);
-        const progressSessionKey = `audio_progress_${instance.instanceId}_${contentItem.pageId}`;
-        
-        activeMediaPageId = contentItem.pageId;
-        activeMentionedMediaLinks = new Set(currentDetailInstance.mentionedMediaLinks || []);
-        activeMediaTotalLinks = contentItem.timestamps?.length || 1;
-        
-        let pageAlreadyMarkedVisited = (instance.visitedGeneratedPageIds || []).includes(contentItem.pageId);
-        
-        audio.onplay = () => { card.classList.add('playing'); };
-        audio.onpause = async () => {
-            card.classList.remove('playing');
-            await storage.setSession({ [progressSessionKey]: audio.currentTime });
-            await pauseAndClearActiveAudio();
-        };
-        
-        audio.ontimeupdate = async () => {
-             if (!audio.duration || isNaN(audio.duration) || !audioSamples) return;
-             
-             const settings = await storage.getSettings();
-             const colorOptions = {
-                 accentColor: getComputedStyle(domRefs.packetDetailView).getPropertyValue('--packet-color-accent').trim(),
-                 playedColor: getComputedStyle(domRefs.packetDetailView).getPropertyValue('--packet-color-progress-fill').trim(),
-                 linkColor: getComputedStyle(domRefs.packetDetailView).getPropertyValue('--packet-color-link-marker').trim(),
-                 visitedLinkColor: '#81c995',
-                 timestamps: contentItem.timestamps || [],
-                 linkMarkersEnabled: settings.waveformLinkMarkersEnabled,
-                 visitedUrlsSet: new Set(currentDetailInstance.visitedUrls || [])
-             };
-
-             drawWaveform(canvas, audioSamples, { ...colorOptions, currentTime: audio.currentTime, audioDuration: audio.duration });
-             
-             if (!currentDetailInstance) return;
-
-             if (!Array.isArray(currentDetailInstance.mentionedMediaLinks)) {
-                currentDetailInstance.mentionedMediaLinks = [];
-             }
-
-             if (contentItem.timestamps && contentItem.timestamps.length > 0 && !pageAlreadyMarkedVisited) {
-                let cardRevealStateChanged = false;
-    
-                for (const ts of contentItem.timestamps) {
-                    const itemToReveal = currentDetailInstance.contents.find(item => {
-                        if (!item.url || !ts.url) return false;
-                        try {
-                            const itemUrl = new URL(item.url);
-                            const tsUrl = new URL(ts.url);
-                            return (itemUrl.origin + itemUrl.pathname.replace(/\/$/, '')) === (tsUrl.origin + tsUrl.pathname.replace(/\/$/, ''));
-                        } catch (e) {
-                            return decodeURIComponent(item.url) === decodeURIComponent(ts.url);
-                        }
-                    });
-
-                    if (itemToReveal) {
-                        if (audio.currentTime >= ts.startTime && !currentDetailInstance.mentionedMediaLinks.includes(itemToReveal.url)) {
-                            currentDetailInstance.mentionedMediaLinks.push(itemToReveal.url);
-                            cardRevealStateChanged = true;
-        
-                            const cardToReveal = domRefs.detailCardsContainer.querySelector(`.card[data-url="${itemToReveal.url}"]`);
-                            if (cardToReveal) {
-                                cardToReveal.classList.remove('hidden-by-rule');
-                            }
-                        }
-                    }
-                }
-
-                if (cardRevealStateChanged) {
-                    const { progressPercentage } = packetUtils.calculateInstanceProgress(currentDetailInstance);
-                    const progressBar = domRefs.detailProgressContainer?.querySelector('.progress-bar');
-                    if (progressBar) {
-                        progressBar.style.width = `${progressPercentage}%`;
-                        progressBar.parentElement.title = `${progressPercentage}% Complete`;
-                    }
-                    
-                    requestDebouncedStateSave();
-                    
-                    if (currentDetailInstance.mentionedMediaLinks.length === contentItem.timestamps.length) {
-                        logger.log('DetailView', `All ${contentItem.timestamps.length} links for media ${contentItem.pageId} have been mentioned. Marking as visited.`);
-                        pageAlreadyMarkedVisited = true;
-
-                        const mediaCardElement = domRefs.detailCardsContainer.querySelector(`.card.media[data-page-id="${contentItem.pageId}"]`);
-                        if (mediaCardElement) {
-                            mediaCardElement.classList.add('visited');
-                        }
-                        
-                        await triggerImmediateSave();
-                        
-                        await sendMessageToBackground({ 
-                            action: 'media_playback_complete', 
-                            data: { instanceId: instance.instanceId, pageId: contentItem.pageId } 
-                        });
-                    }
-                }
-            }
-
-             let activeTimestamp = null;
-             if (contentItem.timestamps) {
-                 for (const ts of contentItem.timestamps) {
-                     if (audio.currentTime >= ts.startTime && audio.currentTime < ts.endTime) {
-                         activeTimestamp = ts;
-                         break;
-                     }
-                 }
-             }
- 
-             domRefs.detailCardsContainer.querySelectorAll('.card.link-mentioned').forEach(c => c.classList.remove('link-mentioned'));
- 
-             if (activeTimestamp) {
-                const itemToHighlight = currentDetailInstance.contents.find(item => {
-                    if (!item.url || !activeTimestamp.url) return false;
-                    try {
-                        const itemUrl = new URL(item.url);
-                        const tsUrl = new URL(activeTimestamp.url);
-                        return (itemUrl.origin + itemUrl.pathname.replace(/\/$/, '')) === (tsUrl.origin + tsUrl.pathname.replace(/\/$/, ''));
-                    } catch (e) {
-                        return decodeURIComponent(item.url) === decodeURIComponent(activeTimestamp.url);
-                    }
-                });
-
-                 if (itemToHighlight) {
-                     const targetCard = domRefs.detailCardsContainer.querySelector(`.card[data-url="${itemToHighlight.url}"]`);
-                     if (targetCard) {
-                         targetCard.classList.add('link-mentioned');
-                         targetCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-                     }
-                 }
-             }
-        };
-
-        audio.onended = async () => {
-            card.classList.remove('playing');
-            await storage.removeSession(progressSessionKey);
-
-            if (!contentItem.timestamps || contentItem.timestamps.length === 0) {
-                 await sendMessageToBackground({ 
-                    action: 'media_playback_complete', 
-                    data: { instanceId: instance.instanceId, pageId: contentItem.pageId } 
-                });
-            }
-            await pauseAndClearActiveAudio();
-        };
-        
-        audio.onloadedmetadata = async () => {
-            const sessionData = await storage.getSession(progressSessionKey);
-            const savedTime = sessionData[progressSessionKey];
-            if (savedTime && isFinite(savedTime)) audio.currentTime = savedTime;
-            audio.play();
-        };
-        if (audio.readyState >= 1) {
-             const sessionData = await storage.getSession(progressSessionKey);
-             const savedTime = sessionData[progressSessionKey];
-             if (savedTime && isFinite(savedTime)) audio.currentTime = savedTime;
-             audio.play();
-        }
-    };
-    
     card.addEventListener('click', () => {
-        if (activeAudioElement && !activeAudioElement.paused) {
-            activeAudioElement.pause();
+        const isCurrentlyPlaying = card.classList.contains('playing');
+
+        if (isCurrentlyPlaying) {
+            sendMessageToBackground({ action: 'pause_track' });
         } else {
-            initializeAndPlayAudio();
+            sendMessageToBackground({
+                action: 'start_track',
+                data: {
+                    instanceId: instance.instanceId,
+                    pageId: contentItem.pageId
+                }
+            });
         }
     });
 }
