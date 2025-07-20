@@ -241,7 +241,7 @@ body.dark-mode .creation-stage-text {
 #detail-progress-container .progress-text { font-size: 0.9em; margin-bottom: 5px; color: var(--text-secondary); display: none; }
 #detail-cards-container { overflow-y: auto; flex-grow: 1; padding: 10px 15px; }
 
-/* CARD STYLES (SHARED) */
+/* --- CARD STYLE REFACTOR --- */
 #detail-cards-container .card, #create-view-content-list .card {
   display: flex;
   align-items: flex-start;
@@ -252,49 +252,43 @@ body.dark-mode .creation-stage-text {
   margin-bottom: 10px;
   box-shadow: 0 1px 2px var(--card-shadow);
   cursor: default;
-  transition: transform 0.15s, box-shadow 0.15s, border-left-color 0.2s, background-color 0.2s, border-color 0.2s;
-  border: 1px solid var(--border-secondary);
   position: relative;
-  border-left: 3px solid var(--border-primary);
-  padding-left: 10px;
+  /* Define base border style here */
+  border: 1px solid var(--border-secondary);
+  border-left-width: 3px;
+  border-left-color: var(--border-primary);
+  transition: transform 0.15s, box-shadow 0.15s, border-color 0.2s, background-color 0.2s;
 }
-#detail-cards-container .card.clickable:hover, #create-view-content-list .card:hover {
+#detail-cards-container .card.clickable:hover {
   background-color: var(--bg-tertiary);
   border-color: var(--border-primary);
+  border-left-color: var(--border-focus);
 }
-
-#detail-cards-container .card.visited.clickable:hover,
-#detail-cards-container .card.visited:not(.clickable):hover
-{
-  border-left-color: var(--card-border-visited);
-}
-
 #detail-cards-container .card.visited {
   border-left-color: var(--card-border-visited);
   opacity: 0.85;
 }
-
-/* --- THE FIX IS HERE --- */
-/* Style for visited media cards */
-#detail-cards-container .card.media.visited {
-  border: 1px solid var(--card-border-visited);
-  opacity: 0.85;
+#detail-cards-container .card.visited.clickable:hover {
+  border-color: var(--border-primary); /* Keep general border consistent on hover */
+  border-left-color: var(--card-border-visited); /* But preserve the visited color */
 }
-
-
 #detail-cards-container .card.active {
-  border: 2px solid var(--card-border-active);
   background-color: var(--bg-accent);
+  border: 2px solid var(--card-border-active);
+  padding: 11px;
 }
-
-body.dark-mode #detail-cards-container .card.active.visited {
-  border-color: var(--card-border-active);
-  border-left-color: var(--card-border-visited);
-}
-
 #detail-cards-container .card.active.visited {
-  border-color: var(--card-border-active);
   border-left-color: var(--card-border-visited);
+}
+#detail-cards-container .card.media {
+  padding: 0;
+  height: 64px;
+}
+#detail-cards-container .card.media.active {
+    padding: 0;
+}
+#detail-cards-container .card.media.visited {
+    border: 1px solid var(--card-border-visited);
 }
 
 
@@ -607,16 +601,6 @@ body.dark-mode .llm-model-item button:hover {
 }
 
 /* --- REVISED MEDIA CARD STYLES --- */
-.card.media {
-  padding: 0;
-  height: 64px;
-  display: flex;
-  align-items: center;
-  overflow: hidden;
-  background-color: var(--bg-secondary);
-  position: relative;
-}
-
 .media-waveform-container {
   position: absolute;
   top: 0; left: 0;
@@ -635,14 +619,12 @@ body.dark-mode .llm-model-item button:hover {
 }
 
 #detail-cards-container .card.link-mentioned {
-  animation: link-pulse 1.5s ease-out infinite;
-  border-color: #00bcd4 !important;
+  animation: link-pulse 1.5s ease-out;
+  border-left-color: var(--text-accent) !important;
 }
-
 #detail-cards-container .card.link-mentioned.visited {
-    border-left-color: var(--card-border-visited);
+    border-left-color: var(--card-border-visited) !important;
 }
-
 #detail-cards-container .card.link-mentioned.active {
     border-color: var(--link-pulse-glow-color) !important;
     border-left-color: var(--card-border-visited);
@@ -703,21 +685,8 @@ body.dark-mode .llm-model-item button:hover {
 }
 
 #detail-cards-container .card {
-  display: flex;
-  align-items: flex-start;
-  gap: 12px;
-  background-color: var(--bg-secondary);
-  border-radius: 6px;
-  padding: 12px;
-  margin-bottom: 10px;
-  box-shadow: 0 1px 2px var(--card-shadow);
-  cursor: default;
-  border: 1px solid var(--border-secondary);
-  position: relative;
-  border-left: 3px solid var(--border-primary);
-  padding-left: 10px;
   /* Add transition for smooth reveal */
-  transition: opacity 0.4s ease-out, max-height 0.5s ease-out, transform 0.4s ease-out, margin 0.5s, padding 0.5s;
+  transition: opacity 0.4s ease-out, max-height 0.5s ease-out, transform 0.4s ease-out, margin 0.5s, padding 0.5s, border-color 0.2s, background-color 0.2s;
   transform: translateY(0);
   opacity: 1;
   max-height: 200px; /* Set a max-height for transition */

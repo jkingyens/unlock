@@ -181,7 +181,7 @@ li { margin-bottom: 0.5em; }
 }
 
 .feedback-area.incorrect {
-  background-color: var(--quiz-feedback-incorrect-bg);
+  background-color: var(--quiz-feedback-incorrect-bg); 
   color: var(--quiz-feedback-incorrect-text);
   border: 1px solid var(--quiz-feedback-incorrect-text);
 }

@@ -23,10 +23,8 @@
     "activeTab",
     "scripting"
   ],
-  "host_permissions": [ 
-    "https://*.amazonaws.com/*",
-    "https://*.digitaloceanspaces.com/*",
-    "https://storage.googleapis.com/*"
+  "host_permissions": [
+    "<all_urls>"
   ],
   "externally_connectable": {
     "matches": [
@@ -39,6 +37,12 @@
     "service_worker": "background.js",
     "type": "module"
   },
+  "web_accessible_resources": [
+    {
+      "resources": [ "overlay.js", "overlay.css" ],
+      "matches": [ "<all_urls>" ]
+    }
+  ],
   "side_panel": {
     "default_path": "sidebar.html"
   }

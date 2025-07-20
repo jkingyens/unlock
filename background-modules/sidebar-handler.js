@@ -91,25 +91,19 @@ export function getActivePacketId() {
  * @param {boolean} [retry=true] - Whether to queue if send fails initially.
  */
 export function notifySidebar(action, data, retry = true) {
-    const noisyActions = ['update_sidebar_context']; // Actions to log less often
+    const noisyActions = ['update_sidebar_context', 'playback_state_updated'];
     if (!noisyActions.includes(action)) {
-        // Log potentially sensitive data carefully if needed
-        logger.log('SidebarHandler:notify', 'Attempting', { action /*, data: data */ }); // Avoid logging full data by default
+        logger.log('SidebarHandler:notify', 'Attempting', { action });
     }
 
     if (!isSidePanelAvailable()) {
-        // Don't warn every time, this is expected if the API isn't there
-        // logger.warn('SidebarHandler:notify', 'Skipped: Side Panel API unavailable.');
         return;
     }
 
-    // Sidebar UI script (sidebar.js) might expect 'packetId' key for instance ID.
     const messageData = { ...data };
     if ('instanceId' in messageData && !('packetId' in messageData)) {
          messageData.packetId = messageData.instanceId;
-         // delete messageData.instanceId; // Decide if sidebar needs instanceId too
     }
-    // Keep the warning for potentially incorrect IDs being sent
     if ('packetId' in messageData && messageData.packetId !== null && !String(messageData.packetId).startsWith('inst_')) {
         logger.warn('SidebarHandler:notify', `Sending non-instance ID as packetId for action '${action}'`, { packetId: messageData.packetId });
     }
@@ -118,24 +112,27 @@ export function notifySidebar(action, data, retry = true) {
         const lastError = chrome.runtime.lastError;
         if (lastError) {
              const errorMsg = lastError.message || '';
-             // Only log actual errors, not expected connection failures when sidebar is closed
-             if (!errorMsg.includes("Could not establish connection") && !errorMsg.includes("Receiving end does not exist")) {
-                  logger.warn('SidebarHandler:notify', 'Send failed', { action, error: errorMsg });
+             const isExpectedError = errorMsg.includes("Could not establish connection") || 
+                                     errorMsg.includes("Receiving end does not exist") ||
+                                     errorMsg.includes("The message port closed before a response was received");
+
+             if (!isExpectedError) {
+                  logger.warn('SidebarHandler:notify', 'Send failed with an unexpected error', { action, error: errorMsg });
              }
-             isSidebarReady = false; // Assume sidebar is not ready on any error
+             isSidebarReady = false;
              if (retry) {
-                 pendingSidebarNotifications.push({ action, data: data, timestamp: Date.now() }); // Queue original data structure
-                 if (pendingSidebarNotifications.length > 100) pendingSidebarNotifications.shift(); // Limit queue size
-                 if (!noisyActions.includes(action)) logger.log('SidebarHandler:notify', 'Queued notification', { action, queueLength: pendingSidebarNotifications.length });
+                 pendingSidebarNotifications.push({ action, data: data, timestamp: Date.now() });
+                 if (pendingSidebarNotifications.length > 100) pendingSidebarNotifications.shift();
+                 if (!noisyActions.includes(action)) {
+                     logger.log('SidebarHandler:notify', 'Queued notification', { action, queueLength: pendingSidebarNotifications.length });
+                 }
              }
-        } else { // Success
+        } else {
              if (!isSidebarReady) {
                   logger.log('SidebarHandler:notify', 'Communication successful, processing queue');
                   isSidebarReady = true;
-                  processPendingNotifications(); // Process queue on first success
+                  processPendingNotifications();
              }
-             // Optional: log success for non-noisy actions
-             // if (!noisyActions.includes(action)) logger.log('SidebarHandler:notify', 'Success', { action });
         }
     });
 }
@@ -153,7 +150,6 @@ export function processPendingNotifications() {
 
     notificationsToProcess.forEach(n => {
         if (now - n.timestamp < MAX_AGE) {
-             // Resend without queuing again on failure (retry=false)
              notifySidebar(n.action, n.data, false);
         } else {
              logger.log('SidebarHandler:processPending', 'Skipping stale notification', {action: n.action});
@@ -172,12 +168,10 @@ export function processPendingNotifications() {
  * @param {function} sendResponse - Callback to acknowledge the message.
  */
 export async function handleSidebarReady(sender, sendResponse) {
-     // const tabId = sender.tab?.id; // tabId might not be relevant for global panel
      logger.log('SidebarHandler:handleSidebarReady', 'Ready message received from sidebar UI');
 
-     isSidebarReady = true; // Mark sidebar as ready for direct notifications
-     processPendingNotifications(); // Process any queued notifications immediately
+     isSidebarReady = true;
+     processPendingNotifications();
 
      sendResponse({ success: true, message: "Sidebar readiness acknowledged." });
-     // No need to return true, sendResponse is synchronous here.
 }

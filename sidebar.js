@@ -46,10 +46,10 @@ async function initialize() {
     try {
         await sendMessageToBackground({ action: 'sidebar_ready' });
         const sessionData = await storage.getSession(PENDING_VIEW_KEY);
-        const pendingView = sessionData?.[PENDING_VIEW_KEY];
+        const pendingViewData = sessionData?.[PENDING_VIEW_KEY];
 
-        if (pendingView) {
-            navigateTo(pendingView);
+        if (pendingViewData && pendingViewData.targetView) {
+            navigateTo(pendingViewData.targetView, pendingViewData.instanceId);
             await storage.removeSession(PENDING_VIEW_KEY);
         } else {
             const response = await sendMessageToBackground({ action: 'get_current_tab_context' });
@@ -91,9 +91,8 @@ export async function navigateTo(viewName, instanceId = null, data = null) {
         settingsView.triggerPendingSave();
     }
     
-    if (currentView === 'packet-detail' && viewName !== 'packet-detail') {
-        await detailView.pauseAndClearActiveAudio();
-    }
+    // --- MODIFICATION ---
+    // The block that paused or stopped audio when navigating away from packet-detail has been removed.
 
     [domRefs.rootView, domRefs.createView, domRefs.packetDetailView, domRefs.settingsView].forEach(v => v?.classList.add('hidden'));
     
@@ -206,10 +205,15 @@ async function handleBackgroundMessage(message) {
     const { action, data } = message;
 
     switch (action) {
+        case 'playback_state_updated':
+            if (currentView === 'packet-detail') {
+                detailView.updatePlaybackUI(data);
+            }
+            break;
         case 'navigate_to_view':
             if (data?.viewName) {
                 logger.log('Sidebar', `Received navigation request to view: ${data.viewName}`);
-                navigateTo(data.viewName);
+                navigateTo(data.viewName, data.instanceId);
             }
             break;
         case 'update_sidebar_context':

@@ -11,13 +11,13 @@ import {
     MPI_PARAMS,
     CONFIG,
     arrayBufferToBase64,
-    base64Decode
+    base64Decode,
+    indexedDbStorage
 } from '../utils.js';
 import * as tabGroupHandler from './tab-group-handler.js';
 import * as sidebarHandler from './sidebar-handler.js';
 import { deduplicateUrlInGroup } from './tab-group-handler.js';
 import cloudStorage from '../cloud-storage.js';
-import llmService from '../llm_service.js';
 
 import {
     processCreatePacketRequest,
@@ -34,7 +34,14 @@ import {
     processImproveDraftAudio
 } from './packet-processor.js';
 
-import { interimContextMap } from '../background.js';
+import { 
+    interimContextMap, 
+    setMediaPlaybackState, 
+    controlAudioInOffscreen, 
+    activeMediaPlayback, 
+    hideMediaOverlay, 
+    showMediaOverlay 
+} from '../background.js';
 import { checkAndPromptForCompletion } from './navigation-handler.js';
 
 const PENDING_VIEW_KEY = 'pendingSidebarView';
@@ -210,7 +217,10 @@ async function handleOpenContent(data, sender, sendResponse) {
             if (targetTab?.windowId) await chrome.windows.update(targetTab.windowId, { focused: true });
             await setPacketContext(resultingTabId, instanceId, packetUrlForContext, finalUrlToOpen);
         }
-
+        
+        // --- THIS BLOCK IS REMOVED ---
+        // The onActivated listener in background.js now handles this reliably.
+        
         if (useTabGroups) {
             await tabGroupHandler.ensureTabInGroup(resultingTabId, instanceId);
 
@@ -233,8 +243,6 @@ async function handleOpenContent(data, sender, sendResponse) {
         try { sendResponse({ success: false, error: error.message || 'Unknown error' }); } catch (e) { /* ignore */ }
     }
 }
-
-
 
 // --- Instance State Management ---
 async function handleMarkUrlVisited(data, sendResponse) {
@@ -295,12 +303,170 @@ async function handleSidebarReady(sender, sendResponse) {
 // --- Main Message Router ---
 export function handleMessage(message, sender, sendResponse) {
     let isAsync = false;
-    const noisyActions = ['get_context_for_tab', 'get_current_tab_context', 'get_page_details_from_dom'];
+    const noisyActions = ['get_context_for_tab', 'get_current_tab_context', 'get_page_details_from_dom', 'audio_time_update', 'get_playback_state'];
     if (!noisyActions.includes(message.action)) {
         logger.log('MessageHandler', `Received action: ${message.action}`, { data: message.data, senderTab: sender.tab?.id, senderUrl: sender.url, senderId: sender.id });
     }
 
     switch (message.action) {
+        case 'get_playback_state':
+            sendResponse(activeMediaPlayback);
+            break;
+        case 'start_track':
+            (async () => {
+                try {
+                    const { instanceId, pageId } = message.data;
+                    const instance = await storage.getPacketInstance(instanceId);
+                    const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+
+                    if (!instance) throw new Error('Could not find instance to play track.');
+
+                    // Find the media item, even if it's nested
+                    let contentItem = null;
+                    for (const item of instance.contents) {
+                        if (item.pageId === pageId) {
+                            contentItem = item;
+                            break;
+                        }
+                        if (item.type === 'alternative' && item.alternatives) {
+                            const found = item.alternatives.find(alt => alt.pageId === pageId);
+                            if (found) {
+                                contentItem = found;
+                                break;
+                            }
+                        }
+                    }
+                    
+                    if (!contentItem) throw new Error('Could not find track content item in packet.');
+
+                    const cachedAudio = await indexedDbStorage.getGeneratedContent(instance.imageId, pageId);
+                    if (!cachedAudio || !cachedAudio[0]?.content) {
+                        throw new Error("Could not find cached audio data to play.");
+                    }
+                    
+                    const audioB64 = arrayBufferToBase64(cachedAudio[0].content);
+
+                    await controlAudioInOffscreen('play', {
+                        audioB64: audioB64,
+                        mimeType: contentItem.mimeType,
+                        pageId,
+                        instanceId
+                    });
+
+                    setMediaPlaybackState({
+                        isPlaying: true,
+                        pageId,
+                        instanceId,
+                        topic: instance.topic,
+                        tabId: activeTab ? activeTab.id : null,
+                        mentionedMediaLinks: instance.mentionedMediaLinks || []
+                    });
+                    
+                    sendResponse({ success: true });
+                } catch (err) {
+                    logger.error("MessageHandler:start_track", "Error starting track", err);
+                    sendResponse({ success: false, error: err.message });
+                }
+            })();
+            isAsync = true;
+            break;
+
+        case 'pause_track':
+             (async () => {
+                try {
+                    if (activeMediaPlayback.isPlaying) {
+                        await controlAudioInOffscreen('pause', {});
+                        setMediaPlaybackState({ isPlaying: false });
+                    }
+                    sendResponse({ success: true });
+                } catch(err) {
+                    logger.error("MessageHandler:pause_track", "Error pausing track", err);
+                    sendResponse({ success: false, error: err.message });
+                }
+             })();
+             isAsync = true;
+             break;
+        
+        case 'stop_track':
+            (async () => {
+                try {
+                    if (activeMediaPlayback.pageId) {
+                        await controlAudioInOffscreen('pause', {}); // Tell player to pause
+                        // Now, fully reset the state
+                        setMediaPlaybackState({
+                            isPlaying: false,
+                            pageId: null,
+                            instanceId: null,
+                            topic: '',
+                            tabId: null,
+                            currentTime: 0,
+                            duration: 0,
+                            mentionedMediaLinks: []
+                        });
+                    }
+                    sendResponse({ success: true });
+                } catch(err) {
+                    logger.error("MessageHandler:stop_track", "Error stopping track", err);
+                    sendResponse({ success: false, error: err.message });
+                }
+            })();
+            isAsync = true;
+            break;
+
+        case 'toggle_media_playback':
+            (async () => {
+                try {
+                    if (!activeMediaPlayback.pageId) {
+                        throw new Error('No active media to toggle.');
+                    }
+                    const newIsPlaying = !activeMediaPlayback.isPlaying;
+                    await controlAudioInOffscreen('toggle', { pageId: activeMediaPlayback.pageId });
+                    
+                    setMediaPlaybackState({ isPlaying: newIsPlaying });
+                    
+                    sendResponse({ success: true, newState: newIsPlaying });
+                } catch (error) {
+                    logger.error("MessageHandler", "Error toggling media playback", error);
+                    sendResponse({ success: false, error: error.message });
+                }
+            })();
+            isAsync = true;
+            break;
+        case 'open_sidebar_and_navigate':
+            (async () => {
+                try {
+                    const { targetView, instanceId } = message.data;
+                    const windowId = sender.tab?.windowId;
+                    if (windowId) {
+                        await chrome.sidePanel.open({ windowId });
+                        // Send a follow-up message to the sidebar to handle the navigation
+                        chrome.runtime.sendMessage({
+                            action: 'navigate_to_view',
+                            data: { viewName: targetView, instanceId: instanceId }
+                        });
+                    }
+                    sendResponse({ success: true });
+                } catch(err) {
+                     sendResponse({ success: false, error: err.message });
+                }
+            })();
+            isAsync = true;
+            break;
+        case 'control_audio':
+            controlAudioInOffscreen(message.data.command, message.data.data)
+                .then(sendResponse)
+                .catch(err => sendResponse({ success: false, error: err.message }));
+            isAsync = true;
+            break;
+        case 'audio_time_update':
+            // Instead of forwarding, update the central state and let it broadcast
+            if (activeMediaPlayback.pageId === message.data.pageId) {
+                setMediaPlaybackState({
+                    currentTime: message.data.currentTime,
+                    duration: message.data.duration
+                });
+            }
+            break;
         case 'improve_draft_audio':
             processImproveDraftAudio(message.data)
                 .then(sendResponse)
@@ -315,46 +481,54 @@ export function handleMessage(message, sender, sendResponse) {
             break;
         case 'get_draft_item_for_preview':
             (async () => {
-                const { pageId } = message.data;
-                const sessionData = await storage.getSession('draftPacketForPreview');
-                const draftPacket = sessionData?.draftPacketForPreview;
-                
-                let item = null;
-                if (draftPacket && draftPacket.sourceContent) {
-                    for (const contentItem of draftPacket.sourceContent) {
-                        if (contentItem.pageId === pageId) {
-                            item = contentItem;
-                            break;
-                        }
-                        if (contentItem.type === 'alternative' && Array.isArray(contentItem.alternatives)) {
-                            const foundAlt = contentItem.alternatives.find(alt => alt.pageId === pageId);
-                            if (foundAlt) {
-                                item = foundAlt;
+                try {
+                    const { pageId } = message.data;
+                    const sessionData = await storage.getSession('draftPacketForPreview');
+                    const draftPacket = sessionData?.draftPacketForPreview;
+                    
+                    let item = null;
+                    if (draftPacket && draftPacket.sourceContent) {
+                        for (const contentItem of draftPacket.sourceContent) {
+                            if (contentItem.pageId === pageId) {
+                                item = contentItem;
                                 break;
+                            }
+                            if (contentItem.type === 'alternative' && Array.isArray(contentItem.alternatives)) {
+                                const foundAlt = contentItem.alternatives.find(alt => alt.pageId === pageId);
+                                if (foundAlt) {
+                                    item = foundAlt;
+                                    break;
+                                }
                             }
                         }
                     }
-                }
-                
-                if (item && item.contentB64) {
-                    const htmlContent = new TextDecoder().decode(base64Decode(item.contentB64));
-                    sendResponse({ success: true, htmlContent, title: item.title });
-                } else {
-                    sendResponse({ success: false, error: 'Item not found or has no content.' });
+                    
+                    if (item && item.contentB64) {
+                        const htmlContent = new TextDecoder().decode(base64Decode(item.contentB64));
+                        sendResponse({ success: true, htmlContent, title: item.title });
+                    } else {
+                        sendResponse({ success: false, error: 'Item not found or has no content.' });
+                    }
+                } catch (err) {
+                    sendResponse({ success: false, error: err.message });
                 }
             })();
             isAsync = true;
             break;
         case 'get_presigned_url':
             (async () => {
-                const { s3Key, instanceId } = message.data;
-                const instance = await storage.getPacketInstance(instanceId);
-                const contentItem = instance.contents.find(item => item.url === s3Key);
-                if (contentItem && contentItem.publishContext) {
-                    const url = await cloudStorage.generatePresignedGetUrl(s3Key, 3600, contentItem.publishContext);
-                    sendResponse({ success: true, url });
-                } else {
-                    sendResponse({ success: false, error: 'Could not find content item or publish context.' });
+                try {
+                    const { s3Key, instanceId } = message.data;
+                    const instance = await storage.getPacketInstance(instanceId);
+                    const contentItem = instance.contents.find(item => item.url === s3Key);
+                    if (contentItem && contentItem.publishContext) {
+                        const url = await cloudStorage.generatePresignedGetUrl(s3Key, 3600, contentItem.publishContext);
+                        sendResponse({ success: true, url });
+                    } else {
+                        sendResponse({ success: false, error: 'Could not find content item or publish context.' });
+                    }
+                } catch (err) {
+                    sendResponse({ success: false, error: err.message });
                 }
             })();
             isAsync = true;
@@ -378,6 +552,8 @@ export function handleMessage(message, sender, sendResponse) {
             isAsync = true;
             break;
         case 'navigate_to_view':
+            // This is now primarily for the sidebar to handle, but we can acknowledge it.
+             chrome.runtime.sendMessage(message);
             sendResponse({ success: true });
             break;
         case 'generate_custom_page':
@@ -393,12 +569,12 @@ export function handleMessage(message, sender, sendResponse) {
             break;
         case 'save_packet_image':
             (async () => {
-                const imageToSave = message.data?.image;
-                if (!imageToSave || !imageToSave.id || !imageToSave.topic) {
-                    sendResponse({ success: false, error: 'Invalid PacketImage object provided.'});
-                    return;
-                }
                 try {
+                    const imageToSave = message.data?.image;
+                    if (!imageToSave || !imageToSave.id || !imageToSave.topic) {
+                        sendResponse({ success: false, error: 'Invalid PacketImage object provided.'});
+                        return;
+                    }
                     await storage.savePacketImage(imageToSave);
                     chrome.runtime.sendMessage({ action: 'packet_image_created', data: { image: imageToSave } });
                     sendResponse({ success: true, imageId: imageToSave.id });
@@ -432,17 +608,22 @@ export function handleMessage(message, sender, sendResponse) {
             break;
         case 'instantiate_packet':
             (async () => {
-                const { imageId } = message.data;
-                if (!imageId) {
-                    sendResponse({ success: false, error: 'imageId is required to instantiate a packet.' });
-                    return;
+                try {
+                    const { imageId } = message.data;
+                    if (!imageId) {
+                        sendResponse({ success: false, error: 'imageId is required to instantiate a packet.' });
+                        return;
+                    }
+                    const newInstanceId = `inst_${Date.now()}_${Math.random().toString(36).substring(2, 10)}`;
+                    const result = await instantiatePacket(imageId, newInstanceId, sender.tab?.id);
+                    if (result.success) {
+                        chrome.runtime.sendMessage({ action: 'packet_instance_created', data: { instance: result.instance, source: 'inbox_start' } });
+                    }
+                    sendResponse(result);
+                } catch (err) {
+                    logger.error("MessageHandler:instantiate_packet", "Caught error during instantiation", err);
+                    sendResponse({ success: false, error: err.message || 'An unknown error occurred.' });
                 }
-                const newInstanceId = `inst_${Date.now()}_${Math.random().toString(36).substring(2, 10)}`;
-                const result = await instantiatePacket(imageId, newInstanceId, sender.tab?.id);
-                if (result.success) {
-                    chrome.runtime.sendMessage({ action: 'packet_instance_created', data: { instance: result.instance, source: 'inbox_start' } });
-                }
-                sendResponse(result);
             })();
             isAsync = true;
             break;
@@ -459,21 +640,31 @@ export function handleMessage(message, sender, sendResponse) {
         case 'mark_url_visited': handleMarkUrlVisited(message.data, sendResponse); isAsync = true; break;
         case 'media_playback_complete':
             (async () => {
-                const { instanceId, pageId } = message.data;
-                if (!instanceId || !pageId) {
-                    sendResponse({ success: false, error: 'Missing instanceId or pageId' });
-                    return;
-                }
-                const visitResult = await packetUtils.markPageIdAsVisited(instanceId, pageId);
-
-                if (visitResult.success && visitResult.modified) {
-                    const updatedInstance = visitResult.instance || await storage.getPacketInstance(instanceId);
-                    if (updatedInstance) {
-                        sidebarHandler.notifySidebar('packet_instance_updated', { instance: updatedInstance, source: 'media_playback_complete' });
+                try {
+                    const { instanceId, pageId } = message.data;
+                    if (!instanceId || !pageId) {
+                        sendResponse({ success: false, error: 'Missing instanceId or pageId' });
+                        return;
                     }
-                    await checkAndPromptForCompletion('MessageHandler:media_playback_complete', visitResult, instanceId);
+                    
+                    if (activeMediaPlayback.tabId) {
+                        hideMediaOverlay(activeMediaPlayback.tabId);
+                    }
+                    setMediaPlaybackState({ isPlaying: false, pageId: null, instanceId: null, topic: '', tabId: null });
+                    
+                    const visitResult = await packetUtils.markPageIdAsVisited(instanceId, pageId);
+
+                    if (visitResult.success && visitResult.modified) {
+                        const updatedInstance = visitResult.instance || await storage.getPacketInstance(instanceId);
+                        if (updatedInstance) {
+                            sidebarHandler.notifySidebar('packet_instance_updated', { instance: updatedInstance, source: 'media_playback_complete' });
+                        }
+                        await checkAndPromptForCompletion('MessageHandler:media_playback_complete', visitResult, instanceId);
+                    }
+                    sendResponse({ success: visitResult.success, error: visitResult.error });
+                } catch (err) {
+                    sendResponse({ success: false, error: err.message });
                 }
-                sendResponse({ success: visitResult.success, error: visitResult.error });
             })();
             isAsync = true;
             break;
@@ -494,31 +685,35 @@ export function handleMessage(message, sender, sendResponse) {
             isAsync = true; break;
         case 'page_interaction_complete':
             (async () => {
-                if (!sender.tab || typeof sender.tab.id !== 'number') {
-                    sendResponse({ success: false, error: 'Message must be sent from a tab.' });
-                    return;
-                }
-                const tabId = sender.tab.id;
-                const context = await getPacketContext(tabId);
-
-                if (!context || !context.instanceId || !context.packetUrl) {
-                    sendResponse({ success: false, error: 'No packet context found for this tab.' });
-                    return;
-                }
-
-                const { instanceId, packetUrl } = context;
-                logger.log('MessageHandler', `Received 'page_interaction_complete' from tab ${tabId}`, { context });
-                
-                const visitResult = await packetUtils.markUrlAsVisited(instanceId, packetUrl);
-
-                if (visitResult.success && visitResult.modified) {
-                    const updatedInstance = visitResult.instance || await storage.getPacketInstance(instanceId);
-                    if (updatedInstance) {
-                        sidebarHandler.notifySidebar('packet_instance_updated', { instance: updatedInstance, source: 'page_interaction_complete' });
-                        await checkAndPromptForCompletion('MessageHandler:page_interaction_complete', visitResult, instanceId);
+                try {
+                    if (!sender.tab || typeof sender.tab.id !== 'number') {
+                        sendResponse({ success: false, error: 'Message must be sent from a tab.' });
+                        return;
                     }
+                    const tabId = sender.tab.id;
+                    const context = await getPacketContext(tabId);
+
+                    if (!context || !context.instanceId || !context.packetUrl) {
+                        sendResponse({ success: false, error: 'No packet context found for this tab.' });
+                        return;
+                    }
+
+                    const { instanceId, packetUrl } = context;
+                    logger.log('MessageHandler', `Received 'page_interaction_complete' from tab ${tabId}`, { context });
+                    
+                    const visitResult = await packetUtils.markUrlAsVisited(instanceId, packetUrl);
+
+                    if (visitResult.success && visitResult.modified) {
+                        const updatedInstance = visitResult.instance || await storage.getPacketInstance(instanceId);
+                        if (updatedInstance) {
+                            sidebarHandler.notifySidebar('packet_instance_updated', { instance: updatedInstance, source: 'page_interaction_complete' });
+                            await checkAndPromptForCompletion('MessageHandler:page_interaction_complete', visitResult, instanceId);
+                        }
+                    }
+                    sendResponse({ success: visitResult.success, error: visitResult.error });
+                } catch (err) {
+                    sendResponse({ success: false, error: err.message });
                 }
-                sendResponse({ success: visitResult.success, error: visitResult.error });
             })();
             isAsync = true;
             break;

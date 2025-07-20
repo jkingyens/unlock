@@ -2,6 +2,7 @@
 // REVISED: Uses declarativeNetRequest via rule-manager.js instead of onBeforeNavigate.
 // REVISED: Sets up a chrome.alarms trigger to periodically refresh redirect rules.
 // REVISED: Calls ruleManager.refreshAllRules on startup and install.
+// REVISED: Adds state management for media playback to control a content script overlay.
 
 // --- Imports ---
 import {
@@ -26,8 +27,26 @@ import * as tabGroupHandler from './background-modules/tab-group-handler.js';
 import * as sidebarHandler from './background-modules/sidebar-handler.js';
 import cloudStorage from './cloud-storage.js';
 
+const ACTIVE_MEDIA_KEY = 'activeMediaPlaybackState';
+const AUDIO_KEEP_ALIVE_ALARM = 'audio-keep-alive';
+
+
 // In-memory map for interim context transfer
 export let interimContextMap = new Map();
+let pendingOverlayTabs = new Set(); // Defer overlay injection for loading tabs
+
+// --- NEW: State for Dynamic Island Feature ---
+export let activeMediaPlayback = {
+    tabId: null,
+    instanceId: null,
+    pageId: null,
+    isPlaying: false,
+    topic: '',
+    currentTime: 0,
+    duration: 0,
+    mentionedMediaLinks: [],
+    lastMentionedLink: null
+};
 
 // Rule refresh alarm name
 const RULE_REFRESH_ALARM_NAME = 'refreshRedirectRules';
@@ -87,14 +106,206 @@ async function initializeStorageAndSettings() {
     logger.log('Background', 'Storage and settings initialized/verified.');
 }
 
+// --- Offscreen Document and Audio Control ---
+let creatingOffscreenDocument;
+
+async function hasOffscreenDocument() {
+    if (chrome.runtime && typeof chrome.runtime.getContexts === 'function') {
+        const contexts = await chrome.runtime.getContexts({
+            contextTypes: ['OFFSCREEN_DOCUMENT']
+        });
+        return contexts.length > 0;
+    }
+    return false; // Fallback for safety
+}
+
+async function setupOffscreenDocument() {
+    try {
+        if (await hasOffscreenDocument()) {
+            return;
+        }
+        if (creatingOffscreenDocument) {
+            await creatingOffscreenDocument;
+        } else {
+            creatingOffscreenDocument = chrome.offscreen.createDocument({
+                url: 'offscreen.html',
+                reasons: ['AUDIO_PLAYBACK', 'DOM_PARSER'],
+                justification: 'Play audio persistently and parse HTML content.',
+            });
+            await creatingOffscreenDocument;
+            creatingOffscreenDocument = null;
+        }
+    } catch (error) {
+        logger.error('Background', 'Failed to create offscreen document.', error);
+        creatingOffscreenDocument = null; // Reset promise on failure
+        throw error; // Propagate error
+    }
+}
+
+
+export async function controlAudioInOffscreen(command, data) {
+    try {
+        await setupOffscreenDocument();
+        return await chrome.runtime.sendMessage({
+            target: 'offscreen',
+            type: 'control-audio',
+            data: { command, data }
+        });
+    } catch (error) {
+        logger.error('Background', 'Error controlling audio in offscreen document.', error);
+        return { success: false, error: error.message };
+    }
+}
+
+// --- NEW Broadcasting Function ---
+function broadcastPlaybackState() {
+    // Notify the sidebar
+    sidebarHandler.notifySidebar('playback_state_updated', activeMediaPlayback);
+
+    // Notify the active content script overlay
+    if (activeMediaPlayback.tabId) {
+        chrome.tabs.sendMessage(activeMediaPlayback.tabId, {
+            action: 'playback_state_updated',
+            data: activeMediaPlayback
+        }).catch(e => { /* Ignore if content script isn't there */ });
+    }
+}
+
+// --- Dynamic Island Overlay Logic ---
+export async function setMediaPlaybackState(newState) {
+    const oldLink = activeMediaPlayback.lastMentionedLink;
+    // Clear lastMentionedLink from newState to ensure it's recalculated
+    const { lastMentionedLink, ...restOfNewState } = newState;
+    activeMediaPlayback = { ...activeMediaPlayback, ...restOfNewState };
+
+    if (activeMediaPlayback.isPlaying && activeMediaPlayback.instanceId && activeMediaPlayback.pageId && typeof activeMediaPlayback.currentTime === 'number') {
+        try {
+            const instance = await storage.getPacketInstance(activeMediaPlayback.instanceId);
+            let mediaItem = null;
+            if (instance && instance.contents) {
+                for (const item of instance.contents) {
+                    if (item.pageId === activeMediaPlayback.pageId) {
+                        mediaItem = item;
+                        break;
+                    }
+                    if (item.type === 'alternative' && item.alternatives) {
+                        const found = item.alternatives.find(alt => alt.pageId === activeMediaPlayback.pageId);
+                        if (found) {
+                            mediaItem = found;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (mediaItem && mediaItem.timestamps && instance) {
+                const originalMentionedCount = (instance.mentionedMediaLinks || []).length;
+                const mentionedUrls = new Set(instance.mentionedMediaLinks || []);
+                let lastMentionedTimestamp = null;
+
+                mediaItem.timestamps.forEach(ts => {
+                    if (activeMediaPlayback.currentTime >= ts.startTime) {
+                        mentionedUrls.add(ts.url);
+                        if (!lastMentionedTimestamp || ts.startTime > lastMentionedTimestamp.startTime) {
+                            lastMentionedTimestamp = ts;
+                        }
+                    }
+                });
+                
+                const linkItem = lastMentionedTimestamp ? instance.contents.find(i => i.url === lastMentionedTimestamp.url) : null;
+                const newLink = linkItem ? { url: linkItem.url, title: linkItem.title } : null;
+
+                if (newLink && (!oldLink || newLink.url !== oldLink.url)) {
+                    activeMediaPlayback.lastMentionedLink = newLink;
+                }
+
+                if (mentionedUrls.size > originalMentionedCount) {
+                    instance.mentionedMediaLinks = Array.from(mentionedUrls);
+                    await storage.savePacketInstance(instance);
+                }
+                activeMediaPlayback.mentionedMediaLinks = instance.mentionedMediaLinks;
+            }
+        } catch (error) {
+            logger.error('Background:setMediaPlaybackState', 'Error calculating/saving mentioned links', error);
+        }
+    }
+
+
+    const isPlaying = activeMediaPlayback.isPlaying;
+    const hasActiveTrack = !!activeMediaPlayback.pageId;
+
+    // --- ALARM LOGIC ---
+    if (!isPlaying && hasActiveTrack) {
+        chrome.alarms.create(AUDIO_KEEP_ALIVE_ALARM, { periodInMinutes: 0.4 });
+    } else {
+        chrome.alarms.clear(AUDIO_KEEP_ALIVE_ALARM);
+    }
+
+    // --- PERSISTENCE LOGIC ---
+    if (hasActiveTrack) {
+        await storage.setSession({ [ACTIVE_MEDIA_KEY]: activeMediaPlayback });
+    } else {
+        await storage.removeSession(ACTIVE_MEDIA_KEY);
+    }
+    
+    // --- BROADCAST LOGIC ---
+    broadcastPlaybackState();
+}
+
+export async function showMediaOverlay(tabId, topic, instanceId, isPlaying, options = {}) {
+    if (typeof tabId !== 'number') return;
+    try {
+        await chrome.scripting.executeScript({
+            target: { tabId: tabId },
+            files: ['overlay.js']
+        });
+        await chrome.scripting.insertCSS({
+            target: { tabId: tabId },
+            files: ['overlay.css']
+        });
+        
+        chrome.tabs.sendMessage(tabId, {
+            action: 'show_overlay',
+            data: { 
+                topic: topic, 
+                instanceId: instanceId,
+                isPlaying: isPlaying,
+                animate: options.animate !== false // Animate by default
+            }
+        });
+        logger.log('Background', 'Injected and showed media overlay.', { tabId, topic, options });
+    } catch (e) {
+        if (!e.message.toLowerCase().includes('frame with id 0 was not found') && !e.message.toLowerCase().includes('cannot access contents of the page')) {
+            logger.error('Background', 'Failed to inject media overlay script.', { tabId, error: e });
+        }
+    }
+}
+
+export async function hideMediaOverlay(tabId) {
+    if (typeof tabId !== 'number') return;
+    try {
+        // This now just sets visibility to false, doesn't destroy.
+        chrome.tabs.sendMessage(tabId, { action: 'set_overlay_visibility', data: { visible: false } });
+        logger.log('Background', 'Sent hide message to media overlay.', { tabId });
+    } catch (e) {
+        if (!e.message.toLowerCase().includes('could not establish connection')) {
+            logger.warn('Background', 'Could not send hide message to media overlay (tab may be closed).', { tabId, error: e });
+        }
+    }
+}
+
+
 // --- REVISED: Listener for sidebar connection ---
 chrome.runtime.onConnect.addListener(async (port) => {
   if (port.name === 'sidebar') {
-    // Set the state in session storage, which persists across service worker restarts.
     await storage.setSession({ isSidebarOpen: true });
     logger.log('Background', 'Sidebar connected, set session state to OPEN.');
+    
+    if (activeMediaPlayback.pageId && activeMediaPlayback.tabId) {
+        // Just hide the overlay, don't destroy it.
+        chrome.tabs.sendMessage(activeMediaPlayback.tabId, { action: 'set_overlay_visibility', data: { visible: false } });
+    }
 
-    // FIX: Immediately update the action for the currently active tab.
     try {
         const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
         if (tabs[0] && tabs[0].id) {
@@ -105,11 +316,25 @@ chrome.runtime.onConnect.addListener(async (port) => {
     }
 
     port.onDisconnect.addListener(async () => {
-      // Clear the state from session storage.
       await storage.setSession({ isSidebarOpen: false });
-      logger.log('Background', 'Sidebar disconnected, set session state to CLOSED. Updating action for active tab.');
+      logger.log('Background', 'Sidebar disconnected, set session state to CLOSED.');
+
+      if (activeMediaPlayback.pageId && activeMediaPlayback.tabId) {
+          // Check if the script is already there before trying to show/inject.
+          try {
+              await chrome.tabs.sendMessage(activeMediaPlayback.tabId, { action: 'set_overlay_visibility', data: { visible: true } });
+          } catch(e) {
+              // If sending fails, the content script is likely gone. Re-inject.
+              logger.log('Background', 'Overlay content script not found, re-injecting.');
+              showMediaOverlay(
+                  activeMediaPlayback.tabId, 
+                  activeMediaPlayback.topic, 
+                  activeMediaPlayback.instanceId,
+                  activeMediaPlayback.isPlaying
+              );
+          }
+      }
       
-      // When sidebar closes, update the icon for the current tab
       try {
         const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
         if (tabs[0] && tabs[0].id) {
@@ -366,10 +591,20 @@ async function linkTabsInGroup(groupId, instanceId, instance, allTabs, browserSt
     }
 }
 
+async function restoreMediaStateOnStartup() {
+    const data = await storage.getSession(ACTIVE_MEDIA_KEY);
+    if (data && data[ACTIVE_MEDIA_KEY]) {
+        activeMediaPlayback = data[ACTIVE_MEDIA_KEY];
+        logger.log('Background', 'Restored active media playback state from session storage.', activeMediaPlayback);
+    }
+}
+
+
 // --- Event Listeners ---
 chrome.runtime.onInstalled.addListener(async (details) => {
     logger.log('Background:onInstalled', `Extension ${details.reason}`);
     await initializeStorageAndSettings();
+    await restoreMediaStateOnStartup(); // Restore state
     await cloudStorage.initialize().catch(err => logger.error('Background:onInstalled', 'Initial cloud storage init failed', err));
     await ruleManager.refreshAllRules();
 
@@ -407,6 +642,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
 chrome.runtime.onStartup.addListener(async () => {
      logger.log('Background:onStartup', 'Browser startup detected.');
      await initializeStorageAndSettings();
+     await restoreMediaStateOnStartup(); // Restore state
      
      logger.log('Background:onStartup', 'Running immediate startup tasks...');
      try {
@@ -479,6 +715,9 @@ chrome.alarms.onAlarm.addListener((alarm) => {
         logger.log('Background:onAlarm', `Alarm '${alarm.name}' triggered. Refreshing rules.`);
         ruleManager.refreshAllRules();
     }
+    if (alarm.name === AUDIO_KEEP_ALIVE_ALARM) {
+      logger.log('Background:onAlarm', 'Audio keep-alive alarm triggered.');
+    }
 });
 
 chrome.action.onClicked.addListener((tab) => {
@@ -506,33 +745,87 @@ chrome.tabs.onCreated.addListener(async (newTab) => {
     }
 });
 
+chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+    if (changeInfo.status === 'complete' && pendingOverlayTabs.has(tabId)) {
+        pendingOverlayTabs.delete(tabId);
+        const logPrefix = `[Unpack Background:onUpdated Tab ${tabId}]`;
+        logger.log(logPrefix, 'Tab finished loading, attempting deferred overlay update.');
+
+        if (activeMediaPlayback.pageId && activeMediaPlayback.tabId === tabId) {
+             const { isSidebarOpen } = await storage.getSession({ isSidebarOpen: false });
+             if (!isSidebarOpen) {
+                 // Try to message first in case the script is already there from a previous navigation
+                 try {
+                    await chrome.tabs.sendMessage(tabId, { action: 'set_overlay_visibility', data: { visible: true } });
+                    logger.log(logPrefix, 'Overlay already existed on deferred tab, set visibility.');
+                 } catch (e) {
+                    logger.log(logPrefix, 'Overlay does not exist on deferred tab, injecting now.');
+                    showMediaOverlay(
+                        tabId,
+                        activeMediaPlayback.topic,
+                        activeMediaPlayback.instanceId,
+                        activeMediaPlayback.isPlaying,
+                        { animate: false }
+                    );
+                 }
+             }
+        } else {
+             logger.log(logPrefix, 'Playback state changed since injection was deferred. Aborting.');
+        }
+    }
+});
+
 chrome.tabs.onActivated.addListener(async (activeInfo) => {
     const tabId = activeInfo.tabId;
     const logPrefix = `[Unpack Background:onActivated Tab ${tabId}]`;
+    
+    if (activeMediaPlayback.pageId && activeMediaPlayback.tabId !== tabId) {
+        logger.log(logPrefix, 'Active tab changed during media playback. Transferring overlay.');
+        const oldTabId = activeMediaPlayback.tabId;
+        await setMediaPlaybackState({ tabId: tabId });
+        const { isSidebarOpen } = await storage.getSession({ isSidebarOpen: false });
+
+        if (!isSidebarOpen) {
+            hideMediaOverlay(oldTabId);
+            try {
+                const tab = await chrome.tabs.get(tabId);
+                if (tab.status === 'complete') {
+                    logger.log(logPrefix, 'New tab is complete, attempting to show overlay immediately.');
+                    showMediaOverlay(
+                        tabId,
+                        activeMediaPlayback.topic,
+                        activeMediaPlayback.instanceId,
+                        activeMediaPlayback.isPlaying,
+                        { animate: false }
+                    );
+                } else {
+                    logger.log(logPrefix, `New tab is still loading (status: ${tab.status}). Deferring overlay injection.`);
+                    pendingOverlayTabs.add(tabId);
+                }
+            } catch (error) {
+                logger.error(logPrefix, 'Error getting tab status during activation, cannot transfer overlay.', error);
+            }
+        }
+    }
+
     if (typeof tabId !== 'number') { logger.warn(logPrefix, 'Exiting: Invalid tabId.', activeInfo); return; }
 
     let tabData = null;
     try {
-        // First, verify the tab exists and is accessible.
         tabData = await chrome.tabs.get(tabId);
     } catch (tabError) {
-        // This handles the case where the tab is closed before we can get its info.
         logger.warn(logPrefix, "Failed to get tab info, tab likely closed.", { message: tabError.message });
         return;
     }
 
-    // If we get here, the tab exists. Now we can safely perform actions.
     try {
-        // Update the badge and action state.
         await sidebarHandler.updateActionForTab(tabId);
 
-        // Continue with context update for the sidebar UI if the tab is fully loaded.
         if (tabData && tabData.status === 'complete') {
             const context = await getPacketContext(tabId);
             const instanceId = context?.instanceId || null;
             let instanceData = null;
 
-            // Use the reliable URL from our stored context for visit handling
             const urlToVisit = context?.currentUrl || tabData.url;
             if (urlToVisit) {
                 await handleTabVisit(tabId, urlToVisit);
@@ -543,12 +836,10 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
                 if (!instanceData) {
                      logger.warn(logPrefix, `Instance data not found for existing context ${instanceId}. Clearing context.`);
                      await clearPacketContext(tabId);
-                     // Rerun badge update since context is now clear.
                      await sidebarHandler.updateActionForTab(tabId);
                 }
             }
 
-            // Notify the sidebar of the current context.
             if (sidebarHandler.isSidePanelAvailable()) {
                  const contextToSend = {
                      tabId: tabId,
@@ -570,7 +861,7 @@ chrome.tabs.onRemoved.addListener(async (tabId, removeInfo) => {
     const logPrefix = `[Unpack Background:onRemoved Tab ${tabId}]`;
     logger.log(logPrefix, 'Tab removed');
     
-    // Use the centralized clearer
+    pendingOverlayTabs.delete(tabId);
     clearPendingVisitTimer(tabId);
 
     if (interimContextMap.has(tabId)) {
@@ -765,6 +1056,7 @@ function attachNavigationListeners() {
 // --- Immediate Actions on Service Worker Start ---
 (async () => {
     await initializeStorageAndSettings(); // Ensure settings are loaded first
+    await restoreMediaStateOnStartup(); // Restore state on load
     await cloudStorage.initialize().catch(err => logger.error('Background:InitialSetup', 'Initial cloud storage init failed', err));
     attachNavigationListeners(); // Attach listeners ASAP
     await getDb().catch(e => logger.error('Background:InitialSetup', 'Initial DB access failed on load', e));
