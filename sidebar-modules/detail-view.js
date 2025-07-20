@@ -1,5 +1,6 @@
 // ext/sidebar-modules/detail-view.js
 // Manages the packet detail view, including rendering content cards and progress.
+// REVISED: Adopted the unified 'request_playback_action' message for all playback controls.
 
 import { domRefs } from './dom-references.js';
 import { logger, storage, packetUtils, indexedDbStorage } from '../utils.js';
@@ -10,6 +11,7 @@ let queuedDisplayRequest = null;
 const audioDataCache = new Map();
 let currentDetailInstance = null;
 let saveStateDebounceTimer = null; // Timer for debounced state saving
+let currentPlayingPageId = null; // Track which media item is active in this view
 
 // Functions to be imported from the new, lean sidebar.js
 let sendMessageToBackground;
@@ -22,9 +24,11 @@ export function init(dependencies) {
     sendMessageToBackground = dependencies.sendMessageToBackground;
 }
 
-// --- NEW: UI update handler called from sidebar.js ---
+// --- UI update handler called from sidebar.js ---
 export function updatePlaybackUI(state) {
     if (!currentDetailInstance || !domRefs.packetDetailView) return;
+
+    currentPlayingPageId = state.isPlaying ? state.pageId : null;
 
     // Update play/pause icon on all media cards
     const allMediaCards = domRefs.packetDetailView.querySelectorAll('.card.media');
@@ -32,6 +36,11 @@ export function updatePlaybackUI(state) {
         const cardPageId = card.dataset.pageId;
         const isPlayingThisCard = state.isPlaying && state.pageId === cardPageId;
         card.classList.toggle('playing', isPlayingThisCard);
+        
+        const iconElement = card.querySelector('.media-play-icon');
+        if (iconElement) {
+            iconElement.innerHTML = isPlayingThisCard ? '⏸️' : '▶️';
+        }
     });
 
     // Reveal mentioned cards
@@ -100,6 +109,8 @@ async function drawWaveform(canvas, audioSamples, options) {
     ctx.scale(dpr, dpr);
     ctx.clearRect(0, 0, canvasWidth, canvasHeight);
 
+    if (!audioSamples || audioSamples.length === 0) return;
+
     const barWidth = 2;
     const barGap = 1;
     const numBars = Math.floor(canvasWidth / (barWidth + barGap));
@@ -152,7 +163,7 @@ async function redrawAllVisibleWaveforms(playbackState = {}) {
         accentColor: getComputedStyle(domRefs.packetDetailView).getPropertyValue('--packet-color-accent').trim(),
         playedColor: getComputedStyle(domRefs.packetDetailView).getPropertyValue('--packet-color-progress-fill').trim(),
         linkColor: getComputedStyle(domRefs.packetDetailView).getPropertyValue('--packet-color-link-marker').trim(),
-        visitedLinkColor: '#81c995',
+        visitedLinkColor: '#81c995', // A pleasant green for visited links
         linkMarkersEnabled: settings.waveformLinkMarkersEnabled,
         visitedUrlsSet: new Set(currentDetailInstance.visitedUrls || [])
     };
@@ -272,7 +283,7 @@ export async function displayPacketContent(instance, currentPacketUrl) {
                         try {
                             const audioData = audioContent[0].content;
                             const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-                            const decodedData = await audioContext.decodeAudioData(audioData.slice(0));
+                            const decodedData = await audioContext.decodeAudioData(audioData.slice(0)); // Use slice(0) to create a copy
                             const samples = decodedData.getChannelData(0);
                             audioDataCache.set(`${instance.imageId}::${contentItem.pageId}`, samples);
                             
@@ -373,7 +384,7 @@ async function createContentCard(contentItem, visitedUrlsSet, visitedGeneratedId
 
     if (contentItem.type === 'alternative') {
         const settings = await storage.getSettings();
-        const preferAudio = settings.elevenlabsApiKey && contentItem.alternatives.some(a => a.type === 'media');
+        const preferAudio = settings.preferAudio && contentItem.alternatives.some(a => a.type === 'media');
 
         const chosenItem = preferAudio
             ? contentItem.alternatives.find(a => a.type === 'media')
@@ -393,7 +404,10 @@ async function createContentCard(contentItem, visitedUrlsSet, visitedGeneratedId
 
     if (type === 'external') {
         iconHTML = '🔗';
-        if (urlToOpen) isClickable = true;
+        if (urlToOpen) {
+            isClickable = true;
+            try { displayUrl = new URL(urlToOpen).hostname.replace(/^www\./, ''); } catch (e) { displayUrl = urlToOpen; }
+        }
         card.innerHTML = `<div class="card-icon">${iconHTML}</div><div class="card-text"><div class="card-title">${title}</div><div class="card-url">${displayUrl}</div>${relevance ? `<div class="card-relevance">${relevance}</div>` : ''}</div>`;
     } else if (type === 'generated') {
         iconHTML = '📄';
@@ -409,9 +423,14 @@ async function createContentCard(contentItem, visitedUrlsSet, visitedGeneratedId
         card.classList.add('media');
         if (contentItem.published) isClickable = true;
         else card.style.opacity = '0.7';
+        
         card.innerHTML = `
             <div class="media-waveform-container">
-                 <canvas class="waveform-canvas" style="width: 100%; height: 100%;"></canvas>
+                 <canvas class="waveform-canvas"></canvas>
+            </div>
+            <div class="media-play-icon">▶️</div>
+            <div class="card-text">
+                <div class="card-title">${title}</div>
             </div>`;
     }
 
@@ -427,8 +446,10 @@ async function createContentCard(contentItem, visitedUrlsSet, visitedGeneratedId
         }
     }
 
+    // A non-media card is visible if it's the summary page, has been visited, or has been mentioned.
+    const isSummaryPage = contentItem.relevance === 'A summary of the packet contents.';
     const isMentioned = contentItem.url && mentionedLinks.has(contentItem.url);
-    const isVisible = type === 'media' || isVisited || isMentioned;
+    const isVisible = type === 'media' || isSummaryPage || isVisited || isMentioned;
 
     if (!isVisible) {
         card.classList.add('hidden-by-rule');
@@ -492,32 +513,37 @@ function handleCloseTabGroup(tabGroupId) {
 }
 
 export async function stopAndClearActiveAudio() {
-    sendMessageToBackground({ action: 'stop_track' });
+    sendMessageToBackground({
+        action: 'request_playback_action',
+        data: { intent: 'stop' }
+    });
     await triggerImmediateSave();
 }
 
 export function stopAudioIfPacketDeleted(deletedPacketId) {
-    // This logic is now managed by the background script,
-    // but we can keep a client-side check just in case.
-    const playingCards = document.querySelectorAll('.card.media.playing');
-    playingCards.forEach(card => {
-        // A bit indirect, but if the instance was deleted, we won't have it.
-        if (!currentDetailInstance || currentDetailInstance.instanceId === deletedPacketId) {
-             card.classList.remove('playing');
-        }
-    });
+    if (currentDetailInstance && currentDetailInstance.instanceId === deletedPacketId) {
+         const playingCards = document.querySelectorAll('.card.media.playing');
+         playingCards.forEach(card => card.classList.remove('playing'));
+    }
 }
 
+// REVISED: Use the unified playback action request.
 async function playMediaInCard(card, contentItem, instance) {
     card.addEventListener('click', () => {
-        const isCurrentlyPlaying = card.classList.contains('playing');
+        const isThisCardPlaying = currentPlayingPageId === contentItem.pageId;
 
-        if (isCurrentlyPlaying) {
-            sendMessageToBackground({ action: 'pause_track' });
-        } else {
+        if (isThisCardPlaying) {
+            // If this card is the one playing, send a 'toggle' intent.
             sendMessageToBackground({
-                action: 'start_track',
+                action: 'request_playback_action',
+                data: { intent: 'toggle' }
+            });
+        } else {
+            // If a different card (or no card) is playing, send a 'play' intent for this specific track.
+            sendMessageToBackground({
+                action: 'request_playback_action',
                 data: {
+                    intent: 'play',
                     instanceId: instance.instanceId,
                     pageId: contentItem.pageId
                 }

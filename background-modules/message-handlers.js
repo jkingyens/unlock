@@ -1,4 +1,6 @@
 // ext/background-modules/message-handlers.js
+// REVISED: Replaced multiple playback handlers with a single, unified handler
+// for 'request_playback_action' to centralize playback logic.
 
 import {
     logger,
@@ -39,8 +41,6 @@ import {
     setMediaPlaybackState, 
     controlAudioInOffscreen, 
     activeMediaPlayback, 
-    hideMediaOverlay, 
-    showMediaOverlay 
 } from '../background.js';
 import { checkAndPromptForCompletion } from './navigation-handler.js';
 
@@ -218,9 +218,6 @@ async function handleOpenContent(data, sender, sendResponse) {
             await setPacketContext(resultingTabId, instanceId, packetUrlForContext, finalUrlToOpen);
         }
         
-        // --- THIS BLOCK IS REMOVED ---
-        // The onActivated listener in background.js now handles this reliably.
-        
         if (useTabGroups) {
             await tabGroupHandler.ensureTabInGroup(resultingTabId, instanceId);
 
@@ -300,6 +297,84 @@ async function handleSidebarReady(sender, sendResponse) {
 }
 
 
+// --- NEW: Unified Playback Action Handler ---
+async function handlePlaybackActionRequest(data, sender, sendResponse) {
+    const { intent, instanceId, pageId } = data;
+    const currentState = activeMediaPlayback;
+    
+    try {
+        switch (intent) {
+            case 'play':
+                if (!instanceId || !pageId) throw new Error('instanceId and pageId required for play intent.');
+                
+                const instance = await storage.getPacketInstance(instanceId);
+                if (!instance) throw new Error(`Could not find instance ${instanceId} to play track.`);
+
+                let contentItem = null;
+                for (const item of instance.contents) {
+                    if (item.pageId === pageId) { contentItem = item; break; }
+                    if (item.type === 'alternative' && item.alternatives) {
+                        const found = item.alternatives.find(alt => alt.pageId === pageId);
+                        if (found) { contentItem = found; break; }
+                    }
+                }
+                if (!contentItem) throw new Error(`Could not find track ${pageId} in packet.`);
+                
+                const cachedAudio = await indexedDbStorage.getGeneratedContent(instance.imageId, pageId);
+                if (!cachedAudio || !cachedAudio[0]?.content) throw new Error("Could not find cached audio data to play.");
+                
+                const audioB64 = arrayBufferToBase64(cachedAudio[0].content);
+
+                await controlAudioInOffscreen('play', {
+                    audioB64: audioB64, mimeType: contentItem.mimeType, pageId, instanceId
+                });
+
+                const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+                await setMediaPlaybackState({
+                    isPlaying: true, pageId, instanceId,
+                    topic: instance.topic,
+                    tabId: activeTab ? activeTab.id : null,
+                    mentionedMediaLinks: instance.mentionedMediaLinks || [],
+                    currentTime: 0, 
+                    duration: 0
+                });
+                break;
+            
+            case 'pause':
+                if (currentState.isPlaying) {
+                    await controlAudioInOffscreen('pause', {});
+                    await setMediaPlaybackState({ isPlaying: false });
+                }
+                break;
+            
+            case 'toggle':
+                if (!currentState.pageId) throw new Error('No active media to toggle.');
+                const newIsPlaying = !currentState.isPlaying;
+                await controlAudioInOffscreen('toggle', { pageId: currentState.pageId });
+                await setMediaPlaybackState({ isPlaying: newIsPlaying });
+                break;
+
+            case 'stop':
+                if (currentState.pageId) {
+                    await controlAudioInOffscreen('pause', {}); // Tell player to stop
+                    await setMediaPlaybackState({
+                        isPlaying: false, pageId: null, instanceId: null, topic: '',
+                        currentTime: 0, duration: 0, mentionedMediaLinks: []
+                    });
+                }
+                break;
+
+            default:
+                throw new Error(`Unknown playback intent: ${intent}`);
+        }
+        sendResponse({ success: true });
+    } catch (err) {
+        logger.error("MessageHandler:handlePlaybackActionRequest", `Error processing intent '${intent}'`, err);
+        sendResponse({ success: false, error: err.message });
+    }
+}
+
+
 // --- Main Message Router ---
 export function handleMessage(message, sender, sendResponse) {
     let isAsync = false;
@@ -309,129 +384,16 @@ export function handleMessage(message, sender, sendResponse) {
     }
 
     switch (message.action) {
+        // --- REVISED: Use unified playback handler, remove old handlers ---
+        case 'request_playback_action':
+            handlePlaybackActionRequest(message.data, sender, sendResponse);
+            isAsync = true;
+            break;
+
         case 'get_playback_state':
             sendResponse(activeMediaPlayback);
             break;
-        case 'start_track':
-            (async () => {
-                try {
-                    const { instanceId, pageId } = message.data;
-                    const instance = await storage.getPacketInstance(instanceId);
-                    const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-
-                    if (!instance) throw new Error('Could not find instance to play track.');
-
-                    // Find the media item, even if it's nested
-                    let contentItem = null;
-                    for (const item of instance.contents) {
-                        if (item.pageId === pageId) {
-                            contentItem = item;
-                            break;
-                        }
-                        if (item.type === 'alternative' && item.alternatives) {
-                            const found = item.alternatives.find(alt => alt.pageId === pageId);
-                            if (found) {
-                                contentItem = found;
-                                break;
-                            }
-                        }
-                    }
-                    
-                    if (!contentItem) throw new Error('Could not find track content item in packet.');
-
-                    const cachedAudio = await indexedDbStorage.getGeneratedContent(instance.imageId, pageId);
-                    if (!cachedAudio || !cachedAudio[0]?.content) {
-                        throw new Error("Could not find cached audio data to play.");
-                    }
-                    
-                    const audioB64 = arrayBufferToBase64(cachedAudio[0].content);
-
-                    await controlAudioInOffscreen('play', {
-                        audioB64: audioB64,
-                        mimeType: contentItem.mimeType,
-                        pageId,
-                        instanceId
-                    });
-
-                    setMediaPlaybackState({
-                        isPlaying: true,
-                        pageId,
-                        instanceId,
-                        topic: instance.topic,
-                        tabId: activeTab ? activeTab.id : null,
-                        mentionedMediaLinks: instance.mentionedMediaLinks || []
-                    });
-                    
-                    sendResponse({ success: true });
-                } catch (err) {
-                    logger.error("MessageHandler:start_track", "Error starting track", err);
-                    sendResponse({ success: false, error: err.message });
-                }
-            })();
-            isAsync = true;
-            break;
-
-        case 'pause_track':
-             (async () => {
-                try {
-                    if (activeMediaPlayback.isPlaying) {
-                        await controlAudioInOffscreen('pause', {});
-                        setMediaPlaybackState({ isPlaying: false });
-                    }
-                    sendResponse({ success: true });
-                } catch(err) {
-                    logger.error("MessageHandler:pause_track", "Error pausing track", err);
-                    sendResponse({ success: false, error: err.message });
-                }
-             })();
-             isAsync = true;
-             break;
         
-        case 'stop_track':
-            (async () => {
-                try {
-                    if (activeMediaPlayback.pageId) {
-                        await controlAudioInOffscreen('pause', {}); // Tell player to pause
-                        // Now, fully reset the state
-                        setMediaPlaybackState({
-                            isPlaying: false,
-                            pageId: null,
-                            instanceId: null,
-                            topic: '',
-                            tabId: null,
-                            currentTime: 0,
-                            duration: 0,
-                            mentionedMediaLinks: []
-                        });
-                    }
-                    sendResponse({ success: true });
-                } catch(err) {
-                    logger.error("MessageHandler:stop_track", "Error stopping track", err);
-                    sendResponse({ success: false, error: err.message });
-                }
-            })();
-            isAsync = true;
-            break;
-
-        case 'toggle_media_playback':
-            (async () => {
-                try {
-                    if (!activeMediaPlayback.pageId) {
-                        throw new Error('No active media to toggle.');
-                    }
-                    const newIsPlaying = !activeMediaPlayback.isPlaying;
-                    await controlAudioInOffscreen('toggle', { pageId: activeMediaPlayback.pageId });
-                    
-                    setMediaPlaybackState({ isPlaying: newIsPlaying });
-                    
-                    sendResponse({ success: true, newState: newIsPlaying });
-                } catch (error) {
-                    logger.error("MessageHandler", "Error toggling media playback", error);
-                    sendResponse({ success: false, error: error.message });
-                }
-            })();
-            isAsync = true;
-            break;
         case 'open_sidebar_and_navigate':
             (async () => {
                 try {
@@ -452,12 +414,7 @@ export function handleMessage(message, sender, sendResponse) {
             })();
             isAsync = true;
             break;
-        case 'control_audio':
-            controlAudioInOffscreen(message.data.command, message.data.data)
-                .then(sendResponse)
-                .catch(err => sendResponse({ success: false, error: err.message }));
-            isAsync = true;
-            break;
+
         case 'audio_time_update':
             // Instead of forwarding, update the central state and let it broadcast
             if (activeMediaPlayback.pageId === message.data.pageId) {
@@ -647,10 +604,7 @@ export function handleMessage(message, sender, sendResponse) {
                         return;
                     }
                     
-                    if (activeMediaPlayback.tabId) {
-                        hideMediaOverlay(activeMediaPlayback.tabId);
-                    }
-                    setMediaPlaybackState({ isPlaying: false, pageId: null, instanceId: null, topic: '', tabId: null });
+                    await setMediaPlaybackState({ isPlaying: false, pageId: null, instanceId: null, topic: '', tabId: null, currentTime: 0, duration: 0 });
                     
                     const visitResult = await packetUtils.markPageIdAsVisited(instanceId, pageId);
 

@@ -1,8 +1,7 @@
 // ext/background.js - Main service worker entry point (Global Side Panel Mode)
-// REVISED: Uses declarativeNetRequest via rule-manager.js instead of onBeforeNavigate.
-// REVISED: Sets up a chrome.alarms trigger to periodically refresh redirect rules.
-// REVISED: Calls ruleManager.refreshAllRules on startup and install.
-// REVISED: Adds state management for media playback to control a content script overlay.
+// REVISED: Added proactive state synchronization on startup to fix stale overlay issue.
+// REVISED: The onActivated listener now passes an 'animate' flag to the overlay.
+// REVISED: Centralized all playback and overlay visibility logic into setMediaPlaybackState.
 
 // --- Imports ---
 import {
@@ -33,9 +32,8 @@ const AUDIO_KEEP_ALIVE_ALARM = 'audio-keep-alive';
 
 // In-memory map for interim context transfer
 export let interimContextMap = new Map();
-let pendingOverlayTabs = new Set(); // Defer overlay injection for loading tabs
 
-// --- NEW: State for Dynamic Island Feature ---
+// --- REVISED: State for Dynamic Island Feature ---
 export let activeMediaPlayback = {
     tabId: null,
     instanceId: null,
@@ -51,14 +49,13 @@ export let activeMediaPlayback = {
 // Rule refresh alarm name
 const RULE_REFRESH_ALARM_NAME = 'refreshRedirectRules';
 
-// --- FIX: Centralize all timer logic here ---
+// --- Centralized timer logic ---
 const pendingVisitTimers = new Map();
 
 function clearPendingVisitTimer(tabId) {
     if (pendingVisitTimers.has(tabId)) {
         clearTimeout(pendingVisitTimers.get(tabId));
         pendingVisitTimers.delete(tabId);
-        logger.log(`[Background] Cleared pending visit timer for tab ${tabId}.`);
     }
 }
 
@@ -97,8 +94,6 @@ async function handleTabVisit(tabId, url) {
         pendingVisitTimers.set(tabId, visitTimer);
     }
 }
-// --- FIX END ---
-
 
 // --- Helper: Initialize Storage ---
 async function initializeStorageAndSettings() {
@@ -157,43 +152,43 @@ export async function controlAudioInOffscreen(command, data) {
     }
 }
 
-// --- NEW Broadcasting Function ---
-function broadcastPlaybackState() {
-    // Notify the sidebar
-    sidebarHandler.notifySidebar('playback_state_updated', activeMediaPlayback);
-
-    // Notify the active content script overlay
-    if (activeMediaPlayback.tabId) {
-        chrome.tabs.sendMessage(activeMediaPlayback.tabId, {
-            action: 'playback_state_updated',
-            data: activeMediaPlayback
-        }).catch(e => { /* Ignore if content script isn't there */ });
+// --- NEW: Universal Script Injection ---
+async function injectOverlayScripts(tabId) {
+    try {
+        await chrome.scripting.executeScript({
+            target: { tabId: tabId },
+            files: ['overlay.js']
+        });
+        await chrome.scripting.insertCSS({
+            target: { tabId: tabId },
+            files: ['overlay.css']
+        });
+    } catch (e) {
+        // This is expected to fail on chrome:// pages, store pages, etc. We can safely ignore these errors.
     }
 }
 
-// --- Dynamic Island Overlay Logic ---
-export async function setMediaPlaybackState(newState) {
+
+// --- REVISED & CENTRALIZED: State Management and Broadcasting ---
+export async function setMediaPlaybackState(newState, options = { animate: false }) {
     const oldLink = activeMediaPlayback.lastMentionedLink;
-    // Clear lastMentionedLink from newState to ensure it's recalculated
     const { lastMentionedLink, ...restOfNewState } = newState;
+    const previousTabId = activeMediaPlayback.tabId;
+
+    // 1. Update the central state object
     activeMediaPlayback = { ...activeMediaPlayback, ...restOfNewState };
 
+    // 2. Recalculate derived state (e.g., mentioned links)
     if (activeMediaPlayback.isPlaying && activeMediaPlayback.instanceId && activeMediaPlayback.pageId && typeof activeMediaPlayback.currentTime === 'number') {
         try {
             const instance = await storage.getPacketInstance(activeMediaPlayback.instanceId);
             let mediaItem = null;
             if (instance && instance.contents) {
                 for (const item of instance.contents) {
-                    if (item.pageId === activeMediaPlayback.pageId) {
-                        mediaItem = item;
-                        break;
-                    }
+                    if (item.pageId === activeMediaPlayback.pageId) { mediaItem = item; break; }
                     if (item.type === 'alternative' && item.alternatives) {
                         const found = item.alternatives.find(alt => alt.pageId === activeMediaPlayback.pageId);
-                        if (found) {
-                            mediaItem = found;
-                            break;
-                        }
+                        if (found) { mediaItem = found; break; }
                     }
                 }
             }
@@ -230,122 +225,50 @@ export async function setMediaPlaybackState(newState) {
         }
     }
 
-
     const isPlaying = activeMediaPlayback.isPlaying;
     const hasActiveTrack = !!activeMediaPlayback.pageId;
 
-    // --- ALARM LOGIC ---
+    // Handle keep-alive alarm
     if (!isPlaying && hasActiveTrack) {
         chrome.alarms.create(AUDIO_KEEP_ALIVE_ALARM, { periodInMinutes: 0.4 });
     } else {
         chrome.alarms.clear(AUDIO_KEEP_ALIVE_ALARM);
     }
 
-    // --- PERSISTENCE LOGIC ---
+    // Handle session persistence
     if (hasActiveTrack) {
         await storage.setSession({ [ACTIVE_MEDIA_KEY]: activeMediaPlayback });
     } else {
         await storage.removeSession(ACTIVE_MEDIA_KEY);
     }
+
+    // 3. NEW: Determine overlay visibility within this function
+    const { isSidebarOpen } = await storage.getSession({ isSidebarOpen: false });
+    const isVisible = hasActiveTrack && !isSidebarOpen;
+
+    // 4. Construct the complete state payload, including the animation flag
+    const finalState = { ...activeMediaPlayback, isVisible, animate: options.animate };
     
-    // --- BROADCAST LOGIC ---
-    broadcastPlaybackState();
-}
-
-export async function showMediaOverlay(tabId, topic, instanceId, isPlaying, options = {}) {
-    if (typeof tabId !== 'number') return;
-    try {
-        await chrome.scripting.executeScript({
-            target: { tabId: tabId },
-            files: ['overlay.js']
-        });
-        await chrome.scripting.insertCSS({
-            target: { tabId: tabId },
-            files: ['overlay.css']
-        });
-        
-        chrome.tabs.sendMessage(tabId, {
-            action: 'show_overlay',
-            data: { 
-                topic: topic, 
-                instanceId: instanceId,
-                isPlaying: isPlaying,
-                animate: options.animate !== false // Animate by default
-            }
-        });
-        logger.log('Background', 'Injected and showed media overlay.', { tabId, topic, options });
-    } catch (e) {
-        if (!e.message.toLowerCase().includes('frame with id 0 was not found') && !e.message.toLowerCase().includes('cannot access contents of the page')) {
-            logger.error('Background', 'Failed to inject media overlay script.', { tabId, error: e });
-        }
+    // 5. Broadcast the final, complete state
+    // If the active tab has changed, hide the overlay on the old tab
+    if (previousTabId && previousTabId !== activeMediaPlayback.tabId) {
+         chrome.tabs.sendMessage(previousTabId, {
+            action: 'sync_overlay_state',
+            data: { isVisible: false } // A minimal message to hide it
+        }).catch(e => {}); // Ignore errors, tab might be closed
     }
-}
 
-export async function hideMediaOverlay(tabId) {
-    if (typeof tabId !== 'number') return;
-    try {
-        // This now just sets visibility to false, doesn't destroy.
-        chrome.tabs.sendMessage(tabId, { action: 'set_overlay_visibility', data: { visible: false } });
-        logger.log('Background', 'Sent hide message to media overlay.', { tabId });
-    } catch (e) {
-        if (!e.message.toLowerCase().includes('could not establish connection')) {
-            logger.warn('Background', 'Could not send hide message to media overlay (tab may be closed).', { tabId, error: e });
-        }
+    // Always send the latest state to the current active tab
+    if (activeMediaPlayback.tabId) {
+        chrome.tabs.sendMessage(activeMediaPlayback.tabId, {
+            action: 'sync_overlay_state',
+            data: finalState
+        }).catch(e => {}); // Ignore errors, script might not be injected yet
     }
-}
-
-
-// --- REVISED: Listener for sidebar connection ---
-chrome.runtime.onConnect.addListener(async (port) => {
-  if (port.name === 'sidebar') {
-    await storage.setSession({ isSidebarOpen: true });
-    logger.log('Background', 'Sidebar connected, set session state to OPEN.');
     
-    if (activeMediaPlayback.pageId && activeMediaPlayback.tabId) {
-        // Just hide the overlay, don't destroy it.
-        chrome.tabs.sendMessage(activeMediaPlayback.tabId, { action: 'set_overlay_visibility', data: { visible: false } });
-    }
-
-    try {
-        const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-        if (tabs[0] && tabs[0].id) {
-            await sidebarHandler.updateActionForTab(tabs[0].id);
-        }
-    } catch (error) {
-        logger.error('Background', 'Error updating action on sidebar connect', error);
-    }
-
-    port.onDisconnect.addListener(async () => {
-      await storage.setSession({ isSidebarOpen: false });
-      logger.log('Background', 'Sidebar disconnected, set session state to CLOSED.');
-
-      if (activeMediaPlayback.pageId && activeMediaPlayback.tabId) {
-          // Check if the script is already there before trying to show/inject.
-          try {
-              await chrome.tabs.sendMessage(activeMediaPlayback.tabId, { action: 'set_overlay_visibility', data: { visible: true } });
-          } catch(e) {
-              // If sending fails, the content script is likely gone. Re-inject.
-              logger.log('Background', 'Overlay content script not found, re-injecting.');
-              showMediaOverlay(
-                  activeMediaPlayback.tabId, 
-                  activeMediaPlayback.topic, 
-                  activeMediaPlayback.instanceId,
-                  activeMediaPlayback.isPlaying
-              );
-          }
-      }
-      
-      try {
-        const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-        if (tabs[0] && tabs[0].id) {
-          await sidebarHandler.updateActionForTab(tabs[0].id);
-        }
-      } catch (error) {
-        logger.error('Background', 'Error updating action on sidebar disconnect', error);
-      }
-    });
-  }
-});
+    // Also notify the sidebar
+    sidebarHandler.notifySidebar('playback_state_updated', activeMediaPlayback);
+}
 
 
 // --- Garbage Collection ---
@@ -599,16 +522,71 @@ async function restoreMediaStateOnStartup() {
     }
 }
 
+async function cleanupStuckCreatingPackets() {
+    logger.log('Background:CleanupStuck', 'Starting cleanup of old "creating" state packets...');
+    const STUCK_THRESHOLD_MS = 2 * 60 * 60 * 1000; // 2 hours
+
+    try {
+        const allInstances = await storage.getPacketInstances();
+        const now = Date.now();
+        let stuckPacketsFound = 0;
+        let cleanedCount = 0;
+        for (const instanceId in allInstances) {
+            const instance = allInstances[instanceId];
+            if (instance && instance.status === 'creating') {
+                stuckPacketsFound++;
+                const createdTime = new Date(instance.created || instance.instantiated || 0).getTime();
+                if ((now - createdTime) > STUCK_THRESHOLD_MS) {
+                    logger.warn('Background:CleanupStuck', `Found stuck "creating" packet: ${instanceId} (Topic: ${instance.topic || 'N/A'}), created at ${new Date(createdTime).toISOString()}. Attempting cleanup.`);
+                    const imageId = instance.imageId;
+                    await storage.deletePacketInstance(instanceId);
+                    logger.log('Background:CleanupStuck', `Deleted PacketInstance: ${instanceId}`);
+                    await storage.deletePacketBrowserState(instanceId).catch(e => logger.warn('Background:CleanupStuck', `Error deleting browser state for ${instanceId}`, e));
+                    if (imageId) {
+                        const remainingInstancesForImage = await storage.getInstanceCountForImage(imageId);
+                        if (remainingInstancesForImage === 0) {
+                            logger.log('Background:CleanupStuck', `No other instances use image ${imageId}. Deleting image and its IDB content.`);
+                            await storage.deletePacketImage(imageId).catch(e => logger.warn('Background:CleanupStuck', `Error deleting packet image ${imageId}`, e));
+                            await indexedDbStorage.deleteGeneratedContentForImage(imageId).catch(e => logger.warn('Background:CleanupStuck', `Error deleting IDB content for image ${imageId}`, e));
+                        }
+                    }
+                    await ruleManager.removePacketRules(instanceId); // Also remove rules for the stuck packet
+                    cleanedCount++;
+                    try { chrome.runtime.sendMessage({ action: 'packet_instance_deleted', data: { packetId: instanceId, source: 'stuck_creation_cleanup' } }); } catch (e) { /* ignore */ }
+                }
+            }
+        }
+        if (stuckPacketsFound === 0) logger.log('Background:CleanupStuck', 'No packets currently in "creating" state found.');
+        else if (cleanedCount > 0) logger.log('Background:CleanupStuck', `Cleanup finished. Removed ${cleanedCount} stuck "creating" packets.`);
+        else logger.log('Background:CleanupStuck', 'Cleanup finished. No "creating" packets were old enough to be removed with the current threshold.');
+    } catch (error) {
+        logger.error('Background:CleanupStuck', 'Error during cleanup of stuck creating packets', error);
+    }
+}
+
 
 // --- Event Listeners ---
 chrome.runtime.onInstalled.addListener(async (details) => {
     logger.log('Background:onInstalled', `Extension ${details.reason}`);
     await initializeStorageAndSettings();
-    await restoreMediaStateOnStartup(); // Restore state
+    await restoreMediaStateOnStartup();
     await cloudStorage.initialize().catch(err => logger.error('Background:onInstalled', 'Initial cloud storage init failed', err));
     await ruleManager.refreshAllRules();
 
     attachNavigationListeners();
+
+    // Universal script injection and state sync on install/reload
+    const tabs = await chrome.tabs.query({ url: ["http://*/*", "https://*/*"] });
+    for (const tab of tabs) {
+        if (tab.id) {
+            injectOverlayScripts(tab.id);
+            // FIX: Proactively send the initial (empty) state to fix stale overlays
+            chrome.tabs.sendMessage(tab.id, {
+                action: 'sync_overlay_state',
+                data: { ...activeMediaPlayback, isVisible: false }
+            }).catch(e => {});
+        }
+    }
 
     if (await shouldUseTabGroups()) {
          logger.log('Background:onInstalled', 'Tab Groups enabled, starting reorder checks.');
@@ -642,7 +620,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
 chrome.runtime.onStartup.addListener(async () => {
      logger.log('Background:onStartup', 'Browser startup detected.');
      await initializeStorageAndSettings();
-     await restoreMediaStateOnStartup(); // Restore state
+     await restoreMediaStateOnStartup();
      
      logger.log('Background:onStartup', 'Running immediate startup tasks...');
      try {
@@ -655,6 +633,17 @@ chrome.runtime.onStartup.addListener(async () => {
          await cleanupStuckCreatingPackets();
 
          attachNavigationListeners();
+         
+         // FIX: Sync state with existing tabs on browser startup
+         const tabs = await chrome.tabs.query({ url: ["http://*/*", "https://*/*"] });
+         for (const tab of tabs) {
+             if (tab.id) {
+                 chrome.tabs.sendMessage(tab.id, {
+                     action: 'sync_overlay_state',
+                     data: { ...activeMediaPlayback, isVisible: false }
+                 }).catch(e => {});
+             }
+         }
 
          if (await shouldUseTabGroups()) {
              logger.log('Background:onStartup', 'Tab Groups enabled, starting reorder checks.');
@@ -677,7 +666,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return msgHandler.handleMessage(message, sender, sendResponse);
 });
 
-// --- External Message Listener ---
 chrome.runtime.onMessageExternal.addListener(async (message, sender, sendResponse) => {
     const logPrefix = '[Unpack Background:onMessageExternal]';
     logger.log(logPrefix, 'Received external message', { message, sender });
@@ -746,66 +734,21 @@ chrome.tabs.onCreated.addListener(async (newTab) => {
 });
 
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
-    if (changeInfo.status === 'complete' && pendingOverlayTabs.has(tabId)) {
-        pendingOverlayTabs.delete(tabId);
-        const logPrefix = `[Unpack Background:onUpdated Tab ${tabId}]`;
-        logger.log(logPrefix, 'Tab finished loading, attempting deferred overlay update.');
-
-        if (activeMediaPlayback.pageId && activeMediaPlayback.tabId === tabId) {
-             const { isSidebarOpen } = await storage.getSession({ isSidebarOpen: false });
-             if (!isSidebarOpen) {
-                 // Try to message first in case the script is already there from a previous navigation
-                 try {
-                    await chrome.tabs.sendMessage(tabId, { action: 'set_overlay_visibility', data: { visible: true } });
-                    logger.log(logPrefix, 'Overlay already existed on deferred tab, set visibility.');
-                 } catch (e) {
-                    logger.log(logPrefix, 'Overlay does not exist on deferred tab, injecting now.');
-                    showMediaOverlay(
-                        tabId,
-                        activeMediaPlayback.topic,
-                        activeMediaPlayback.instanceId,
-                        activeMediaPlayback.isPlaying,
-                        { animate: false }
-                    );
-                 }
-             }
-        } else {
-             logger.log(logPrefix, 'Playback state changed since injection was deferred. Aborting.');
-        }
+    if (changeInfo.status === 'complete' && tab.url && (tab.url.startsWith('http') || tab.url.startsWith('file'))) {
+        injectOverlayScripts(tabId);
     }
 });
 
+// REVISED: Centralized state update on activation, now with animation hint
 chrome.tabs.onActivated.addListener(async (activeInfo) => {
     const tabId = activeInfo.tabId;
     const logPrefix = `[Unpack Background:onActivated Tab ${tabId}]`;
     
-    if (activeMediaPlayback.pageId && activeMediaPlayback.tabId !== tabId) {
-        logger.log(logPrefix, 'Active tab changed during media playback. Transferring overlay.');
-        const oldTabId = activeMediaPlayback.tabId;
-        await setMediaPlaybackState({ tabId: tabId });
-        const { isSidebarOpen } = await storage.getSession({ isSidebarOpen: false });
-
-        if (!isSidebarOpen) {
-            hideMediaOverlay(oldTabId);
-            try {
-                const tab = await chrome.tabs.get(tabId);
-                if (tab.status === 'complete') {
-                    logger.log(logPrefix, 'New tab is complete, attempting to show overlay immediately.');
-                    showMediaOverlay(
-                        tabId,
-                        activeMediaPlayback.topic,
-                        activeMediaPlayback.instanceId,
-                        activeMediaPlayback.isPlaying,
-                        { animate: false }
-                    );
-                } else {
-                    logger.log(logPrefix, `New tab is still loading (status: ${tab.status}). Deferring overlay injection.`);
-                    pendingOverlayTabs.add(tabId);
-                }
-            } catch (error) {
-                logger.error(logPrefix, 'Error getting tab status during activation, cannot transfer overlay.', error);
-            }
-        }
+    // Update the tabId in the central state and trigger a broadcast.
+    // This ensures the overlay moves correctly and has the right visibility.
+    if (activeMediaPlayback.pageId) {
+        // Pass the animate flag because this is a tab switch
+        await setMediaPlaybackState({ tabId: tabId }, { animate: true });
     }
 
     if (typeof tabId !== 'number') { logger.warn(logPrefix, 'Exiting: Invalid tabId.', activeInfo); return; }
@@ -861,7 +804,6 @@ chrome.tabs.onRemoved.addListener(async (tabId, removeInfo) => {
     const logPrefix = `[Unpack Background:onRemoved Tab ${tabId}]`;
     logger.log(logPrefix, 'Tab removed');
     
-    pendingOverlayTabs.delete(tabId);
     clearPendingVisitTimer(tabId);
 
     if (interimContextMap.has(tabId)) {
@@ -878,6 +820,8 @@ chrome.tabs.onRemoved.addListener(async (tabId, removeInfo) => {
 
 chrome.tabs.onReplaced.addListener(async (addedTabId, removedTabId) => {
     logger.log('Background:onReplaced', 'Tab replaced', { addedTabId, removedTabId });
+    injectOverlayScripts(addedTabId); // Inject into the new tab
+
     if (interimContextMap.has(removedTabId)) {
         interimContextMap.delete(removedTabId);
         logger.log(`Background:onReplaced`, `Removed interim context from MAP for replaced tab ${removedTabId}.`);
@@ -928,7 +872,7 @@ chrome.tabs.onReplaced.addListener(async (addedTabId, removedTabId) => {
     }
 });
 
-// --- REVISED: Single, consolidated tabGroups.onUpdated listener ---
+// REVISED: Single, consolidated tabGroups.onUpdated listener
 chrome.tabGroups.onUpdated.addListener(async (group) => {
     if (!group.title) {
         logger.log('Background:tabGroups.onUpdated', `Skipping group update for Group ${group.id} because title is empty.`);
@@ -969,9 +913,6 @@ chrome.tabGroups.onUpdated.addListener(async (group) => {
                 logger.warn('Background:tabGroups.onUpdated', `Expanded group ${group.id} does not have a valid packet title format.`);
             }
 
-            // When a group is expanded, check if the active tab belongs to this group
-            // and recompute the badge state for it. This ensures we don't act on
-            // an unrelated active tab from a different group.
             try {
                 const [activeTab] = await chrome.tabs.query({ active: true, windowId: group.windowId });
                 if (activeTab && activeTab.groupId === group.id) {
@@ -990,49 +931,6 @@ chrome.tabGroups.onUpdated.addListener(async (group) => {
     }
 });
 
-async function cleanupStuckCreatingPackets() {
-    logger.log('Background:CleanupStuck', 'Starting cleanup of old "creating" state packets...');
-    const STUCK_THRESHOLD_MS = 2 * 60 * 1000; // 2 hours
-
-    try {
-        const allInstances = await storage.getPacketInstances();
-        const now = Date.now();
-        let stuckPacketsFound = 0;
-        let cleanedCount = 0;
-        for (const instanceId in allInstances) {
-            const instance = allInstances[instanceId];
-            if (instance && instance.status === 'creating') {
-                stuckPacketsFound++;
-                const createdTime = new Date(instance.created || instance.instantiated || 0).getTime();
-                if ((now - createdTime) > STUCK_THRESHOLD_MS) {
-                    logger.warn('Background:CleanupStuck', `Found stuck "creating" packet: ${instanceId} (Topic: ${instance.topic || 'N/A'}), created at ${new Date(createdTime).toISOString()}. Attempting cleanup.`);
-                    const imageId = instance.imageId;
-                    await storage.deletePacketInstance(instanceId);
-                    logger.log('Background:CleanupStuck', `Deleted PacketInstance: ${instanceId}`);
-                    await storage.deletePacketBrowserState(instanceId).catch(e => logger.warn('Background:CleanupStuck', `Error deleting browser state for ${instanceId}`, e));
-                    if (imageId) {
-                        const remainingInstancesForImage = await storage.getInstanceCountForImage(imageId);
-                        if (remainingInstancesForImage === 0) {
-                            logger.log('Background:CleanupStuck', `No other instances use image ${imageId}. Deleting image and its IDB content.`);
-                            await storage.deletePacketImage(imageId).catch(e => logger.warn('Background:CleanupStuck', `Error deleting packet image ${imageId}`, e));
-                            await indexedDbStorage.deleteGeneratedContentForImage(imageId).catch(e => logger.warn('Background:CleanupStuck', `Error deleting IDB content for image ${imageId}`, e));
-                        }
-                    }
-                    await ruleManager.removePacketRules(instanceId); // Also remove rules for the stuck packet
-                    cleanedCount++;
-                    try { chrome.runtime.sendMessage({ action: 'packet_instance_deleted', data: { packetId: instanceId, source: 'stuck_creation_cleanup' } }); } catch (e) { /* ignore */ }
-                }
-            }
-        }
-        if (stuckPacketsFound === 0) logger.log('Background:CleanupStuck', 'No packets currently in "creating" state found.');
-        else if (cleanedCount > 0) logger.log('Background:CleanupStuck', `Cleanup finished. Removed ${cleanedCount} stuck "creating" packets.`);
-        else logger.log('Background:CleanupStuck', 'Cleanup finished. No "creating" packets were old enough to be removed with the current threshold.');
-    } catch (error) {
-        logger.error('Background:CleanupStuck', 'Error during cleanup of stuck creating packets', error);
-    }
-}
-
-// Function to attach/re-attach all web navigation listeners
 function attachNavigationListeners() {
     if (!chrome.webNavigation) { logger.error('Background', 'WebNavigation API not available.'); return; }
 
@@ -1052,6 +950,22 @@ function attachNavigationListeners() {
 
     logger.log('Background', 'Core WebNavigation listeners (onCommitted, onHistoryStateUpdated) attached/re-attached.');
 }
+
+// --- REVISED: Sidebar connect/disconnect now uses the central state function ---
+chrome.runtime.onConnect.addListener(async (port) => {
+  if (port.name === 'sidebar') {
+    await storage.setSession({ isSidebarOpen: true });
+    logger.log('Background', 'Sidebar connected, triggering state update.');
+    await setMediaPlaybackState({}, { animate: false }); // Trigger re-evaluation, no animation
+
+    port.onDisconnect.addListener(async () => {
+      await storage.setSession({ isSidebarOpen: false });
+      logger.log('Background', 'Sidebar disconnected, triggering state update.');
+      await setMediaPlaybackState({}, { animate: true }); // Trigger re-evaluation, animate if showing
+    });
+  }
+});
+
 
 // --- Immediate Actions on Service Worker Start ---
 (async () => {

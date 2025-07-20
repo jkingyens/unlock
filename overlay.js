@@ -1,4 +1,8 @@
 // ext/overlay.js
+// REVISED: This script is now a passive, state-driven view.
+// It is injected universally and waits for 'sync_overlay_state' messages
+// from the background script to build, update, or hide itself.
+// REVISED: It now checks for an 'animate' flag to trigger the glide-in animation.
 
 (() => {
     // If this script has already been injected, do nothing.
@@ -13,17 +17,15 @@
     let currentInstanceId = null;
     let isPlaying = true;
     let lastShownLinkUrl = null;
-    let justShown = false; // Guard to prevent immediate hiding
 
-    // --- Core Functions ---
+    // --- Core UI Management Functions ---
 
-    function buildOverlay(topic, instanceId) {
+    function buildOverlayIfNeeded() {
         if (document.getElementById(OVERLAY_ID)) return; // Already built
-
-        currentInstanceId = instanceId;
 
         const container = document.createElement('div');
         container.id = OVERLAY_ID;
+        // The shadow root isolates the overlay's CSS from the host page.
         const shadowRoot = container.attachShadow({ mode: 'open' });
 
         shadowRoot.innerHTML = `
@@ -36,7 +38,7 @@
                     <div class="unlock-overlay-bars">
                         <div class="bar"></div><div class="bar"></div><div class="bar"></div><div class="bar"></div>
                     </div>
-                    <div class="unlock-overlay-text">${topic || 'Playing Packet'}</div>
+                    <div class="unlock-overlay-text">Playing Packet</div>
                 </div>
             </div>
         `;
@@ -47,72 +49,86 @@
         const overlay = shadowRoot.getElementById('unlock-media-overlay');
         const playPauseBtn = shadowRoot.querySelector('.unlock-overlay-play-pause-btn');
 
+        // REVISED: Send a unified action request instead of a specific command.
         playPauseBtn.addEventListener('click', (e) => {
             e.stopPropagation();
-            chrome.runtime.sendMessage({ action: 'toggle_media_playback' });
+            chrome.runtime.sendMessage({
+                action: 'request_playback_action',
+                data: { intent: 'toggle' }
+            });
         });
         
         overlay.addEventListener('click', () => {
-            chrome.runtime.sendMessage({ 
-                action: 'open_sidebar_and_navigate',
-                data: {
-                    targetView: 'packet-detail',
-                    instanceId: currentInstanceId
-                }
-            });
+            if (currentInstanceId) {
+                chrome.runtime.sendMessage({ 
+                    action: 'open_sidebar_and_navigate',
+                    data: {
+                        targetView: 'packet-detail',
+                        instanceId: currentInstanceId
+                    }
+                });
+            }
         });
     }
 
-    function setOverlayVisibility(visible) {
-        if (!visible && justShown) {
-            return; // Ignore hide command right after being shown
-        }
-        const overlay = document.getElementById(OVERLAY_ID)?.shadowRoot?.getElementById('unlock-media-overlay');
-        if (overlay) {
-            overlay.classList.toggle('visible', visible);
-        }
-    }
-    
-    function destroyOverlay() {
-        const container = document.getElementById(OVERLAY_ID);
-        if (container) {
-            container.remove();
-        }
-        window.unlockOverlayInjected = false; // Allow re-injection next time
-    }
-
-    function updatePlaybackState(state) {
+    function updateOverlayUI(state) {
         const shadowRoot = document.getElementById(OVERLAY_ID)?.shadowRoot;
         if (!shadowRoot) return;
-
+        
+        currentInstanceId = state.instanceId;
         isPlaying = state.isPlaying;
-        const btn = shadowRoot.querySelector('.unlock-overlay-play-pause-btn');
-        const bars = shadowRoot.querySelector('.unlock-overlay-bars');
 
+        // Update topic text
+        const textElement = shadowRoot.querySelector('.unlock-overlay-text');
+        if (textElement && state.topic) {
+            textElement.textContent = state.topic;
+        }
+
+        // Update play/pause button icon
+        const btn = shadowRoot.querySelector('.unlock-overlay-play-pause-btn');
         if (btn) {
             btn.innerHTML = `<div class="icon ${isPlaying ? 'pause-icon' : 'play-icon'}"></div>`;
         }
+
+        // Update animation of the "dancing bars"
+        const bars = shadowRoot.querySelector('.unlock-overlay-bars');
         if (bars) {
             bars.querySelectorAll('.bar').forEach(bar => {
                 bar.style.animationPlayState = isPlaying ? 'running' : 'paused';
             });
         }
 
+        // Update link mention display
         if (state.lastMentionedLink && state.lastMentionedLink.url !== lastShownLinkUrl) {
             lastShownLinkUrl = state.lastMentionedLink.url;
             showLinkMention(state.lastMentionedLink);
         } else if (!state.lastMentionedLink && lastShownLinkUrl) {
-            // If playback seeks backward, clear the link mention
+            // If playback seeks backward or link is gone, clear the mention
             lastShownLinkUrl = null;
             const existingMention = shadowRoot.querySelector('.unlock-overlay-link-mention');
             if (existingMention) existingMention.remove();
         }
     }
 
+    function setOverlayVisibility(visible, animate) {
+        const overlay = document.getElementById(OVERLAY_ID)?.shadowRoot?.getElementById('unlock-media-overlay');
+        if (overlay) {
+            if (animate) {
+                // Add a class to trigger the animation, then remove it so it can be re-triggered later.
+                overlay.classList.add('animate-in');
+                setTimeout(() => {
+                    overlay.classList.remove('animate-in');
+                }, 500); // Duration should be longer than the CSS transition
+            }
+            overlay.classList.toggle('visible', visible);
+        }
+    }
+    
     function showLinkMention(link) {
         const overlay = document.getElementById(OVERLAY_ID)?.shadowRoot?.getElementById('unlock-media-overlay');
         if (!overlay) return;
 
+        // Remove any existing mention before showing a new one
         const existingMention = overlay.querySelector('.unlock-overlay-link-mention');
         if (existingMention) {
             existingMention.remove();
@@ -140,27 +156,23 @@
         overlay.appendChild(linkMention);
     }
 
-    // --- Message Listener ---
+    // --- REVISED: Single Message Listener with Animation Logic ---
     chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-        switch (message.action) {
-            case 'show_overlay':
-                buildOverlay(message.data.topic, message.data.instanceId, message.data);
-                updatePlaybackState(message.data);
-                setOverlayVisibility(message.data.animate !== false);
-                justShown = true;
-                setTimeout(() => { justShown = false; }, 500); // Guard for 500ms
-                break;
-            case 'set_overlay_visibility':
-                setOverlayVisibility(message.data.visible);
-                break;
-            case 'destroy_overlay':
-                destroyOverlay();
-                break;
-            case 'playback_state_updated':
-                updatePlaybackState(message.data);
-                break;
+        if (message.action === 'sync_overlay_state') {
+            const state = message.data;
+
+            if (state.isVisible) {
+                // If the overlay needs to be visible, ensure it's built and updated.
+                buildOverlayIfNeeded();
+                updateOverlayUI(state);
+                setOverlayVisibility(true, state.animate);
+            } else {
+                // If the overlay should be hidden, just toggle its visibility without animation.
+                setOverlayVisibility(false, false);
+            }
+            sendResponse({ success: true });
+            return true;
         }
-        sendResponse({ success: true });
-        return true; 
     });
+
 })();
