@@ -1,6 +1,8 @@
 // ext/sidebar.js (Global Side Panel - Orchestrator)
-// This file initializes the sidebar, manages high-level state and navigation,
-// and delegates tasks to the various view-specific modules.
+// REVISED: The sidebar's navigation logic has been made more robust to prevent UI flicker.
+// The `updateSidebarContext` function is now less aggressive about navigating to the root view
+// when it receives a transient null context, creating a smoother user experience when
+// clicking between packet items.
 
 import { logger, storage, packetUtils, applyThemeMode, CONFIG } from './utils.js';
 import { domRefs, cacheDomReferences } from './sidebar-modules/dom-references.js';
@@ -14,7 +16,7 @@ import * as settingsView from './sidebar-modules/settings-view.js';
 let currentView = 'root';
 let currentInstanceId = null;
 let currentInstanceData = null;
-let currentPacketUrl = null; // The canonical packet URL/S3 key
+let currentPacketUrl = null; // The canonical packet URL from the packet definition
 let isNavigating = false;
 let nextNavigationRequest = null;
 const PENDING_VIEW_KEY = 'pendingSidebarView';
@@ -91,10 +93,10 @@ export async function navigateTo(viewName, instanceId = null, data = null) {
         settingsView.triggerPendingSave();
     }
     
-    // --- MODIFICATION ---
-    // The block that paused or stopped audio when navigating away from packet-detail has been removed.
-
-    [domRefs.rootView, domRefs.createView, domRefs.packetDetailView, domRefs.settingsView].forEach(v => v?.classList.add('hidden'));
+    // Do not hide the view container if we are just switching between detail views
+    if (currentView !== 'packet-detail' || viewName !== 'packet-detail') {
+        [domRefs.rootView, domRefs.createView, domRefs.packetDetailView, domRefs.settingsView].forEach(v => v?.classList.add('hidden'));
+    }
     
     domRefs.backBtn?.classList.toggle('hidden', viewName === 'root' || viewName === 'create');
     domRefs.settingsBtn?.classList.toggle('hidden', viewName !== 'root');
@@ -152,20 +154,17 @@ export async function navigateTo(viewName, instanceId = null, data = null) {
 // --- State & Context Updates ---
 
 async function updateSidebarContext(contextData) {
-    if (currentView === 'create') return;
+    if (currentView === 'create' || isNavigating) return;
 
     const newInstanceId = contextData?.instanceId ?? null;
     const newPacketUrl = contextData?.packetUrl ?? null;
     let newInstanceData = contextData?.instance ?? null;
 
-    if (currentView === 'packet-detail' && newInstanceId === currentInstanceId) {
-        // If the update is for the current packet, just update the data and re-render
-        currentInstanceData = newInstanceData;
-        currentPacketUrl = newPacketUrl;
-        await detailView.displayPacketContent(currentInstanceData, currentPacketUrl);
-    }
-    else if (newInstanceId !== currentInstanceId) {
-        // If the instance ID has changed, navigate to the new packet's detail view
+    // *** FIX: Make the logic "stickier" to prevent flashing. ***
+    // Only navigate away from the detail view if we receive a definitive new context
+    // that is different, or if the view is not the detail view.
+    if (newInstanceId !== currentInstanceId) {
+        // The instance ID has changed. Navigate to the new packet or the root.
         currentInstanceId = newInstanceId;
         currentInstanceData = newInstanceData;
         currentPacketUrl = newPacketUrl;
@@ -174,12 +173,15 @@ async function updateSidebarContext(contextData) {
         } else if (currentView !== 'root') {
             navigateTo('root');
         }
-    }
-    else if (currentView === 'packet-detail' && newInstanceId === null) {
-        // If we were on a detail view and the context is now null, go back to the root
-        navigateTo('root');
+    } else if (currentView === 'packet-detail' && newInstanceId !== null) {
+        // The instance is the same, but the active URL might have changed.
+        // Just update the content without a full navigation.
+        currentInstanceData = newInstanceData;
+        currentPacketUrl = newPacketUrl;
+        await detailView.displayPacketContent(currentInstanceData, currentPacketUrl);
     }
 }
+
 
 // --- Communication ---
 
@@ -247,7 +249,6 @@ async function handleBackgroundMessage(message) {
             }
             break;
         case 'packet_instance_updated':
-            // This is now the primary way state is synchronized
             if (currentView === 'root') {
                 rootView.updateInstanceRowUI(data.instance);
             } else if (currentView === 'packet-detail' && currentInstanceId === data.instance.instanceId) {
@@ -258,9 +259,10 @@ async function handleBackgroundMessage(message) {
             if (currentView === 'root') {
                 rootView.removeInstanceRow(data.packetId);
             }
-            if (data?.packetId) {
-                detailView.stopAudioIfPacketDeleted(data.packetId);
+            if (data?.packetId === currentInstanceId) {
+                 navigateTo('root');
             }
+            detailView.stopAudioIfPacketDeleted(data.packetId);
             break;
         case 'packet_deletion_complete':
             showRootViewStatus(data.message || 'Deletion complete.', data.errors?.length > 0 ? 'error' : 'success');

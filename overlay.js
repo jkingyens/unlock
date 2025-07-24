@@ -2,7 +2,7 @@
 // REVISED: This script is now a passive, state-driven view.
 // It is injected universally and waits for 'sync_overlay_state' messages
 // from the background script to build, update, or hide itself.
-// REVISED: It now checks for an 'animate' flag to trigger the glide-in animation.
+// REVISED: Animation logic is now handled locally to prevent race conditions on tab switch.
 
 (() => {
     // If this script has already been injected, do nothing.
@@ -17,6 +17,7 @@
     let currentInstanceId = null;
     let isPlaying = true;
     let lastShownLinkUrl = null;
+    let becameVisibleTimestamp = 0; // Track when the overlay last appeared
 
     // --- Core UI Management Functions ---
 
@@ -25,7 +26,6 @@
 
         const container = document.createElement('div');
         container.id = OVERLAY_ID;
-        // The shadow root isolates the overlay's CSS from the host page.
         const shadowRoot = container.attachShadow({ mode: 'open' });
 
         shadowRoot.innerHTML = `
@@ -49,7 +49,6 @@
         const overlay = shadowRoot.getElementById('unlock-media-overlay');
         const playPauseBtn = shadowRoot.querySelector('.unlock-overlay-play-pause-btn');
 
-        // REVISED: Send a unified action request instead of a specific command.
         playPauseBtn.addEventListener('click', (e) => {
             e.stopPropagation();
             chrome.runtime.sendMessage({
@@ -78,19 +77,15 @@
         currentInstanceId = state.instanceId;
         isPlaying = state.isPlaying;
 
-        // Update topic text
+        // ... (Update topic text, play/pause icon, and bars - this is unchanged) ...
         const textElement = shadowRoot.querySelector('.unlock-overlay-text');
         if (textElement && state.topic) {
             textElement.textContent = state.topic;
         }
-
-        // Update play/pause button icon
         const btn = shadowRoot.querySelector('.unlock-overlay-play-pause-btn');
         if (btn) {
             btn.innerHTML = `<div class="icon ${isPlaying ? 'pause-icon' : 'play-icon'}"></div>`;
         }
-
-        // Update animation of the "dancing bars"
         const bars = shadowRoot.querySelector('.unlock-overlay-bars');
         if (bars) {
             bars.querySelectorAll('.bar').forEach(bar => {
@@ -101,9 +96,15 @@
         // Update link mention display
         if (state.lastMentionedLink && state.lastMentionedLink.url !== lastShownLinkUrl) {
             lastShownLinkUrl = state.lastMentionedLink.url;
-            showLinkMention(state.lastMentionedLink);
+            
+            // NEW: Animation decision is now made here
+            const timeSinceVisible = Date.now() - becameVisibleTimestamp;
+            // Animate only if a new link was mentioned AND the overlay has been visible for a moment
+            const shouldAnimateLink = state.newLinkMentioned && timeSinceVisible > 500;
+            
+            showLinkMention(state.lastMentionedLink, shouldAnimateLink);
+
         } else if (!state.lastMentionedLink && lastShownLinkUrl) {
-            // If playback seeks backward or link is gone, clear the mention
             lastShownLinkUrl = null;
             const existingMention = shadowRoot.querySelector('.unlock-overlay-link-mention');
             if (existingMention) existingMention.remove();
@@ -113,22 +114,25 @@
     function setOverlayVisibility(visible, animate) {
         const overlay = document.getElementById(OVERLAY_ID)?.shadowRoot?.getElementById('unlock-media-overlay');
         if (overlay) {
+            const wasVisible = overlay.classList.contains('visible');
+            if (visible && !wasVisible) {
+                // The overlay is about to become visible, record the timestamp.
+                becameVisibleTimestamp = Date.now();
+            }
             if (animate) {
-                // Add a class to trigger the animation, then remove it so it can be re-triggered later.
                 overlay.classList.add('animate-in');
                 setTimeout(() => {
                     overlay.classList.remove('animate-in');
-                }, 500); // Duration should be longer than the CSS transition
+                }, 500);
             }
             overlay.classList.toggle('visible', visible);
         }
     }
     
-    function showLinkMention(link) {
+    function showLinkMention(link, animate) {
         const overlay = document.getElementById(OVERLAY_ID)?.shadowRoot?.getElementById('unlock-media-overlay');
         if (!overlay) return;
 
-        // Remove any existing mention before showing a new one
         const existingMention = overlay.querySelector('.unlock-overlay-link-mention');
         if (existingMention) {
             existingMention.remove();
@@ -136,6 +140,11 @@
 
         const linkMention = document.createElement('div');
         linkMention.className = 'unlock-overlay-link-mention';
+        
+        if (animate) {
+            linkMention.classList.add('animate');
+        }
+
         linkMention.innerHTML = `
             <div class="icon"></div>
             <div class="link-text">${link.title}</div>
@@ -143,31 +152,35 @@
         
         linkMention.addEventListener('click', (e) => {
             e.stopPropagation();
-            chrome.runtime.sendMessage({
-                action: 'open_content',
-                data: { 
-                    packetId: currentInstanceId, 
-                    url: link.url,
-                    source: 'overlay_link_click'
-                }
-            });
+
+            // Get the current page's URL from the window object
+            const currentPageUrl = window.location.href;
+
+            // Only send the message if the current page is not the target page
+            if (decodeURIComponent(currentPageUrl) !== decodeURIComponent(link.url)) {
+                chrome.runtime.sendMessage({
+                    action: 'open_content',
+                    data: { 
+                        packetId: currentInstanceId, 
+                        url: link.url,
+                        source: 'overlay_link_click'
+                    }
+                });
+            }
         });
 
         overlay.appendChild(linkMention);
     }
 
-    // --- REVISED: Single Message Listener with Animation Logic ---
     chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         if (message.action === 'sync_overlay_state') {
             const state = message.data;
 
             if (state.isVisible) {
-                // If the overlay needs to be visible, ensure it's built and updated.
                 buildOverlayIfNeeded();
                 updateOverlayUI(state);
                 setOverlayVisibility(true, state.animate);
             } else {
-                // If the overlay should be hidden, just toggle its visibility without animation.
                 setOverlayVisibility(false, false);
             }
             sendResponse({ success: true });

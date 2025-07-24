@@ -1,7 +1,9 @@
 // ext/utils.js
 // Shared utility functions for the Unlock extension
-// REVISED: The isUrlInPacket function for 'generated' content is now corrected to
-// properly parse incoming pre-signed URLs and compare their path against the stored S3 key.
+// REVISED: This file establishes the core components for the new context management system.
+// The PacketContext is now more explicit, tracking both the canonical packet URL and the
+// current browser URL. The isUrlInPacket function is the sole authority for determining
+// if a browser URL corresponds to a defined packet item, correctly handling pre-signed URLs.
 
 // --- Centralized Configuration ---
 const CONFIG = {
@@ -15,7 +17,7 @@ const CONFIG = {
     PACKET_BROWSER_STATES: 'packetBrowserStates', // Stores PacketBrowserState objects (map)
     SETTINGS: 'settings',
     PENDING_VIEW_KEY: 'pendingSidebarView',
-    PACKET_CONTEXT_PREFIX: 'packetContext_' // Stores { instanceId, packetUrl, currentUrl } for a tab
+    PACKET_CONTEXT_PREFIX: 'packetContext_' // Stores { instanceId, canonicalPacketUrl, currentBrowserUrl } for a tab
   },
   DEFAULT_SETTINGS: {
     selectedModelId: 'default_openai_gpt4o',
@@ -210,23 +212,6 @@ const indexedDbStorage = {
         return null;
     }
   },
-   async deleteGeneratedContent(imageId, pageId) {
-       const key = `${imageId}::${pageId}`;
-       try {
-           const db = await getDb();
-           const tx = db.transaction(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT, 'readwrite');
-           const store = tx.objectStore(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT);
-           store.delete(key);
-           await new Promise((resolve, reject) => {
-               tx.oncomplete = resolve;
-               tx.onerror = () => reject(tx.error);
-           });
-           return true;
-       } catch (error) {
-           logger.error('IndexedDB', 'Error deleting generated content', { key, error });
-           return false;
-       }
-   },
    async deleteGeneratedContentForImage(imageId) {
         try {
             const db = await getDb();
@@ -446,34 +431,34 @@ const packetUtils = {
         return options.returnItem ? null : false;
     }
 
-    const urlToCompare = decodeURIComponent(loadedUrl);
-    
+    // Perform an exact, case-sensitive match against the raw URL string.
     for (const item of instance.contents) {
         if (item.type === 'alternative') {
+            // Recurse into alternatives if present
             for (const alt of item.alternatives) {
                 const result = this.isUrlInPacket(loadedUrl, { contents: [alt] }, options);
                 if (result) return result;
             }
         } else {
-            if (!item.url) continue;
-
-            if (item.type === 'external') {
-                if (urlToCompare === decodeURIComponent(item.url)) {
-                    return options.returnItem ? item : true;
-                }
-            } else if (item.type === 'generated' || item.type === 'media') {
-                try {
-                    const loadedUrlObj = new URL(urlToCompare);
+            // For external links, do an exact match.
+            if (item.type === 'external' && item.url === loadedUrl) {
+                return options.returnItem ? item : true;
+            }
+            
+            // For generated content, we must check if the loadedUrl (which may be
+            // a pre-signed URL) corresponds to the canonical S3 key stored in item.url.
+            if ((item.type === 'generated' || item.type === 'media') && item.publishContext) {
+                 try {
+                    const loadedUrlObj = new URL(loadedUrl);
                     const { publishContext } = item;
-                    if (publishContext) {
-                        let expectedPathname = (publishContext.provider === 'google')
-                            ? `/${publishContext.bucket}/${item.url}`
-                            : `/${item.url}`;
-                        if (loadedUrlObj.pathname === expectedPathname) {
-                            return options.returnItem ? item : true;
-                        }
+                    let expectedPathname = (publishContext.provider === 'google')
+                        ? `/${publishContext.bucket}/${item.url}`
+                        : `/${item.url}`;
+                    
+                    if (decodeURIComponent(loadedUrlObj.pathname) === expectedPathname) {
+                        return options.returnItem ? item : true;
                     }
-                } catch (e) { /* ignore */ }
+                } catch (e) { /* The loadedUrl might not be a valid URL, so we ignore the error and continue. */ }
             }
         }
     }
@@ -502,14 +487,14 @@ const packetUtils = {
     const isGenerated = (foundItem.type === 'generated' || foundItem.type === 'media');
     const alreadyVisited = isGenerated
         ? (instance.visitedGeneratedPageIds || []).includes(foundItem.pageId)
-        : (instance.visitedUrls || []).includes(url);
+        : (instance.visitedUrls || []).includes(foundItem.url); // Use the canonical URL from the found item
 
     if (alreadyVisited) return { success: true, alreadyVisited: true };
     
     if (isGenerated) {
         instance.visitedGeneratedPageIds = [...(instance.visitedGeneratedPageIds || []), foundItem.pageId];
     } else {
-        instance.visitedUrls = [...(instance.visitedUrls || []), url];
+        instance.visitedUrls = [...(instance.visitedUrls || []), foundItem.url];
     }
 
     await storage.savePacketInstance(instance);
@@ -548,8 +533,14 @@ async function getPacketContext(tabId) {
     const data = await storage.getLocal(key);
     return data[key] || null;
 }
-async function setPacketContext(tabId, instanceId, packetUrl, currentUrl) {
-    await storage.setLocal({ [getPacketContextKey(tabId)]: { instanceId, packetUrl, currentUrl } });
+// REVISED function to store the more explicit context object.
+async function setPacketContext(tabId, instanceId, canonicalPacketUrl, currentBrowserUrl) {
+    const context = {
+        instanceId,
+        canonicalPacketUrl,
+        currentBrowserUrl
+    };
+    await storage.setLocal({ [getPacketContextKey(tabId)]: context });
     return true;
 }
 async function clearPacketContext(tabId) {
@@ -559,7 +550,7 @@ async function clearPacketContext(tabId) {
 function isTabGroupsAvailable() { return typeof chrome?.tabGroups?.update === 'function'; }
 function isSidePanelAvailable() { return typeof chrome?.sidePanel?.open === 'function'; }
 
-export async function isChromeAiAvailable() {
+function isChromeAiAvailable() {
   return typeof globalThis.LanguageModel?.create === 'function';
 }
 
@@ -621,11 +612,11 @@ export {
   getPacketContext,
   setPacketContext,
   clearPacketContext,
-  applyThemeMode,
   getDb,
   shouldUseTabGroups,
   arrayBufferToBase64,
   base64Decode,
-  arrayBufferToBase64 as base64Encode,
   sanitizeForFileName,
+  isChromeAiAvailable,
+  applyThemeMode,
 };
