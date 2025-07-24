@@ -49,10 +49,13 @@
     background-color: rgba(255, 255, 255, 0.1);
     padding: 4px 8px;
     border-radius: 20px;
-    animation: slideIn 0.5s ease-out forwards;
     flex-shrink: 0;
     white-space: nowrap;
     margin-left: 8px; /* Add some space between main content and link */
+}
+
+.unlock-overlay-link-mention.animate {
+    animation: slideIn 0.5s ease-out forwards;
 }
 
 .unlock-overlay-link-mention .icon {

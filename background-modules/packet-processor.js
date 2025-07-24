@@ -8,7 +8,6 @@ import {
     CONFIG,
     arrayBufferToBase64,
     base64Decode,
-    MPI_PARAMS,
     sanitizeForFileName
 } from '../utils.js';
 import llmService from '../llm_service.js';

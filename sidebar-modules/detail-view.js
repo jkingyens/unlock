@@ -1,6 +1,8 @@
 // ext/sidebar-modules/detail-view.js
 // Manages the packet detail view, including rendering content cards and progress.
-// REVISED: Adopted the unified 'request_playback_action' message for all playback controls.
+// REVISED: This module is now driven by the canonical packet URL provided by the main sidebar
+// controller. This ensures that the correct card is highlighted as 'active' based on the
+// tab's official context, rather than its transient browser URL.
 
 import { domRefs } from './dom-references.js';
 import { logger, storage, packetUtils, indexedDbStorage } from '../utils.js';
@@ -36,11 +38,6 @@ export function updatePlaybackUI(state) {
         const cardPageId = card.dataset.pageId;
         const isPlayingThisCard = state.isPlaying && state.pageId === cardPageId;
         card.classList.toggle('playing', isPlayingThisCard);
-        
-        const iconElement = card.querySelector('.media-play-icon');
-        if (iconElement) {
-            iconElement.innerHTML = isPlayingThisCard ? '⏸️' : '▶️';
-        }
     });
 
     // Reveal mentioned cards
@@ -192,10 +189,10 @@ async function redrawAllVisibleWaveforms(playbackState = {}) {
 
 
 // --- Main Rendering Function ---
-export async function displayPacketContent(instance, currentPacketUrl) {
+export async function displayPacketContent(instance, canonicalPacketUrl) {
     const uniqueCallId = Date.now();
     if (isDisplayingPacketContent) {
-        queuedDisplayRequest = { instance, currentPacketUrl };
+        queuedDisplayRequest = { instance, canonicalPacketUrl };
         logger.warn(`DetailView[${uniqueCallId}]`, 'Display already Started. Queuing request for instance:', instance?.instanceId);
         return;
     }
@@ -227,6 +224,7 @@ export async function displayPacketContent(instance, currentPacketUrl) {
         const { progressPercentage } = packetUtils.calculateInstanceProgress(instance);
 
         if (isAlreadyRendered) {
+            // If already rendered, just update the dynamic parts like visited status and active highlight.
             const visitedUrlsSet = new Set(instance.visitedUrls || []);
             const visitedGeneratedIds = new Set(instance.visitedGeneratedPageIds || []);
             const mentionedLinks = new Set(instance.mentionedMediaLinks || []);
@@ -243,7 +241,7 @@ export async function displayPacketContent(instance, currentPacketUrl) {
                     }
                 }
             });
-            updateActiveCardHighlight(currentPacketUrl);
+            updateActiveCardHighlight(canonicalPacketUrl);
             
             const progressBar = domRefs.detailProgressContainer?.querySelector('.progress-bar');
             if (progressBar) progressBar.style.width = `${progressPercentage}%`;
@@ -253,6 +251,7 @@ export async function displayPacketContent(instance, currentPacketUrl) {
             await redrawAllVisibleWaveforms(currentState);
 
         } else {
+            // Full re-render if the view is for a new packet.
             const colorName = packetUtils.getColorForTopic(instance.topic);
             const colors = { grey: { accent: '#90a4ae', progress: '#546e7a', link: '#FFFFFF' }, blue: { accent: '#64b5f6', progress: '#1976d2', link: '#FFFFFF' }, red: { accent: '#e57373', progress: '#d32f2f', link: '#FFFFFF' }, yellow: { accent: '#fff176', progress: '#fbc02d', link: '#000000' }, green: { accent: '#81c784', progress: '#388e3c', link: '#FFFFFF' }, pink: { accent: '#f06292', progress: '#c2185b', link: '#FFFFFF' }, purple: { accent: '#ba68c8', progress: '#7b1fa2', link: '#FFFFFF' }, cyan: { accent: '#4dd0e1', progress: '#0097a7', link: '#FFFFFF' }, orange: { accent: '#ffb74d', progress: '#f57c00', link: '#FFFFFF' } }[colorName] || { accent: '#90a4ae', progress: '#546e7a', link: '#FFFFFF' };
 
@@ -295,7 +294,7 @@ export async function displayPacketContent(instance, currentPacketUrl) {
                     }
                 }
             }
-            updateActiveCardHighlight(currentPacketUrl);
+            updateActiveCardHighlight(canonicalPacketUrl);
         }
     } catch (error) {
         logger.error(`DetailView[${uniqueCallId}]`, 'Error during detail view rendering', { instanceId: instance?.instanceId, error });
@@ -308,9 +307,9 @@ export async function displayPacketContent(instance, currentPacketUrl) {
 
 function processQueuedDisplayRequest() {
     if (queuedDisplayRequest) {
-        const { instance, currentPacketUrl } = queuedDisplayRequest;
+        const { instance, canonicalPacketUrl } = queuedDisplayRequest;
         queuedDisplayRequest = null;
-        Promise.resolve().then(() => displayPacketContent(instance, currentPacketUrl));
+        Promise.resolve().then(() => displayPacketContent(instance, canonicalPacketUrl));
     }
 }
 
@@ -399,6 +398,7 @@ async function createContentCard(contentItem, visitedUrlsSet, visitedGeneratedId
     let { url: urlToOpen, title = 'Untitled', relevance = '', type } = contentItem;
     let displayUrl = urlToOpen || '(URL missing)', iconHTML = '?', isClickable = false;
 
+    // Use the canonical URL for the data-url attribute.
     if (contentItem.url) card.dataset.url = contentItem.url;
     if (contentItem.pageId) card.dataset.pageId = contentItem.pageId;
 
@@ -427,10 +427,6 @@ async function createContentCard(contentItem, visitedUrlsSet, visitedGeneratedId
         card.innerHTML = `
             <div class="media-waveform-container">
                  <canvas class="waveform-canvas"></canvas>
-            </div>
-            <div class="media-play-icon">▶️</div>
-            <div class="card-text">
-                <div class="card-title">${title}</div>
             </div>`;
     }
 
@@ -474,13 +470,14 @@ async function createContentCard(contentItem, visitedUrlsSet, visitedGeneratedId
 
 // --- UI Updates ---
 
-export function updateActiveCardHighlight(packetUrlToHighlight) {
+export function updateActiveCardHighlight(canonicalPacketUrl) {
     const cardsContainer = domRefs.detailCardsContainer;
     if (!cardsContainer) return;
 
     let activeCardElement = null;
     cardsContainer.querySelectorAll('.card').forEach(card => {
-        const isActive = (packetUrlToHighlight && card.dataset.url === packetUrlToHighlight);
+        // Highlight is now based on an exact match with the canonical packet URL.
+        const isActive = (canonicalPacketUrl && card.dataset.url === canonicalPacketUrl);
         card.classList.toggle('active', isActive);
         if (isActive) {
             activeCardElement = card;
@@ -501,7 +498,7 @@ async function openUrl(url, instanceId) {
 
     sendMessageToBackground({
         action: 'open_content',
-        data: { packetId: instanceId, url: url, clickedUrl: url }
+        data: { packetId: instanceId, url: url } // The 'url' here is the canonical one to open.
     }).catch(err => logger.error("DetailView", `Error opening link: ${err.message}`));
 }
 
@@ -527,19 +524,16 @@ export function stopAudioIfPacketDeleted(deletedPacketId) {
     }
 }
 
-// REVISED: Use the unified playback action request.
 async function playMediaInCard(card, contentItem, instance) {
     card.addEventListener('click', () => {
         const isThisCardPlaying = currentPlayingPageId === contentItem.pageId;
 
         if (isThisCardPlaying) {
-            // If this card is the one playing, send a 'toggle' intent.
             sendMessageToBackground({
                 action: 'request_playback_action',
                 data: { intent: 'toggle' }
             });
         } else {
-            // If a different card (or no card) is playing, send a 'play' intent for this specific track.
             sendMessageToBackground({
                 action: 'request_playback_action',
                 data: {

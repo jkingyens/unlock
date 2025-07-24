@@ -1,6 +1,7 @@
 // ext/background-modules/message-handlers.js
-// REVISED: Replaced multiple playback handlers with a single, unified handler
-// for 'request_playback_action' to centralize playback logic.
+// REVISED: The handleOpenContent function now uses chrome.storage.session to create a
+// "trusted intent" token for newly created tabs. This is the first step in eliminating
+// the race condition between tab creation and the first navigation event.
 
 import {
     logger,
@@ -10,7 +11,6 @@ import {
     setPacketContext,
     getPacketContext,
     clearPacketContext,
-    MPI_PARAMS,
     CONFIG,
     arrayBufferToBase64,
     base64Decode,
@@ -18,7 +18,6 @@ import {
 } from '../utils.js';
 import * as tabGroupHandler from './tab-group-handler.js';
 import * as sidebarHandler from './sidebar-handler.js';
-import { deduplicateUrlInGroup } from './tab-group-handler.js';
 import cloudStorage from '../cloud-storage.js';
 
 import {
@@ -36,11 +35,10 @@ import {
     processImproveDraftAudio
 } from './packet-processor.js';
 
-import { 
-    interimContextMap, 
-    setMediaPlaybackState, 
-    controlAudioInOffscreen, 
-    activeMediaPlayback, 
+import {
+    setMediaPlaybackState,
+    controlAudioInOffscreen,
+    activeMediaPlayback,
 } from '../background.js';
 import { checkAndPromptForCompletion } from './navigation-handler.js';
 
@@ -79,8 +77,8 @@ async function handleGetContextForTab(data, sender, sendResponse) {
             tabId: tabId,
             instanceId: instanceData ? instanceId : null,
             instance: instanceData,
-            packetUrl: context?.packetUrl,
-            currentUrl: tabData?.url || context?.currentUrl,
+            packetUrl: context?.canonicalPacketUrl,
+            currentUrl: tabData?.url || context?.currentBrowserUrl,
             title: tabData?.title || ''
         };
         sendResponse(responseData);
@@ -139,109 +137,76 @@ async function handleGetPageDetailsFromDOM(sender, sendResponse) {
 }
 
 async function handleOpenContent(data, sender, sendResponse) {
-    const { packetId: instanceId, url, clickedUrl, instanceData: freshInstanceData } = data;
-    const targetCanonicalUrl = clickedUrl || url;
-    let resultingTabId = null;
-    logger.log('MessageHandler:handleOpenContent', 'Processing request', { instanceId, targetCanonicalUrl, hasFreshData: !!freshInstanceData });
-    if (!instanceId || !targetCanonicalUrl) { sendResponse({ success: false, error: 'Missing instanceId or targetCanonicalUrl' }); return; }
+    const { packetId: instanceId, url: clickedUrl } = data;
+    const targetCanonicalUrl = clickedUrl;
+    if (!instanceId || !targetCanonicalUrl) {
+        sendResponse({ success: false, error: 'Missing instanceId or targetCanonicalUrl' });
+        return;
+    }
 
     try {
-        const instance = freshInstanceData || await storage.getPacketInstance(instanceId);
+        const instance = await storage.getPacketInstance(instanceId);
         if (!instance) throw new Error(`Packet instance ${instanceId} not found`);
 
+        let existingTab = null;
+        const allTabs = await chrome.tabs.query({});
+        for (const tab of allTabs) {
+            const context = await getPacketContext(tab.id);
+            if (context && context.instanceId === instanceId && context.canonicalPacketUrl === targetCanonicalUrl) {
+                existingTab = tab;
+                break;
+            }
+            const trustedIntentKey = `trusted_intent_${tab.id}`;
+            const sessionData = await storage.getSession(trustedIntentKey);
+            const trustedContext = sessionData[trustedIntentKey];
+            if (trustedContext && trustedContext.instanceId === instanceId && trustedContext.canonicalPacketUrl === targetCanonicalUrl) {
+                existingTab = tab;
+                break;
+            }
+        }
+        
         const contentItem = instance.contents.find(item => item.url === targetCanonicalUrl);
         let finalUrlToOpen;
-        let packetUrlForContext = targetCanonicalUrl;
 
-        if (contentItem && contentItem.type === 'generated') {
+        if (contentItem && (contentItem.type === 'generated' || contentItem.type === 'media')) {
             if (contentItem.publishContext) {
                 finalUrlToOpen = cloudStorage.constructPublicUrl(targetCanonicalUrl, contentItem.publishContext);
             } else {
                 finalUrlToOpen = cloudStorage.getPublicUrl(targetCanonicalUrl);
-                logger.warn('MessageHandler:handleOpenContent', `Legacy packet item missing publishContext. Using active settings to construct URL for ${targetCanonicalUrl}. This may fail if settings have changed.`);
             }
-
-            if (!finalUrlToOpen) {
-                logger.error('MessageHandler:handleOpenContent', `Failed to construct canonical public URL for S3 key ${targetCanonicalUrl}. Cannot open tab.`);
-                throw new Error(`Could not determine public URL for S3 key ${targetCanonicalUrl}.`);
-            }
-            logger.log('MessageHandler:handleOpenContent', `Opening canonical URL (will be redirected by DNR): ${finalUrlToOpen}`);
+            if (!finalUrlToOpen) throw new Error(`Could not determine public URL for S3 key ${targetCanonicalUrl}.`);
         } else {
             finalUrlToOpen = targetCanonicalUrl;
-            logger.log('MessageHandler:handleOpenContent', `Target ${targetCanonicalUrl} is external. Opening directly.`);
         }
 
-        let existingTab = null;
-        try {
-            const allTabs = await chrome.tabs.query({});
-            for (const tab of allTabs) {
-                const context = await getPacketContext(tab.id);
-                if (context && context.instanceId === instanceId && context.packetUrl === packetUrlForContext) {
-                    existingTab = tab;
-                    logger.log('MessageHandler:handleOpenContent', `Found existing tab ${tab.id} via context lookup for canonical URL: ${packetUrlForContext}.`);
-                    break;
-                }
-            }
-        } catch (e) { logger.error('MessageHandler:handleOpenContent', 'Error during tab lookup', e); }
-
-        const useTabGroups = await shouldUseTabGroups();
-
-        let targetTab = null;
         if (existingTab) {
-            logger.log('MessageHandler:handleOpenContent', 'Found existing tab, activating and updating URL.', { tabId: existingTab.id });
-            targetTab = await chrome.tabs.update(existingTab.id, { url: finalUrlToOpen, active: true });
-            if (targetTab?.windowId) await chrome.windows.update(targetTab.windowId, { focused: true });
-            resultingTabId = existingTab.id;
-            await setPacketContext(resultingTabId, instanceId, packetUrlForContext, finalUrlToOpen);
+            await chrome.tabs.update(existingTab.id, { url: finalUrlToOpen, active: true });
+            if (existingTab.windowId) await chrome.windows.update(existingTab.windowId, { focused: true });
         } else {
-            logger.log('MessageHandler:handleOpenContent', 'Creating new tab.');
-            targetTab = await chrome.tabs.create({ url: finalUrlToOpen, active: true });
-            if (!targetTab || typeof targetTab.id !== 'number') throw new Error('Tab creation failed or did not return a valid ID.');
-            resultingTabId = targetTab.id;
-
-            interimContextMap.set(resultingTabId, {
+            // *** FIX: Create tab in the background first to win the race condition. ***
+            const newTab = await chrome.tabs.create({ url: finalUrlToOpen, active: false });
+            if (!newTab || typeof newTab.id !== 'number') throw new Error('Tab creation failed.');
+            
+            // "Stamp" the tab with its identity BEFORE activating it.
+            const trustedIntent = {
                 instanceId: instanceId,
-                packetUrl: packetUrlForContext,
-                instanceData: instance
-            });
-            logger.log(`MessageHandler:handleOpenContent`, `Stored interim context in MAP for new Tab ${resultingTabId}`);
-
-            const updatedBrowserState = await storage.getPacketBrowserState(instanceId);
-            const stateToSave = updatedBrowserState || { instanceId, tabGroupId: null, activeTabIds: [], lastActiveUrl: null };
-            if (!stateToSave.activeTabIds.includes(resultingTabId)) {
-                 stateToSave.activeTabIds.push(resultingTabId);
-            }
-            stateToSave.lastActiveUrl = packetUrlForContext;
-            await storage.savePacketBrowserState(stateToSave);
-
-            if (targetTab?.windowId) await chrome.windows.update(targetTab.windowId, { focused: true });
-            await setPacketContext(resultingTabId, instanceId, packetUrlForContext, finalUrlToOpen);
+                canonicalPacketUrl: targetCanonicalUrl,
+            };
+            await storage.setSession({ [`trusted_intent_${newTab.id}`]: trustedIntent });
+            
+            // Now, activate the tab. The navigation handler is guaranteed to find the stamp.
+            await chrome.tabs.update(newTab.id, { active: true });
+            
+            logger.log(`MessageHandler:handleOpenContent`, `Set trusted intent token for new Tab ${newTab.id}.`);
         }
         
-        if (useTabGroups) {
-            await tabGroupHandler.ensureTabInGroup(resultingTabId, instanceId);
-
-            const finalBrowserState = await storage.getPacketBrowserState(instanceId);
-            const groupId = finalBrowserState?.tabGroupId;
-
-            if (groupId) {
-                logger.log('MessageHandler:handleOpenContent', `A group (${groupId}) exists for this packet. Triggering focus logic.`);
-                await tabGroupHandler.handleFocusTabGroup({ focusedGroupId: groupId });
-                await deduplicateUrlInGroup(groupId, instanceId, resultingTabId);
-                await tabGroupHandler.orderTabsInGroup(groupId, instance);
-            }
-        }
-        sendResponse({ success: true, result: { packetId: instanceId, tabId: resultingTabId, openedUrl: finalUrlToOpen } });
+        sendResponse({ success: true });
     } catch (error) {
         logger.error('MessageHandler:handleOpenContent', 'Error opening content', {instanceId, targetCanonicalUrl, error});
-        if (resultingTabId && interimContextMap.has(resultingTabId)) {
-             interimContextMap.delete(resultingTabId);
-        }
-        try { sendResponse({ success: false, error: error.message || 'Unknown error' }); } catch (e) { /* ignore */ }
+        sendResponse({ success: false, error: error.message || 'Unknown error' });
     }
 }
 
-// --- Instance State Management ---
 async function handleMarkUrlVisited(data, sendResponse) {
      const { packetId: instanceId, url } = data;
      if (!instanceId || !url) return sendResponse({ success: false, error: 'Missing instanceId or url' });
@@ -259,463 +224,194 @@ async function handleMarkUrlVisited(data, sendResponse) {
 
 async function handleReorderPacketTabs(data, sendResponse) {
     const { packetId: instanceId } = data;
-    const useTabGroups = await shouldUseTabGroups();
-    if (!useTabGroups) { sendResponse({ success: false, error: 'Tab Groups feature is disabled in settings.' }); return; }
+    if (!(await shouldUseTabGroups())) { sendResponse({ success: false, error: 'Tab Groups feature is disabled in settings.' }); return; }
     if (!instanceId) { sendResponse({ success: false, error: 'Missing instanceId' }); return; }
-    logger.log('MessageHandler:handleReorderPacketTabs', 'Reordering tabs for instance', instanceId);
     try {
         const [instance, browserState] = await Promise.all([ storage.getPacketInstance(instanceId), storage.getPacketBrowserState(instanceId) ]);
         if (!instance) { sendResponse({ success: false, error: 'Packet instance not found' }); return; }
         if (!browserState?.tabGroupId) { sendResponse({ success: true, message: 'Packet instance has no associated group.' }); return; }
-        const groupId = browserState.tabGroupId;
-        try { await chrome.tabGroups.get(groupId); }
-        catch (error) {
-            logger.warn('MessageHandler:handleReorderPacketTabs', `Group ${groupId} for instance ${instanceId} no longer exists. Clearing from state.`);
-            const currentState = await storage.getPacketBrowserState(instanceId);
-            if(currentState && currentState.tabGroupId === groupId) {
-                currentState.tabGroupId = null;
-                await storage.savePacketBrowserState(currentState);
-            }
-            sendResponse({ success: false, error: 'Associated group no longer exists' }); return;
-        }
-        const result = await tabGroupHandler.orderTabsInGroup(groupId, instance);
-        sendResponse({ success: result, error: result ? undefined : 'Failed to reorder tabs' });
+        const result = await tabGroupHandler.orderTabsInGroup(browserState.tabGroupId, instance);
+        sendResponse({ success: result });
     } catch (error) {
-        logger.error('MessageHandler:handleReorderPacketTabs', 'Error', error);
         sendResponse({ success: false, error: error.message || 'Unknown error' });
     }
 }
 
-async function handleSidebarReady(sender, sendResponse) {
-    logger.log('MessageHandler:handleSidebarReady', 'Sidebar ready message received.');
+async function handleSidebarReady(data, sender, sendResponse) {
+    logger.log('SidebarHandler:handleSidebarReady', 'Ready message received from sidebar UI');
     if (sidebarHandler && typeof sidebarHandler.handleSidebarReady === 'function') {
-        await sidebarHandler.handleSidebarReady(sender, sendResponse);
+        await sidebarHandler.handleSidebarReady(data, sender, sendResponse);
     } else {
-         logger.warn('MessageHandler:handleSidebarReady', 'Sidebar handler module or function not found. Basic acknowledgement.');
-         sendResponse({ success: true, message: "Readiness acknowledged by basic handler." });
+         sendResponse({ success: true, message: "Readiness acknowledged." });
     }
 }
 
-
-// --- NEW: Unified Playback Action Handler ---
 async function handlePlaybackActionRequest(data, sender, sendResponse) {
     const { intent, instanceId, pageId } = data;
     const currentState = activeMediaPlayback;
-    
     try {
         switch (intent) {
             case 'play':
                 if (!instanceId || !pageId) throw new Error('instanceId and pageId required for play intent.');
-                
                 const instance = await storage.getPacketInstance(instanceId);
-                if (!instance) throw new Error(`Could not find instance ${instanceId} to play track.`);
-
-                let contentItem = null;
-                for (const item of instance.contents) {
-                    if (item.pageId === pageId) { contentItem = item; break; }
-                    if (item.type === 'alternative' && item.alternatives) {
-                        const found = item.alternatives.find(alt => alt.pageId === pageId);
-                        if (found) { contentItem = found; break; }
+                if (!instance) throw new Error(`Could not find instance ${instanceId}.`);
+                let contentItem;
+                instance.contents.forEach(item => {
+                    if (item.pageId === pageId) contentItem = item;
+                    else if (item.type === 'alternative') {
+                        const alt = item.alternatives.find(a => a.pageId === pageId);
+                        if (alt) contentItem = alt;
                     }
-                }
-                if (!contentItem) throw new Error(`Could not find track ${pageId} in packet.`);
-                
-                const cachedAudio = await indexedDbStorage.getGeneratedContent(instance.imageId, pageId);
-                if (!cachedAudio || !cachedAudio[0]?.content) throw new Error("Could not find cached audio data to play.");
-                
-                const audioB64 = arrayBufferToBase64(cachedAudio[0].content);
-
-                await controlAudioInOffscreen('play', {
-                    audioB64: audioB64, mimeType: contentItem.mimeType, pageId, instanceId
                 });
-
+                if (!contentItem) throw new Error(`Could not find track ${pageId} in packet.`);
+                const cachedAudio = await indexedDbStorage.getGeneratedContent(instance.imageId, pageId);
+                if (!cachedAudio || !cachedAudio[0]?.content) throw new Error("Could not find cached audio data.");
+                const audioB64 = arrayBufferToBase64(cachedAudio[0].content);
+                await controlAudioInOffscreen('play', { audioB64, mimeType: contentItem.mimeType, pageId, instanceId });
                 const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
                 await setMediaPlaybackState({
                     isPlaying: true, pageId, instanceId,
                     topic: instance.topic,
                     tabId: activeTab ? activeTab.id : null,
-                    mentionedMediaLinks: instance.mentionedMediaLinks || [],
                     currentTime: 0, 
                     duration: 0
                 });
                 break;
-            
             case 'pause':
-                if (currentState.isPlaying) {
-                    await controlAudioInOffscreen('pause', {});
-                    await setMediaPlaybackState({ isPlaying: false });
-                }
-                break;
-            
             case 'toggle':
-                if (!currentState.pageId) throw new Error('No active media to toggle.');
-                const newIsPlaying = !currentState.isPlaying;
-                await controlAudioInOffscreen('toggle', { pageId: currentState.pageId });
-                await setMediaPlaybackState({ isPlaying: newIsPlaying });
+                if (!currentState.pageId) throw new Error('No active media to toggle/pause.');
+                await controlAudioInOffscreen(intent, {});
+                await setMediaPlaybackState({ isPlaying: intent === 'toggle' ? !currentState.isPlaying : false });
                 break;
-
             case 'stop':
                 if (currentState.pageId) {
-                    await controlAudioInOffscreen('pause', {}); // Tell player to stop
-                    await setMediaPlaybackState({
-                        isPlaying: false, pageId: null, instanceId: null, topic: '',
-                        currentTime: 0, duration: 0, mentionedMediaLinks: []
-                    });
+                    await controlAudioInOffscreen('pause', {});
+                    await setMediaPlaybackState({ isPlaying: false, pageId: null, instanceId: null, topic: '', currentTime: 0, duration: 0 });
                 }
                 break;
-
             default:
                 throw new Error(`Unknown playback intent: ${intent}`);
         }
         sendResponse({ success: true });
     } catch (err) {
-        logger.error("MessageHandler:handlePlaybackActionRequest", `Error processing intent '${intent}'`, err);
         sendResponse({ success: false, error: err.message });
     }
 }
 
+const actionHandlers = {
+    'request_playback_action': handlePlaybackActionRequest,
+    'get_playback_state': (data, sender, sendResponse) => sendResponse(activeMediaPlayback),
+    'open_sidebar_and_navigate': async (data, sender, sendResponse) => {
+        await chrome.sidePanel.open({ windowId: sender.tab.windowId });
+        chrome.runtime.sendMessage({ action: 'navigate_to_view', data });
+        sendResponse({ success: true });
+    },
+    'audio_time_update': (data) => {
+        if (activeMediaPlayback.pageId === data.pageId) {
+            setMediaPlaybackState({ currentTime: data.currentTime, duration: data.duration }, { source: 'time_update' });
+        }
+    },
+    'improve_draft_audio': processImproveDraftAudio,
+    'generate_timestamps_for_packet_items': processGenerateTimestampsRequest,
+    'get_draft_item_for_preview': async (data, sender, sendResponse) => {
+        const { pageId } = data;
+        const sessionData = await storage.getSession('draftPacketForPreview');
+        const draftPacket = sessionData?.draftPacketForPreview;
+        const item = draftPacket?.sourceContent.flatMap(c => c.type === 'alternative' ? c.alternatives : c).find(i => i.pageId === pageId);
+        if (item?.contentB64) {
+            const htmlContent = new TextDecoder().decode(base64Decode(item.contentB64));
+            sendResponse({ success: true, htmlContent, title: item.title });
+        } else {
+            sendResponse({ success: false, error: 'Item not found or has no content.' });
+        }
+    },
+    'get_presigned_url': async (data, sender, sendResponse) => {
+        const { s3Key, instanceId } = data;
+        const instance = await storage.getPacketInstance(instanceId);
+        const contentItem = instance.contents.find(item => item.url === s3Key);
+        if (contentItem?.publishContext) {
+            const url = await cloudStorage.generatePresignedGetUrl(s3Key, 3600, contentItem.publishContext);
+            sendResponse({ success: true, url });
+        } else {
+            sendResponse({ success: false, error: 'Could not find content item or publish context.' });
+        }
+    },
+    'get_page_details_from_dom': handleGetPageDetailsFromDOM,
+    'sync_draft_group': (data) => tabGroupHandler.syncDraftGroup(data.desiredUrls),
+    'focus_or_create_draft_tab': (data) => tabGroupHandler.focusOrCreateDraftTab(data.url),
+    'cleanup_draft_group': tabGroupHandler.cleanupDraftGroup,
+    'generate_custom_page': processGenerateCustomPageRequest,
+    'delete_packet_image': processDeletePacketImageRequest,
+    'save_packet_image': async (data, sender, sendResponse) => {
+        await storage.savePacketImage(data.image);
+        chrome.runtime.sendMessage({ action: 'packet_image_created', data: { image: data.image } });
+        sendResponse({ success: true, imageId: data.image.id });
+    },
+    'initiate_packet_creation_from_tab': async (data, sender, sendResponse) => {
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        sendResponse(await processCreatePacketRequestFromTab(tab.id));
+    },
+    'initiate_packet_creation': (data, sender) => processCreatePacketRequest(data, sender.tab?.id),
+    'instantiate_packet': async (data, sender, sendResponse) => {
+        const newInstanceId = `inst_${Date.now()}_${Math.random().toString(36).substring(2, 10)}`;
+        const result = await instantiatePacket(data.imageId, newInstanceId, sender.tab?.id);
+        if (result.success) {
+            chrome.runtime.sendMessage({ action: 'packet_instance_created', data: { instance: result.instance } });
+        }
+        sendResponse(result);
+    },
+    'delete_packets': (data) => processDeletePacketsRequest(data),
+    'mark_url_visited': handleMarkUrlVisited,
+    'media_playback_complete': async (data, sender, sendResponse) => {
+        await setMediaPlaybackState({ isPlaying: false, pageId: null, instanceId: null });
+        const visitResult = await packetUtils.markPageIdAsVisited(data.instanceId, data.pageId);
+        if (visitResult.success && visitResult.modified) {
+            sidebarHandler.notifySidebar('packet_instance_updated', { instance: visitResult.instance });
+            await checkAndPromptForCompletion('MessageHandler', visitResult, data.instanceId);
+        }
+        sendResponse(visitResult);
+    },
+    'open_content': handleOpenContent,
+    'get_context_for_tab': handleGetContextForTab,
+    'get_current_tab_context': handleGetCurrentTabContext,
+    'page_interaction_complete': async (data, sender, sendResponse) => {
+        const context = await getPacketContext(sender.tab.id);
+        if (context?.instanceId && context?.canonicalPacketUrl) {
+            const visitResult = await packetUtils.markUrlAsVisited(context.instanceId, context.canonicalPacketUrl);
+            if (visitResult.success && visitResult.modified) {
+                sidebarHandler.notifySidebar('packet_instance_updated', { instance: visitResult.instance });
+                await checkAndPromptForCompletion('MessageHandler', visitResult, context.instanceId);
+            }
+            sendResponse(visitResult);
+        } else {
+            sendResponse({ success: false, error: 'No packet context found for this tab.' });
+        }
+    },
+    'remove_tab_groups': (data, sender, sendResponse) => tabGroupHandler.handleRemoveTabGroups(data, sendResponse),
+    'reorder_packet_tabs': handleReorderPacketTabs,
+    'theme_preference_updated': () => chrome.runtime.sendMessage({ action: 'theme_preference_updated' }),
+    'sidebar_ready': handleSidebarReady,
+    'prepare_sidebar_navigation': (data, sender, sendResponse) => {
+        storage.setSession({ [PENDING_VIEW_KEY]: data }).then(success => sendResponse({ success }));
+    },
+    'publish_image_for_sharing': (data) => publishImageForSharing(data.imageId),
+    'import_image_from_url': (data) => importImageFromUrl(data.url)
+};
 
-// --- Main Message Router ---
 export function handleMessage(message, sender, sendResponse) {
-    let isAsync = false;
-    const noisyActions = ['get_context_for_tab', 'get_current_tab_context', 'get_page_details_from_dom', 'audio_time_update', 'get_playback_state'];
-    if (!noisyActions.includes(message.action)) {
-        logger.log('MessageHandler', `Received action: ${message.action}`, { data: message.data, senderTab: sender.tab?.id, senderUrl: sender.url, senderId: sender.id });
+    const handler = actionHandlers[message.action];
+    if (handler) {
+        Promise.resolve(handler(message.data, sender, sendResponse))
+            .catch(err => {
+                logger.error("MessageHandler", `Error in action ${message.action}:`, err);
+                if (!sendResponse._sent) {
+                    sendResponse({ success: false, error: err.message });
+                }
+            });
+        return true; // Indicates async response
+    } else {
+        logger.warn("MessageHandler", "Unknown action received", message.action);
+        sendResponse({ success: false, error: `Unknown action: ${message.action}` });
+        return false;
     }
-
-    switch (message.action) {
-        // --- REVISED: Use unified playback handler, remove old handlers ---
-        case 'request_playback_action':
-            handlePlaybackActionRequest(message.data, sender, sendResponse);
-            isAsync = true;
-            break;
-
-        case 'get_playback_state':
-            sendResponse(activeMediaPlayback);
-            break;
-        
-        case 'open_sidebar_and_navigate':
-            (async () => {
-                try {
-                    const { targetView, instanceId } = message.data;
-                    const windowId = sender.tab?.windowId;
-                    if (windowId) {
-                        await chrome.sidePanel.open({ windowId });
-                        // Send a follow-up message to the sidebar to handle the navigation
-                        chrome.runtime.sendMessage({
-                            action: 'navigate_to_view',
-                            data: { viewName: targetView, instanceId: instanceId }
-                        });
-                    }
-                    sendResponse({ success: true });
-                } catch(err) {
-                     sendResponse({ success: false, error: err.message });
-                }
-            })();
-            isAsync = true;
-            break;
-
-        case 'audio_time_update':
-            // Instead of forwarding, update the central state and let it broadcast
-            if (activeMediaPlayback.pageId === message.data.pageId) {
-                setMediaPlaybackState({
-                    currentTime: message.data.currentTime,
-                    duration: message.data.duration
-                });
-            }
-            break;
-        case 'improve_draft_audio':
-            processImproveDraftAudio(message.data)
-                .then(sendResponse)
-                .catch(err => sendResponse({ success: false, error: err.message }));
-            isAsync = true;
-            break;
-        case 'generate_timestamps_for_packet_items':
-            processGenerateTimestampsRequest(message.data)
-                .then(sendResponse)
-                .catch(err => sendResponse({ success: false, error: err.message }));
-            isAsync = true;
-            break;
-        case 'get_draft_item_for_preview':
-            (async () => {
-                try {
-                    const { pageId } = message.data;
-                    const sessionData = await storage.getSession('draftPacketForPreview');
-                    const draftPacket = sessionData?.draftPacketForPreview;
-                    
-                    let item = null;
-                    if (draftPacket && draftPacket.sourceContent) {
-                        for (const contentItem of draftPacket.sourceContent) {
-                            if (contentItem.pageId === pageId) {
-                                item = contentItem;
-                                break;
-                            }
-                            if (contentItem.type === 'alternative' && Array.isArray(contentItem.alternatives)) {
-                                const foundAlt = contentItem.alternatives.find(alt => alt.pageId === pageId);
-                                if (foundAlt) {
-                                    item = foundAlt;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    
-                    if (item && item.contentB64) {
-                        const htmlContent = new TextDecoder().decode(base64Decode(item.contentB64));
-                        sendResponse({ success: true, htmlContent, title: item.title });
-                    } else {
-                        sendResponse({ success: false, error: 'Item not found or has no content.' });
-                    }
-                } catch (err) {
-                    sendResponse({ success: false, error: err.message });
-                }
-            })();
-            isAsync = true;
-            break;
-        case 'get_presigned_url':
-            (async () => {
-                try {
-                    const { s3Key, instanceId } = message.data;
-                    const instance = await storage.getPacketInstance(instanceId);
-                    const contentItem = instance.contents.find(item => item.url === s3Key);
-                    if (contentItem && contentItem.publishContext) {
-                        const url = await cloudStorage.generatePresignedGetUrl(s3Key, 3600, contentItem.publishContext);
-                        sendResponse({ success: true, url });
-                    } else {
-                        sendResponse({ success: false, error: 'Could not find content item or publish context.' });
-                    }
-                } catch (err) {
-                    sendResponse({ success: false, error: err.message });
-                }
-            })();
-            isAsync = true;
-            break;
-        case 'get_page_details_from_dom':
-            handleGetPageDetailsFromDOM(sender, sendResponse);
-            isAsync = true;
-            break;
-        case 'sync_draft_group':
-            tabGroupHandler.syncDraftGroup(message.data.desiredUrls)
-                .then(sendResponse)
-                .catch(err => sendResponse({ success: false, error: err.message }));
-            isAsync = true;
-            break;
-        case 'focus_or_create_draft_tab':
-            tabGroupHandler.focusOrCreateDraftTab(message.data.url).then(sendResponse);
-            isAsync = true;
-            break;
-        case 'cleanup_draft_group':
-            tabGroupHandler.cleanupDraftGroup().then(sendResponse);
-            isAsync = true;
-            break;
-        case 'navigate_to_view':
-            // This is now primarily for the sidebar to handle, but we can acknowledge it.
-             chrome.runtime.sendMessage(message);
-            sendResponse({ success: true });
-            break;
-        case 'generate_custom_page':
-            processGenerateCustomPageRequest(message.data)
-                .then(sendResponse)
-                .catch(err => sendResponse({ success: false, error: err.message }));
-            isAsync = true;
-            break;
-        case 'delete_packet_image':
-            processDeletePacketImageRequest(message.data)
-                .then(sendResponse).catch(err => sendResponse({success: false, error: err.message}));
-            isAsync = true;
-            break;
-        case 'save_packet_image':
-            (async () => {
-                try {
-                    const imageToSave = message.data?.image;
-                    if (!imageToSave || !imageToSave.id || !imageToSave.topic) {
-                        sendResponse({ success: false, error: 'Invalid PacketImage object provided.'});
-                        return;
-                    }
-                    await storage.savePacketImage(imageToSave);
-                    chrome.runtime.sendMessage({ action: 'packet_image_created', data: { image: imageToSave } });
-                    sendResponse({ success: true, imageId: imageToSave.id });
-                } catch (error) {
-                    logger.error("MessageHandler:save_packet_image", "Failed to save image", error);
-                    sendResponse({ success: false, error: error.message });
-                }
-            })();
-            isAsync = true;
-            break;
-        case 'initiate_packet_creation_from_tab':
-            (async () => {
-                try {
-                    const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-                    if (!activeTab || typeof activeTab.id !== 'number') {
-                        throw new Error("Could not find the current active tab.");
-                    }
-                    const result = await processCreatePacketRequestFromTab(activeTab.id);
-                    sendResponse(result);
-                } catch (err) {
-                    logger.error("MessageHandler", "Error handling packet creation from tab", err);
-                    sendResponse({ success: false, error: err.message });
-                }
-            })();
-            isAsync = true;
-            break;
-        case 'initiate_packet_creation':
-             processCreatePacketRequest(message.data, sender.tab?.id)
-                .then(sendResponse).catch(err => sendResponse({success: false, error: err.message}));
-            isAsync = true;
-            break;
-        case 'instantiate_packet':
-            (async () => {
-                try {
-                    const { imageId } = message.data;
-                    if (!imageId) {
-                        sendResponse({ success: false, error: 'imageId is required to instantiate a packet.' });
-                        return;
-                    }
-                    const newInstanceId = `inst_${Date.now()}_${Math.random().toString(36).substring(2, 10)}`;
-                    const result = await instantiatePacket(imageId, newInstanceId, sender.tab?.id);
-                    if (result.success) {
-                        chrome.runtime.sendMessage({ action: 'packet_instance_created', data: { instance: result.instance, source: 'inbox_start' } });
-                    }
-                    sendResponse(result);
-                } catch (err) {
-                    logger.error("MessageHandler:instantiate_packet", "Caught error during instantiation", err);
-                    sendResponse({ success: false, error: err.message || 'An unknown error occurred.' });
-                }
-            })();
-            isAsync = true;
-            break;
-        case 'republish_page':
-            processRepublishRequest(message.data, sender.tab?.id)
-                 .then(sendResponse).catch(err => sendResponse({success: false, error: err.message}));
-            isAsync = true;
-            break;
-        case 'delete_packets':
-            processDeletePacketsRequest(message.data, sender.tab?.id)
-                 .then(sendResponse).catch(err => sendResponse({success: false, error: err.message}));
-            isAsync = true;
-            break;
-        case 'mark_url_visited': handleMarkUrlVisited(message.data, sendResponse); isAsync = true; break;
-        case 'media_playback_complete':
-            (async () => {
-                try {
-                    const { instanceId, pageId } = message.data;
-                    if (!instanceId || !pageId) {
-                        sendResponse({ success: false, error: 'Missing instanceId or pageId' });
-                        return;
-                    }
-                    
-                    await setMediaPlaybackState({ isPlaying: false, pageId: null, instanceId: null, topic: '', tabId: null, currentTime: 0, duration: 0 });
-                    
-                    const visitResult = await packetUtils.markPageIdAsVisited(instanceId, pageId);
-
-                    if (visitResult.success && visitResult.modified) {
-                        const updatedInstance = visitResult.instance || await storage.getPacketInstance(instanceId);
-                        if (updatedInstance) {
-                            sidebarHandler.notifySidebar('packet_instance_updated', { instance: updatedInstance, source: 'media_playback_complete' });
-                        }
-                        await checkAndPromptForCompletion('MessageHandler:media_playback_complete', visitResult, instanceId);
-                    }
-                    sendResponse({ success: visitResult.success, error: visitResult.error });
-                } catch (err) {
-                    sendResponse({ success: false, error: err.message });
-                }
-            })();
-            isAsync = true;
-            break;
-        case "open_content": handleOpenContent(message.data, sender, sendResponse); isAsync = true; break;
-        case "get_context_for_tab": handleGetContextForTab(message.data, sender, sendResponse); isAsync = true; break;
-        case "get_current_tab_context": handleGetCurrentTabContext(message.data, sender, sendResponse); isAsync = true; break;
-        case "remove_tab_groups":
-            (async () => {
-                if (!(await shouldUseTabGroups())) sendResponse({ success: false, error: 'Tab Groups feature is disabled.' });
-                else tabGroupHandler.handleRemoveTabGroups(message.data, sendResponse);
-            })();
-            isAsync = true; break;
-        case "focus_tab_group":
-            (async () => {
-                if (!(await shouldUseTabGroups())) sendResponse({ success: false, error: 'Tab Groups feature is disabled.' });
-                else tabGroupHandler.handleFocusTabGroup(message.data).then(sendResponse);
-            })();
-            isAsync = true; break;
-        case 'page_interaction_complete':
-            (async () => {
-                try {
-                    if (!sender.tab || typeof sender.tab.id !== 'number') {
-                        sendResponse({ success: false, error: 'Message must be sent from a tab.' });
-                        return;
-                    }
-                    const tabId = sender.tab.id;
-                    const context = await getPacketContext(tabId);
-
-                    if (!context || !context.instanceId || !context.packetUrl) {
-                        sendResponse({ success: false, error: 'No packet context found for this tab.' });
-                        return;
-                    }
-
-                    const { instanceId, packetUrl } = context;
-                    logger.log('MessageHandler', `Received 'page_interaction_complete' from tab ${tabId}`, { context });
-                    
-                    const visitResult = await packetUtils.markUrlAsVisited(instanceId, packetUrl);
-
-                    if (visitResult.success && visitResult.modified) {
-                        const updatedInstance = visitResult.instance || await storage.getPacketInstance(instanceId);
-                        if (updatedInstance) {
-                            sidebarHandler.notifySidebar('packet_instance_updated', { instance: updatedInstance, source: 'page_interaction_complete' });
-                            await checkAndPromptForCompletion('MessageHandler:page_interaction_complete', visitResult, instanceId);
-                        }
-                    }
-                    sendResponse({ success: visitResult.success, error: visitResult.error });
-                } catch (err) {
-                    sendResponse({ success: false, error: err.message });
-                }
-            })();
-            isAsync = true;
-            break;
-        case "reorder_packet_tabs":
-             handleReorderPacketTabs(message.data, sendResponse); isAsync = true; break;
-        case "reorder_all_tabs":
-            (async () => {
-                if (!(await shouldUseTabGroups())) sendResponse({ success: false, error: 'Tab Groups feature is disabled.' });
-                else tabGroupHandler.handleReorderAllTabs(sendResponse);
-            })();
-            isAsync = true; break;
-        case 'theme_preference_updated':
-             try { chrome.runtime.sendMessage({ action: 'theme_preference_updated', data: {} }); } catch(e){ /* ignore */ }
-             break;
-        case 'sidebar_ready':
-            handleSidebarReady(sender, sendResponse);
-            isAsync = true;
-            break;
-        case 'prepare_sidebar_navigation':
-            const targetView = message.data?.targetView;
-            if (targetView) {
-                 logger.log('MessageHandler', `Storing pending sidebar view: ${targetView}`);
-                 storage.setSession({ [PENDING_VIEW_KEY]: targetView })
-                      .then(success => sendResponse({ success }))
-                      .catch(err => {
-                           logger.error('MessageHandler', 'Failed to set session storage for pending view', err);
-                           sendResponse({ success: false, error: err.message });
-                      });
-                 isAsync = true;
-            } else {
-                 logger.warn('MessageHandler', 'Missing targetView for prepare_sidebar_navigation');
-                 sendResponse({ success: false, error: 'Missing targetView in data' });
-            }
-            break;
-        case 'publish_image_for_sharing':
-             publishImageForSharing(message.data?.imageId)
-                 .then(sendResponse).catch(err => sendResponse({success: false, error: err.message}));
-            isAsync = true;
-            break;
-        case 'import_image_from_url':
-             importImageFromUrl(message.data?.url)
-                 .then(sendResponse).catch(err => sendResponse({success: false, error: err.message}));
-            isAsync = true;
-            break;
-        default:
-            logger.log('MessageHandler', 'Unknown action received', message.action);
-            sendResponse({success: false, error: `Unknown action: ${message.action}`})
-            break;
-    }
-    return isAsync;
 }

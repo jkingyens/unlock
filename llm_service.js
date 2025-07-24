@@ -1,6 +1,6 @@
 // ext/llm_service.js
 
-import { logger, storage, CONFIG, MPI_PARAMS } from './utils.js'; // CONFIG for TEMPERATURE, MPI_PARAMS for event URL
+import { logger, storage, CONFIG } from './utils.js'; // CONFIG for TEMPERATURE, MPI_PARAMS for event URL
 
 // --- Helper functions ---
 function _cleanHtmlOutput(contentStr) {
