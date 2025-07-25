@@ -17,6 +17,8 @@ let currentPlayingPageId = null; // Track which media item is active in this vie
 
 // Functions to be imported from the new, lean sidebar.js
 let sendMessageToBackground;
+let navigateTo; // <--- ADD THIS LINE
+
 
 /**
  * Injects dependencies from the main sidebar module.
@@ -24,6 +26,19 @@ let sendMessageToBackground;
  */
 export function init(dependencies) {
     sendMessageToBackground = dependencies.sendMessageToBackground;
+        navigateTo = dependencies.navigateTo; // <--- ADD THIS LINE
+}
+
+/**
+ * Clears the internal state of the detail view.
+ * This is called when the currently viewed packet is deleted.
+ */
+export function clearCurrentDetailView() {
+    logger.log("DetailView", "Clearing internal state for deleted packet.");
+    currentDetailInstance = null;
+    currentPlayingPageId = null;
+    clearTimeout(saveStateDebounceTimer);
+    saveStateDebounceTimer = null;
 }
 
 // --- UI update handler called from sidebar.js ---
@@ -190,6 +205,14 @@ async function redrawAllVisibleWaveforms(playbackState = {}) {
 
 // --- Main Rendering Function ---
 export async function displayPacketContent(instance, canonicalPacketUrl) {
+
+    logger.log('DetailView:displayPacketContent', 'CRITICAL LOG: Received instance for display.', {
+        instanceId: instance?.instanceId,
+        mentionedMediaLinks: instance?.mentionedMediaLinks,
+        mentionedLinksLength: instance?.mentionedMediaLinks?.length || 0,
+        sourceUrl: canonicalPacketUrl
+    });
+
     const uniqueCallId = Date.now();
     if (isDisplayingPacketContent) {
         queuedDisplayRequest = { instance, canonicalPacketUrl };
@@ -331,16 +354,20 @@ async function createActionButtons(instance) {
     const isCompleted = packetUtils.isPacketInstanceCompleted(instance);
     let browserState = instance.instanceId ? await storage.getPacketBrowserState(instance.instanceId) : null;
     const tabGroupId = browserState?.tabGroupId;
-    let groupExists = false;
+    let groupHasTabs = false;
 
-    if (tabGroupId && chrome.tabGroups?.get) {
+    // THE FIX: Check if the group exists AND has tabs.
+    if (tabGroupId && chrome.tabs) {
         try {
-            await chrome.tabGroups.get(tabGroupId);
-            groupExists = true;
-        } catch (e) { /* group is gone */ }
+            const tabsInGroup = await chrome.tabs.query({ groupId: tabGroupId });
+            if (tabsInGroup.length > 0) {
+                groupHasTabs = true;
+            }
+        } catch (e) { /* Group is gone, so it has no tabs. */ }
     }
 
-    if (isCompleted && groupExists) {
+    // Only show the button if the packet is complete AND its tab group still has open tabs.
+    if (isCompleted && groupHasTabs) {
         const closeGroupBtn = document.createElement('button');
         closeGroupBtn.id = 'detail-close-group-btn';
         closeGroupBtn.textContent = 'Close Tab Group';
@@ -494,21 +521,36 @@ export function updateActiveCardHighlight(canonicalPacketUrl) {
 async function openUrl(url, instanceId) {
     if (!url || !instanceId) return;
 
+    // *** THE FIX: Pass the entire instance object, not just the ID. ***
+    // This uses the `currentDetailInstance` which is guaranteed to be the fresh,
+    // in-memory version of the instance, avoiding a read from storage.
+    const instanceToOpen = currentDetailInstance;
+    if (!instanceToOpen || instanceToOpen.instanceId !== instanceId) {
+        logger.error("DetailView", "Mismatch or missing instance data for openUrl", { instanceId, currentDetailInstance });
+        return;
+    }
+
     await triggerImmediateSave();
 
     sendMessageToBackground({
         action: 'open_content',
-        data: { packetId: instanceId, url: url } // The 'url' here is the canonical one to open.
+        data: { instance: instanceToOpen, url: url } // Pass the full instance object
     }).catch(err => logger.error("DetailView", `Error opening link: ${err.message}`));
 }
 
 function handleCloseTabGroup(tabGroupId) {
+    // THE FIX: Navigate immediately for a responsive feel.
+    navigateTo('root');
+
+    // Send the command to the background to clean up the tabs without waiting.
     sendMessageToBackground({
         action: 'remove_tab_groups',
         data: { groupIds: [tabGroupId] }
-    }).catch(err => logger.error("DetailView", `Error closing group: ${err.message}`));
+    }).catch(err => {
+        // Log any errors silently. The user has already moved on in the UI.
+        logger.error("DetailView", `Error sending close group message: ${err.message}`);
+    });
 }
-
 export async function stopAndClearActiveAudio() {
     sendMessageToBackground({
         action: 'request_playback_action',

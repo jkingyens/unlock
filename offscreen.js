@@ -64,14 +64,12 @@ async function handleAudioControl(request) {
 
     switch (command) {
         case 'play':
-            // If it's a new track, create a blob URL and load it
-            if (audio.dataset.pageId !== data.pageId) {
-                // Decode the Base64 audio data received from the background script
+            // This check remains correct: a new instance will always reload the audio.
+            if (audio.dataset.instanceId !== data.instanceId || audio.dataset.pageId !== data.pageId) {
                 const audioBuffer = base64ToAb(data.audioB64);
                 const blob = new Blob([audioBuffer], { type: data.mimeType });
                 const audioUrl = URL.createObjectURL(blob);
 
-                // Revoke the old object URL to prevent memory leaks
                 if (audio.src && audio.src.startsWith('blob:')) {
                     URL.revokeObjectURL(audio.src);
                 }
@@ -85,6 +83,18 @@ async function handleAudioControl(request) {
             break;
         case 'pause':
             audio.pause();
+            break;
+        case 'stop':
+            // *** THE FIX: A new command to fully reset the player's state. ***
+            audio.pause();
+            audio.currentTime = 0;
+            if (audio.src && audio.src.startsWith('blob:')) {
+                URL.revokeObjectURL(audio.src);
+            }
+            audio.src = '';
+            audio.removeAttribute('src');
+            audio.dataset.pageId = '';
+            audio.dataset.instanceId = '';
             break;
         case 'toggle':
             if (audio.paused) {

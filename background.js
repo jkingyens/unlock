@@ -15,13 +15,19 @@ import {
     CONFIG,
     clearPacketContext,
     packetUtils,
+    indexedDbStorage,
+    arrayBufferToBase64,
+    base64Decode,
+    sanitizeForFileName,
+    isSidePanelAvailable,
+    applyThemeMode
 } from './utils.js';
 import * as msgHandler from './background-modules/message-handlers.js';
 import * as ruleManager from './background-modules/rule-manager.js';
-import { onCommitted, onHistoryStateUpdated } from './background-modules/navigation-handler.js';
+import { onCommitted, onHistoryStateUpdated, checkAndPromptForCompletion } from './background-modules/navigation-handler.js';
 import * as tabGroupHandler from './background-modules/tab-group-handler.js';
 import * as sidebarHandler from './background-modules/sidebar-handler.js';
-import cloudStorage from '../cloud-storage.js';
+import cloudStorage from './cloud-storage.js';
 
 const ACTIVE_MEDIA_KEY = 'activeMediaPlaybackState';
 const AUDIO_KEEP_ALIVE_ALARM = 'audio-keep-alive';
@@ -30,6 +36,7 @@ const AUDIO_KEEP_ALIVE_ALARM = 'audio-keep-alive';
 // In-memory map for interim context transfer
 export let interimContextMap = new Map();
 
+// This object holds the current state and is exported for other modules to read.
 export let activeMediaPlayback = {
     tabId: null,
     instanceId: null,
@@ -41,6 +48,30 @@ export let activeMediaPlayback = {
     mentionedMediaLinks: [],
     lastMentionedLink: null
 };
+
+// This is the single, authoritative function for clearing the in-memory state.
+export async function resetActiveMediaPlayback() {
+    logger.log('Background', 'CRITICAL LOG: Resetting global activeMediaPlayback state.');
+    
+    // FIX: Define the initial state *inside* the function.
+    // This resolves the ReferenceError because the constant is now in the correct scope.
+    const initialMediaPlaybackState = {
+        tabId: null,
+        instanceId: null,
+        pageId: null,
+        isPlaying: false,
+        topic: '',
+        currentTime: 0,
+        duration: 0,
+        mentionedMediaLinks: [],
+        lastMentionedLink: null
+    };
+
+    activeMediaPlayback = { ...initialMediaPlaybackState };
+    
+    // Broadcast the cleared state to all UI components to ensure they hide.
+    await setMediaPlaybackState({}, { source: 'reset' });
+}
 
 // Rule refresh alarm name
 const RULE_REFRESH_ALARM_NAME = 'refreshRedirectRules';
@@ -121,6 +152,12 @@ async function injectOverlayScripts(tabId) {
 
 // --- State Management and Broadcasting ---
 export async function setMediaPlaybackState(newState, options = { animate: false, source: 'unknown' }) {
+    logger.log('Background:setMediaPlaybackState', 'CRITICAL LOG: State update requested.', {
+        source: options.source,
+        newState: newState,
+        currentMentionedLinks: activeMediaPlayback.mentionedMediaLinks
+    });
+
     const oldLink = activeMediaPlayback.lastMentionedLink;
     const { lastMentionedLink, ...restOfNewState } = newState;
     const previousTabId = activeMediaPlayback.tabId;
@@ -201,18 +238,32 @@ export async function setMediaPlaybackState(newState, options = { animate: false
         animateLinkMention: aNewLinkWasMentioned && options.source === 'time_update'
     };
     
-    if (previousTabId && previousTabId !== activeMediaPlayback.tabId) {
-         chrome.tabs.sendMessage(previousTabId, {
-            action: 'sync_overlay_state',
-            data: { isVisible: false }
-        }).catch(e => {});
+    let targetTabId = activeMediaPlayback.tabId;
+    if (!targetTabId) {
+        try {
+            const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+            if (activeTab) {
+                targetTabId = activeTab.id;
+            }
+        } catch (e) {}
     }
-
-    if (activeMediaPlayback.tabId) {
-        chrome.tabs.sendMessage(activeMediaPlayback.tabId, {
-            action: 'sync_overlay_state',
-            data: finalState
-        }).catch(e => {});
+    
+    if (previousTabId && previousTabId !== targetTabId) {
+         try {
+             await chrome.tabs.sendMessage(previousTabId, {
+                action: 'sync_overlay_state',
+                data: { isVisible: false }
+            });
+         } catch(e) {}
+    }
+    
+    if (targetTabId) {
+        try {
+            await chrome.tabs.sendMessage(targetTabId, {
+                action: 'sync_overlay_state',
+                data: finalState
+            });
+        } catch(e) {}
     }
     
     sidebarHandler.notifySidebar('playback_state_updated', activeMediaPlayback);
@@ -239,10 +290,6 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     for (const tab of tabs) {
         if (tab.id) {
             injectOverlayScripts(tab.id);
-            chrome.tabs.sendMessage(tab.id, {
-                action: 'sync_overlay_state',
-                data: { ...activeMediaPlayback, isVisible: false }
-            }).catch(e => {});
         }
     }
 
@@ -282,7 +329,9 @@ chrome.runtime.onStartup.addListener(async () => {
      await getDb();
  });
 
-chrome.runtime.onMessage.addListener(msgHandler.handleMessage);
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    return msgHandler.handleMessage(message, sender, sendResponse);
+});
 
 chrome.runtime.onMessageExternal.addListener(async (message, sender, sendResponse) => {
     if (message.action === 'page_interaction_complete') {
@@ -312,7 +361,6 @@ chrome.action.onClicked.addListener((tab) => {
     }
 });
 
-// *** FIX: Added listeners to reactively re-order tab groups on any change. ***
 chrome.tabs.onCreated.addListener(async (tab) => {
     if (tab.groupId && tab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE) {
         await reorderGroupFromChangeEvent(tab.groupId);
@@ -335,17 +383,9 @@ async function reorderGroupFromChangeEvent(groupId) {
                 await tabGroupHandler.orderTabsInGroup(groupId, instance);
             }
         }
-    } catch (error) {
-        // Ignore errors if the group is transient or gone.
-    }
+    } catch (error) {}
 }
 
-
-chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
-    if (changeInfo.status === 'complete' && tab.url?.startsWith('http')) {
-        injectOverlayScripts(tabId);
-    }
-});
 
 chrome.tabs.onActivated.addListener(async (activeInfo) => {
     const tabId = activeInfo.tabId;
@@ -367,6 +407,12 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
 });
 
 chrome.tabs.onRemoved.addListener(async (tabId, removeInfo) => {
+    if (tabId === activeMediaPlayback.tabId) {
+        logger.log('Background', `Playback tab ${tabId} was closed. Stopping media.`);
+        if (typeof msgHandler.handlePlaybackActionRequest === 'function') {
+            await msgHandler.handlePlaybackActionRequest({ data: { intent: 'stop' } }, {}, () => {});
+        }
+    }
     await tabGroupHandler.handleTabRemovalCleanup(tabId, removeInfo);
 });
 
@@ -394,9 +440,12 @@ function attachNavigationListeners() {
 chrome.runtime.onConnect.addListener(async (port) => {
   if (port.name === 'sidebar') {
     await storage.setSession({ isSidebarOpen: true });
+    // FIX: Replaced the incorrect function call with the correct one.
     await setMediaPlaybackState({}, { animate: false, source: 'sidebar_connect' });
+
     port.onDisconnect.addListener(async () => {
       await storage.setSession({ isSidebarOpen: false });
+      // FIX: Replaced the incorrect function call with the correct one.
       await setMediaPlaybackState({}, { animate: true, source: 'sidebar_disconnect' });
     });
   }

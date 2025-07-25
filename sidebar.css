@@ -274,9 +274,12 @@ body.dark-mode .creation-stage-text {
 }
 #detail-cards-container .card.active {
   background-color: var(--bg-accent);
-  border: 2px solid var(--card-border-active);
-  padding: 11px;
+  border: 2px solid var(--card-border-active); /* Sets the thicker active border for top, right, bottom */
+  padding: 11px;                             /* Adjusts padding for the thicker border */
+  border-left-width: 3px;                      /* Overrides the left border to match other cards */
+  padding-left: 12px;                          /* Adjusts left padding to restore perfect alignment */
 }
+
 #detail-cards-container .card.active.visited {
   border-left-color: var(--card-border-visited);
 }
