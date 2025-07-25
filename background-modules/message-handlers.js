@@ -39,6 +39,7 @@ import {
     setMediaPlaybackState,
     controlAudioInOffscreen,
     activeMediaPlayback,
+    resetActiveMediaPlayback
 } from '../background.js';
 import { checkAndPromptForCompletion } from './navigation-handler.js';
 
@@ -137,15 +138,16 @@ async function handleGetPageDetailsFromDOM(sender, sendResponse) {
 }
 
 async function handleOpenContent(data, sender, sendResponse) {
-    const { packetId: instanceId, url: clickedUrl } = data;
+    const { instance, url: clickedUrl } = data;
+    const instanceId = instance?.instanceId;
     const targetCanonicalUrl = clickedUrl;
-    if (!instanceId || !targetCanonicalUrl) {
-        sendResponse({ success: false, error: 'Missing instanceId or targetCanonicalUrl' });
+
+    if (!instance || !instanceId || !targetCanonicalUrl) {
+        sendResponse({ success: false, error: 'Missing instance data or targetCanonicalUrl' });
         return;
     }
 
     try {
-        const instance = await storage.getPacketInstance(instanceId);
         if (!instance) throw new Error(`Packet instance ${instanceId} not found`);
 
         let existingTab = null;
@@ -153,13 +155,6 @@ async function handleOpenContent(data, sender, sendResponse) {
         for (const tab of allTabs) {
             const context = await getPacketContext(tab.id);
             if (context && context.instanceId === instanceId && context.canonicalPacketUrl === targetCanonicalUrl) {
-                existingTab = tab;
-                break;
-            }
-            const trustedIntentKey = `trusted_intent_${tab.id}`;
-            const sessionData = await storage.getSession(trustedIntentKey);
-            const trustedContext = sessionData[trustedIntentKey];
-            if (trustedContext && trustedContext.instanceId === instanceId && trustedContext.canonicalPacketUrl === targetCanonicalUrl) {
                 existingTab = tab;
                 break;
             }
@@ -183,18 +178,15 @@ async function handleOpenContent(data, sender, sendResponse) {
             await chrome.tabs.update(existingTab.id, { url: finalUrlToOpen, active: true });
             if (existingTab.windowId) await chrome.windows.update(existingTab.windowId, { focused: true });
         } else {
-            // *** FIX: Create tab in the background first to win the race condition. ***
             const newTab = await chrome.tabs.create({ url: finalUrlToOpen, active: false });
             if (!newTab || typeof newTab.id !== 'number') throw new Error('Tab creation failed.');
             
-            // "Stamp" the tab with its identity BEFORE activating it.
             const trustedIntent = {
                 instanceId: instanceId,
                 canonicalPacketUrl: targetCanonicalUrl,
             };
             await storage.setSession({ [`trusted_intent_${newTab.id}`]: trustedIntent });
             
-            // Now, activate the tab. The navigation handler is guaranteed to find the stamp.
             await chrome.tabs.update(newTab.id, { active: true });
             
             logger.log(`MessageHandler:handleOpenContent`, `Set trusted intent token for new Tab ${newTab.id}.`);
@@ -248,7 +240,7 @@ async function handleSidebarReady(data, sender, sendResponse) {
 
 async function handlePlaybackActionRequest(data, sender, sendResponse) {
     const { intent, instanceId, pageId } = data;
-    const currentState = activeMediaPlayback;
+    const currentState = { ...activeMediaPlayback };
     try {
         switch (intent) {
             case 'play':
@@ -266,17 +258,27 @@ async function handlePlaybackActionRequest(data, sender, sendResponse) {
                 if (!contentItem) throw new Error(`Could not find track ${pageId} in packet.`);
                 const cachedAudio = await indexedDbStorage.getGeneratedContent(instance.imageId, pageId);
                 if (!cachedAudio || !cachedAudio[0]?.content) throw new Error("Could not find cached audio data.");
+
+                // Load and start playing the audio in the offscreen document first.
                 const audioB64 = arrayBufferToBase64(cachedAudio[0].content);
                 await controlAudioInOffscreen('play', { audioB64, mimeType: contentItem.mimeType, pageId, instanceId });
                 const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+
+                // Now, update the central state, explicitly resetting any properties
+                // that could have been carried over from a previous session.
                 await setMediaPlaybackState({
-                    isPlaying: true, pageId, instanceId,
+                    isPlaying: true,
+                    pageId,
+                    instanceId,
                     topic: instance.topic,
                     tabId: activeTab ? activeTab.id : null,
-                    currentTime: 0, 
-                    duration: 0
-                });
+                    currentTime: 0, // Explicitly reset playback progress
+                    duration: 0, // Explicitly reset duration
+                    mentionedMediaLinks: [], // Explicitly clear mentioned links
+                    lastMentionedLink: null // Explicitly clear last mentioned link
+                }, { source: 'play_intent' });
                 break;
+
             case 'pause':
             case 'toggle':
                 if (!currentState.pageId) throw new Error('No active media to toggle/pause.');
@@ -285,8 +287,8 @@ async function handlePlaybackActionRequest(data, sender, sendResponse) {
                 break;
             case 'stop':
                 if (currentState.pageId) {
-                    await controlAudioInOffscreen('pause', {});
-                    await setMediaPlaybackState({ isPlaying: false, pageId: null, instanceId: null, topic: '', currentTime: 0, duration: 0 });
+                    await controlAudioInOffscreen('stop', {});
+                    await resetActiveMediaPlayback();
                 }
                 break;
             default:
@@ -300,7 +302,25 @@ async function handlePlaybackActionRequest(data, sender, sendResponse) {
 
 const actionHandlers = {
     'request_playback_action': handlePlaybackActionRequest,
-    'get_playback_state': (data, sender, sendResponse) => sendResponse(activeMediaPlayback),
+    'get_playback_state': async (data, sender, sendResponse) => {
+        try {
+            const hasActiveTrack = !!activeMediaPlayback.pageId;
+            const { isSidebarOpen } = await storage.getSession({ isSidebarOpen: false });
+            const isVisible = hasActiveTrack && !isSidebarOpen;
+    
+            const fullState = {
+                ...activeMediaPlayback,
+                isVisible: isVisible,
+                animate: false, // Don't animate on initial load
+                animateLinkMention: false
+            };
+            sendResponse(fullState);
+        } catch (e) {
+            logger.error('MessageHandler:get_playback_state', 'Error constructing full state', e);
+            sendResponse({ ...activeMediaPlayback, isVisible: false });
+        }
+        return true; // Indicates an asynchronous response
+    },
     'open_sidebar_and_navigate': async (data, sender, sendResponse) => {
         await chrome.sidePanel.open({ windowId: sender.tab.windowId });
         chrome.runtime.sendMessage({ action: 'navigate_to_view', data });
@@ -360,10 +380,22 @@ const actionHandlers = {
         }
         sendResponse(result);
     },
-    'delete_packets': (data) => processDeletePacketsRequest(data),
+    'delete_packets': async (data, sender, sendResponse) => {
+        // FIX: Aggressively clear the active media player's state if any of the
+        // packets being deleted are the one currently loaded in the player.
+        // This is done BEFORE the deletion process to prevent race conditions.
+        if (data?.packetIds && activeMediaPlayback.instanceId) {
+            if (data.packetIds.includes(activeMediaPlayback.instanceId)) {
+                await resetActiveMediaPlayback();
+            }
+        }
+
+        const result = await processDeletePacketsRequest(data);
+        sendResponse(result);
+    },
     'mark_url_visited': handleMarkUrlVisited,
     'media_playback_complete': async (data, sender, sendResponse) => {
-        await setMediaPlaybackState({ isPlaying: false, pageId: null, instanceId: null });
+        await handlePlaybackActionRequest({ data: { intent: 'stop' } }, sender, () => {});
         const visitResult = await packetUtils.markPageIdAsVisited(data.instanceId, data.pageId);
         if (visitResult.success && visitResult.modified) {
             sidebarHandler.notifySidebar('packet_instance_updated', { instance: visitResult.instance });
@@ -372,8 +404,33 @@ const actionHandlers = {
         sendResponse(visitResult);
     },
     'open_content': handleOpenContent,
+    'open_content_from_overlay': async (data, sender, sendResponse) => {
+        const { url } = data;
+        const { instanceId } = activeMediaPlayback;
+
+        if (!instanceId || !url) {
+            return sendResponse({ success: false, error: 'Missing active instance or URL.' });
+        }
+
+        try {
+            await setMediaPlaybackState({}, { animate: false, source: 'overlay_link_click' });
+            const instance = await storage.getPacketInstance(instanceId);
+            if (!instance) {
+                throw new Error(`Instance ${instanceId} not found.`);
+            }
+            await handleOpenContent({ instance, url }, sender, sendResponse);
+        } catch (error) {
+            logger.error('MessageHandler:open_content_from_overlay', 'Error opening content', error);
+            sendResponse({ success: false, error: error.message });
+        }
+        return true;
+    },
     'get_context_for_tab': handleGetContextForTab,
     'get_current_tab_context': handleGetCurrentTabContext,
+    'set_media_playback_state': (data, sender, sendResponse) => {
+        setMediaPlaybackState({}, data); 
+        sendResponse({ success: true });
+    },
     'page_interaction_complete': async (data, sender, sendResponse) => {
         const context = await getPacketContext(sender.tab.id);
         if (context?.instanceId && context?.canonicalPacketUrl) {

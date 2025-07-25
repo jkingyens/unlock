@@ -12,6 +12,10 @@ import {
     setPacketContext,
     clearPacketContext,
 } from '../utils.js';
+import {
+    activeMediaPlayback,
+    resetActiveMediaPlayback
+} from '../background.js';
 import * as sidebarHandler from './sidebar-handler.js';
 import * as tabGroupHandler from './tab-group-handler.js';
 
@@ -21,6 +25,25 @@ export function clearPendingVisitTimer(tabId) {
     if (pendingVisitTimers.has(tabId)) {
         clearTimeout(pendingVisitTimers.get(tabId));
         pendingVisitTimers.delete(tabId);
+    }
+}
+
+// --- ADD THIS HELPER FUNCTION ---
+// This function ensures the overlay scripts are always present on the page.
+async function injectOverlayScripts(tabId) {
+    try {
+        // The 'scripting' permission is required in manifest.json
+        await chrome.scripting.executeScript({
+            target: { tabId: tabId },
+            files: ['overlay.js']
+        });
+        await chrome.scripting.insertCSS({
+            target: { tabId: tabId },
+            files: ['overlay.css']
+        });
+    } catch (e) {
+        // This is expected to fail on chrome:// pages, store pages, etc.
+        // We can safely ignore these errors as the overlay isn't needed there.
     }
 }
 
@@ -36,6 +59,14 @@ export async function onHistoryStateUpdated(details) {
 
 export async function checkAndPromptForCompletion(logPrefix, visitResult, instanceId) {
     if (visitResult?.success && visitResult?.justCompleted) {
+         // --- START OF THE FIX ---
+        // If the packet that was just completed is the one in the active media player,
+        // we must reset the player's in-memory state to prevent it from leaking.
+        if (activeMediaPlayback.instanceId === instanceId) {
+            logger.log('NavigationHandler', 'Completed packet was the active media packet. Resetting player state.');
+            await resetActiveMediaPlayback();
+        }
+        // --- END OF THE FIX ---
         const instanceDataForPrompt = visitResult.instance || await storage.getPacketInstance(instanceId);
         if (instanceDataForPrompt && sidebarHandler.isSidePanelAvailable()) {
             sidebarHandler.notifySidebar('show_confetti', { topic: instanceDataForPrompt.topic || '' });
@@ -54,6 +85,9 @@ export async function checkAndPromptForCompletion(logPrefix, visitResult, instan
 }
 
 async function processNavigationEvent(tabId, finalUrl, details) {
+
+    await injectOverlayScripts(tabId);
+
     const logPrefix = `[NavigationHandler Tab ${tabId}]`;
     clearPendingVisitTimer(tabId);
 

@@ -160,6 +160,10 @@ async function updateSidebarContext(contextData) {
     const newPacketUrl = contextData?.packetUrl ?? null;
     let newInstanceData = contextData?.instance ?? null;
 
+    if (newInstanceId === null && currentView === 'packet-detail') {
+        return;
+    }
+
     // *** FIX: Make the logic "stickier" to prevent flashing. ***
     // Only navigate away from the detail view if we receive a definitive new context
     // that is different, or if the view is not the detail view.
@@ -259,10 +263,22 @@ async function handleBackgroundMessage(message) {
             if (currentView === 'root') {
                 rootView.removeInstanceRow(data.packetId);
             }
+
             if (data?.packetId === currentInstanceId) {
-                 navigateTo('root');
+                currentInstanceId = null;
+                currentInstanceData = null;
             }
+
+            // Always clear the detail view's internal state to prevent zombie saves.
+            detailView.clearCurrentDetailView();
             detailView.stopAudioIfPacketDeleted(data.packetId);
+            
+            // If the user somehow deleted the packet they were actively looking at,
+            // navigate them safely back to the root view.
+            if (data?.packetId === currentInstanceId && currentView === 'packet-detail') {
+                navigateTo('root');
+            }
+            // --- END OF THE FIX ---
             break;
         case 'packet_deletion_complete':
             showRootViewStatus(data.message || 'Deletion complete.', data.errors?.length > 0 ? 'error' : 'success');

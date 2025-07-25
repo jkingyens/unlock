@@ -172,26 +172,46 @@ export async function orderTabsInGroup(groupId, instance) {
     }
 }
 
-// *** FIX: Added the 'export' keyword to make this function accessible. ***
 export async function handleRemoveTabGroups(data, sendResponse) {
     const { groupIds } = data;
-    if (!isTabGroupsAvailable()) return sendResponse({ success: false, error: 'Tab Groups API not available.' });
-    if (!Array.isArray(groupIds) || groupIds.length === 0) return sendResponse({ success: false, error: 'Invalid group ID array.' });
+    logger.log('TabGroupHandler:handleRemove', 'Received request to remove groups', { groupIds });
+
+    if (!isTabGroupsAvailable()) {
+        logger.warn('TabGroupHandler:handleRemove', 'Tab Groups API not available.');
+        return sendResponse({ success: false, error: 'Tab Groups API not available.' });
+    }
+    if (!Array.isArray(groupIds) || groupIds.length === 0) {
+        logger.warn('TabGroupHandler:handleRemove', 'Invalid or empty groupIds array provided.');
+        return sendResponse({ success: false, error: 'Invalid group ID array.' });
+    }
 
     const errors = [];
     for (const groupId of groupIds) {
         try {
+            logger.log('TabGroupHandler:handleRemove', `Querying for tabs in group ${groupId}`);
             const tabsInGroup = await chrome.tabs.query({ groupId });
+
             if (tabsInGroup.length > 0) {
-                await chrome.tabs.remove(tabsInGroup.map(t => t.id));
+                const tabIds = tabsInGroup.map(t => t.id);
+                logger.log('TabGroupHandler:handleRemove', `Found ${tabIds.length} tabs to remove`, { tabIds });
+                await chrome.tabs.remove(tabIds);
+                logger.log('TabGroupHandler:handleRemove', `Successfully removed tabs for group ${groupId}`);
+            } else {
+                logger.log('TabGroupHandler:handleRemove', `No tabs found for group ${groupId}, considering it closed.`);
             }
         } catch (error) {
-            if (!error.message.toLowerCase().includes('no tab group with id')) {
+            if (error.message.toLowerCase().includes('no tab group with id')) {
+                logger.log('TabGroupHandler:handleRemove', `Group ${groupId} not found, likely already closed.`);
+            } else {
+                logger.error('TabGroupHandler:handleRemove', `Error processing group ${groupId}`, error);
                 errors.push(`Group ${groupId}: ${error.message}`);
             }
         }
     }
-    sendResponse({ success: errors.length === 0, errors });
+
+    const response = { success: errors.length === 0, errors };
+    logger.log('TabGroupHandler:handleRemove', 'Sending response', response);
+    sendResponse(response);
 }
 
 export async function handleTabRemovalCleanup(tabId, removeInfo) {

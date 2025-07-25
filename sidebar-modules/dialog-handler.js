@@ -16,11 +16,14 @@ let titlePromptKeyListener = null;
 
 let sendMessageToBackground;
 let showRootViewStatus; // Add this
+let navigateTo; // <--- ADD THIS LINE
+
 
 // --- Initialization ---
 export function init(dependencies) {
     sendMessageToBackground = dependencies.sendMessageToBackground;
     showRootViewStatus = dependencies.showRootViewStatus; // Store this dependency
+    navigateTo = dependencies.navigateTo; // <--- ADD THIS LINE
 }
 
 /**
@@ -233,10 +236,30 @@ function removeCloseGroupDialogListeners() {
     closeGroupConfirmListener = closeGroupCancelListener = closeGroupOverlayClickListener = null;
 }
 
+async function handleCloseTabGroup(tabGroupId) {
+    try {
+        // THE FIX: Wait for the background script to confirm the tabs are closed.
+        await sendMessageToBackground({
+            action: 'remove_tab_groups',
+            data: { groupIds: [tabGroupId] }
+        });
+        // This navigation will now only happen AFTER the tabs are gone.
+        navigateTo('root');
+    } catch (err) {
+        logger.error("DetailView", `Error closing group: ${err.message}`);
+        // Still navigate to root even if there was an error (e.g., group already gone).
+        navigateTo('root');
+    }
+}
+
 function handleConfirmCloseGroup(tabGroupId) {
+    // THE FIX: Hide the dialog and navigate the UI immediately.
+    hideCloseGroupDialog();
+    navigateTo('root');
+
+    // Send the command to the background to handle independently.
     sendMessageToBackground({ action: 'remove_tab_groups', data: { groupIds: [tabGroupId] } })
         .catch(err => logger.error("DialogHandler", `Error sending close group message: ${err.message}`));
-    hideCloseGroupDialog();
 }
 
 export function showConfirmDialog(message, confirmText = 'Confirm', cancelText = 'Cancel', isDangerAction = false) {

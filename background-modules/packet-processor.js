@@ -8,6 +8,7 @@ import {
     CONFIG,
     arrayBufferToBase64,
     base64Decode,
+    MPI_PARAMS,
     sanitizeForFileName
 } from '../utils.js';
 import llmService from '../llm_service.js';
@@ -240,82 +241,395 @@ function runPositionalInterpolation(sourceOfTruthText, wordTimestamps, links) {
 
 
 // --- Main Processing Functions ---
-
-export async function processImproveDraftAudio(data) {
-    const { draftId, mediaPageId } = data;
-    if (!draftId || !mediaPageId) {
-        return { success: false, error: "Missing draftId or mediaPageId for audio improvement." };
-    }
+export async function instantiatePacket(imageId, preGeneratedInstanceId, initiatorTabId = null) {
+    const instanceId = preGeneratedInstanceId;
+    logger.log('PacketProcessor:instantiatePacket', 'Starting INSTANCE finalization', { imageId, instanceId });
 
     try {
-        const audioContent = await indexedDbStorage.getGeneratedContent(draftId, mediaPageId);
-        if (!audioContent || audioContent.length === 0) {
-            throw new Error(`Audio content not found in IndexedDB for pageId: ${mediaPageId}`);
+        const packetImage = await storage.getPacketImage(imageId);
+        if (!packetImage) throw new Error(`Packet Image ${imageId} not found.`);
+
+        const hasGeneratedContent = packetImage.sourceContent.some(item => item.type === 'generated' || item.type === 'media' || (item.type === 'alternative' && item.alternatives.some(alt => alt.type === 'generated' || alt.type === 'media')));
+        let activeCloudConfig = null;
+
+        if (hasGeneratedContent) {
+            logger.log('PacketProcessor:instantiatePacket', 'Packet contains generated content, checking cloud storage...');
+            activeCloudConfig = await storage.getActiveCloudStorageConfig();
+            if (!activeCloudConfig) {
+                throw new Error("This packet contains generated pages, but no active cloud storage is configured for publishing.");
+            }
+            if (!(await cloudStorage.initialize())) {
+                throw new Error("Cloud storage failed to initialize for publishing.");
+            }
+        } else {
+            logger.log('PacketProcessor:instantiatePacket', 'Packet contains only external links. Skipping cloud storage checks.');
+        }
+
+        // *** THE FIX: Perform a deep copy of the sourceContent. ***
+        // This prevents state (like mentionedMediaLinks or visitedUrls) from leaking 
+        // between instances that are created from the same PacketImage template.
+        const deepCopiedSourceContent = JSON.parse(JSON.stringify(packetImage.sourceContent));
+
+        let packetInstance = {
+            instanceId: instanceId,
+            imageId: imageId,
+            topic: packetImage.topic,
+            created: packetImage.created,
+            instantiated: new Date().toISOString(),
+            contents: [], // This will be populated from the deep-copied source
+            visitedUrls: [],
+            visitedGeneratedPageIds: [],
+            mentionedMediaLinks: [], 
+        };
+
+        // Populate the new instance's contents from the pristine, deep-copied template
+        for (const sourceItem of deepCopiedSourceContent) {
+            if (sourceItem.type === 'alternative') {
+                const settings = await storage.getSettings();
+                const preferAudio = settings.preferAudio && sourceItem.alternatives.some(a => a.type === 'media');
+
+                const chosenItem = preferAudio
+                    ? sourceItem.alternatives.find(a => a.type === 'media')
+                    : sourceItem.alternatives.find(a => a.type === 'generated');
+                
+                if (chosenItem) {
+                    packetInstance.contents.push(chosenItem);
+                }
+
+            } else {
+                packetInstance.contents.push(sourceItem);
+            }
         }
         
-        const originalBlob = new Blob([audioContent[0].content], { type: audioContent[0].contentType });
-        const normalizedBlob = await normalizeAudioOffscreen(originalBlob);
+        // Process and publish content for the new instance
+        for (let i = 0; i < packetInstance.contents.length; i++) {
+            const item = packetInstance.contents[i];
+            if (item.type === 'generated') {
+                const { pageId, contentB64, contentType } = item;
+                if (!contentB64) {
+                    logger.warn('PacketProcessor:instantiate', `Generated item ${pageId} is missing Base64 content. Cannot publish.`);
+                    item.published = false;
+                    item.url = null;
+                } else {
+                    const decodedContent = base64Decode(contentB64);
+                    const filesToUpload = [{ name: 'index.html', content: new TextDecoder().decode(decodedContent), contentType }];
+                    
+                    await indexedDbStorage.saveGeneratedContent(imageId, pageId, filesToUpload);
+
+                    const uploadResult = await cloudStorage.uploadPacketFiles(instanceId, pageId, filesToUpload, 'private');
+                    if (uploadResult.success) {
+                        item.url = uploadResult.url;
+                        item.published = true;
+                        item.publishContext = {
+                            storageConfigId: activeCloudConfig.id,
+                            provider: activeCloudConfig.provider,
+                            region: activeCloudConfig.region,
+                            bucket: activeCloudConfig.bucket
+                        };
+                    } else {
+                        throw new Error(`Failed to publish ${pageId}: ${uploadResult.error}`);
+                    }
+                }
+                delete item.contentB64;
+            } else if (item.type === 'media') {
+                const { pageId, mimeType, title } = item;
+                const cachedContent = await indexedDbStorage.getGeneratedContent(imageId, pageId);
+
+                if (!cachedContent || cachedContent.length === 0) {
+                    logger.warn('PacketProcessor:instantiate', `Media item ${pageId} is missing from IndexedDB, so it cannot be published.`);
+                    item.published = false;
+                    item.url = null;
+                } else {
+                    const fileContent = cachedContent[0].content;
+                    const fileExtension = mimeType === 'audio/wav' ? '.wav' : (mimeType === 'audio/mpeg' ? '.mp3' : '');
+                    const fileName = sanitizeForFileName(title) + fileExtension;
+                    const filePath = `packets/${instanceId}/${pageId}/${fileName}`;
+                    
+                    const uploadResult = await cloudStorage.uploadFile(filePath, fileContent, mimeType, 'private');
+                    if (uploadResult.success) {
+                        item.url = uploadResult.fileName;
+                        item.published = true;
+                        item.publishContext = {
+                            storageConfigId: activeCloudConfig.id,
+                            provider: activeCloudConfig.provider,
+                            region: activeCloudConfig.region,
+                            bucket: activeCloudConfig.bucket
+                        };
+                    } else {
+                        item.published = false;
+                        item.url = null;
+                        throw new Error(`Failed to publish media ${title}: ${uploadResult.error}`);
+                    }
+                }
+            }
+        }
         
-        const updatedBuffer = await normalizedBlob.arrayBuffer();
+        logger.log('PacketProcessor:instantiatePacket', 'CRITICAL LOG: Final instance state before saving.', {
+            instanceId: packetInstance.instanceId,
+            mentionedMediaLinks: packetInstance.mentionedMediaLinks,
+            mentionedLinksLength: packetInstance.mentionedMediaLinks?.length || 0
+        });
 
-        // Overwrite the existing audio in IndexedDB with the improved version
-        await indexedDbStorage.saveGeneratedContent(draftId, mediaPageId, [{
-            name: 'audio.wav', // Saving as WAV as that's what our encoder produces
-            content: updatedBuffer,
-            contentType: 'audio/wav'
-        }]);
+        if (!(await storage.savePacketInstance(packetInstance))) {
+            throw new Error("Failed to save final Packet Instance.");
+        }
+        
+        await storage.savePacketBrowserState({ instanceId: instanceId, tabGroupId: null, activeTabIds: [], lastActiveUrl: null });
+        
+        await ruleManager.addOrUpdatePacketRules(packetInstance);
+        
+        logger.log('PacketProcessor:instantiatePacket', 'Final Packet Instance and BrowserState saved.', { instanceId });
 
-        logger.log("PacketProcessor:processImproveDraftAudio", "Successfully improved and saved audio.", { draftId, mediaPageId });
-        return { success: true };
+        return { success: true, instanceId: instanceId, instance: packetInstance };
 
     } catch (error) {
-        logger.error("PacketProcessor:processImproveDraftAudio", "Error during audio improvement", error);
+        logger.error('PacketProcessor:instantiatePacket', 'Error during final instantiation/publishing', { imageId, instanceId, error });
+        if (instanceId) {
+            await ruleManager.removePacketRules(instanceId);
+        }
+        return { success: false, error: error.message || 'Unknown instantiation error' };
+    }
+}
+
+export async function processDeletePacketsRequest(data, initiatorTabId = null) {
+    const { packetIds } = data;
+    if (!Array.isArray(packetIds) || packetIds.length === 0) {
+        return { success: false, error: "No packet IDs provided for deletion." };
+    }
+    logger.log('PacketProcessor:processDeletePacketsRequest', 'Processing delete request for packets:', packetIds);
+    let deletedCount = 0;
+    let errors = [];
+
+    for (const instanceId of packetIds) {
+        try {
+            const instance = await storage.getPacketInstance(instanceId);
+            if (!instance) {
+                logger.warn('PacketProcessor:delete', `Packet instance ${instanceId} not found for deletion.`);
+                await storage.deletePacketBrowserState(instanceId).catch(e => logger.warn('PacketProcessor:delete', `Error deleting orphaned browser state for ${instanceId}`, e));
+                await ruleManager.removePacketRules(instanceId);
+                continue;
+            }
+
+            const imageId = instance.imageId;
+            const browserState = await storage.getPacketBrowserState(instanceId);
+
+            if (browserState?.tabGroupId) {
+                logger.log('PacketProcessor:delete', `Packet ${instanceId} has tab group ${browserState.tabGroupId}. Requesting removal.`);
+                await tabGroupHandler.handleRemoveTabGroups({ groupIds: [browserState.tabGroupId] }, () => {});
+            } else if (browserState) {
+                await storage.deletePacketBrowserState(instanceId);
+            }
+            
+            for (const item of instance.contents) {
+                if (item.type === 'media' && item.pageId) {
+                    const sessionKey = `audio_progress_${instanceId}_${item.pageId}`;
+                    await storage.removeSession(sessionKey);
+                }
+            }
+
+            if (await cloudStorage.initialize()) {
+                for (const item of instance.contents) {
+                    if (item.type === 'generated' && item.pageId && item.url) {
+                        await cloudStorage.deletePacketFiles(instanceId, item.pageId)
+                            .catch(e => logger.warn('PacketProcessor:delete', `Error deleting cloud files for ${instanceId}/${item.pageId}`, e));
+                    }
+                }
+            } else {
+                logger.warn('PacketProcessor:delete', `Cloud storage not initialized, cannot delete cloud files for instance ${instanceId}.`);
+            }
+            
+            await storage.deletePacketInstance(instanceId);
+            logger.log('PacketProcessor:delete', `Deleted PacketInstance: ${instanceId}`);
+
+            await ruleManager.removePacketRules(instanceId);
+            logger.log('PacketProcessor:delete', `Removed redirect rules for: ${instanceId}`);
+
+            sendProgressNotification('packet_instance_deleted', { packetId: instanceId, source: 'user_action' });
+            
+            deletedCount++;
+        } catch (error) {
+            logger.error('PacketProcessor:delete', `Error deleting packet ${instanceId}`, error);
+            errors.push({ instanceId, error: error.message });
+        }
+    }
+
+    const result = {
+        success: errors.length === 0,
+        deletedCount: deletedCount,
+        totalRequested: packetIds.length,
+        errors: errors,
+        message: errors.length > 0 ? `${deletedCount} deleted, ${errors.length} failed.` : `${deletedCount} packet(s) deleted successfully.`
+    };
+    sendProgressNotification('packet_deletion_complete', result);
+    return result;
+}
+
+export async function importImageFromUrl(url) {
+    if (!url) return { success: false, error: "URL is required for import." };
+
+    const imageId = `img_${Date.now()}_imported_${Math.random().toString(36).substring(2, 9)}`;
+
+    try {
+        sendStencilProgressNotification(imageId, 'init', 'active', 'Downloading...', 10, 'Importing Packet...');
+
+        const response = await fetch(url, { cache: 'no-store' });
+        if (!response.ok) throw new Error(`Failed to download packet from URL (${response.status})`);
+        const sharedImage = await response.json();
+
+        if (!sharedImage || !sharedImage.topic || !Array.isArray(sharedImage.sourceContent)) {
+            throw new Error("Invalid packet image format in downloaded JSON.");
+        }
+        
+        const importedPacketImage = { ...sharedImage, id: imageId, created: new Date().toISOString(), shareUrl: url };
+        
+        for (const contentItem of importedPacketImage.sourceContent) {
+            let itemsToProcess = [];
+             if (contentItem.type === 'media') {
+                itemsToProcess.push(contentItem);
+            } else if (contentItem.type === 'alternative' && Array.isArray(contentItem.alternatives)) {
+                itemsToProcess.push(...contentItem.alternatives.filter(alt => alt.type === 'media'));
+            }
+
+            for (const mediaItem of itemsToProcess) {
+                if (mediaItem.contentB64) {
+                    const audioBuffer = base64Decode(mediaItem.contentB64);
+                    if (audioBuffer) {
+                        await indexedDbStorage.saveGeneratedContent(imageId, mediaItem.pageId, [{
+                            name: 'audio.wav',
+                            content: audioBuffer,
+                            contentType: mediaItem.mimeType
+                        }]);
+                    }
+                    delete mediaItem.contentB64;
+                }
+            }
+        }
+
+        await storage.savePacketImage(importedPacketImage);
+        logger.log('PacketProcessor:importImageFromUrl', 'Packet image imported and saved.', { newImageId: imageId, originalUrl: url });
+        
+        sendStencilProgressNotification(imageId, 'complete', 'completed', 'Ready in Library', 100);
+        sendProgressNotification('packet_image_created', { image: importedPacketImage });
+
+        return { success: true, imageId: imageId };
+
+    } catch (error) {
+        logger.error('PacketProcessor:importImageFromUrl', 'Error importing image', { url, error });
+        sendProgressNotification('packet_creation_failed', { imageId: imageId, error: error.message, step: 'import_failure' });
         return { success: false, error: error.message };
     }
 }
 
+export async function processCreatePacketRequest(data, initiatorTabId) {
+    const { topic } = data;
+    if (!topic) { return { success: false, error: "Topic is required." }; }
 
-export async function processGenerateCustomPageRequest(data) {
-    const { prompt, context } = data;
-    if (!prompt) {
-        return { success: false, error: 'A prompt is required.' };
+    const imageId = `img_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    logger.log('PacketProcessor:processCreatePacketRequest', 'Starting image creation for topic:', { topic, imageId });
+
+    try {
+        sendStencilProgressNotification(imageId, 'init', 'active', 'Preparing...', 5, topic);
+
+        const activeModelConfig = await storage.getActiveModelConfig();
+        const cloudStorageEnabled = await storage.isCloudStorageEnabled();
+        if (!activeModelConfig || !cloudStorageEnabled || !(await cloudStorage.initialize())) {
+            throw new Error('LLM and Cloud Storage must be fully configured in Settings.');
+        }
+        sendStencilProgressNotification(imageId, 'config_check', 'completed', 'Configuration validated', 10);
+
+        sendStencilProgressNotification(imageId, 'articles', 'active', 'Finding articles...', 15);
+        const externalContentResponse = await llmService.callLLM('article_suggestions', { topic });
+        if (!externalContentResponse.success || !externalContentResponse.data?.contents) {
+            throw new Error(externalContentResponse.error || 'LLM failed to return articles.');
+        }
+        const validatedExternalLinks = (externalContentResponse.data.contents || [])
+            .filter(item => item?.url?.startsWith('https://en.wikipedia.org/wiki/') && item.title && item.relevance)
+            .map(item => ({ type: 'external', url: decodeURIComponent(item.url), title: item.title, relevance: item.relevance }));
+        if (validatedExternalLinks.length === 0) {
+            throw new Error(`LLM returned no valid Wikipedia articles for "${topic}". Please try a more specific topic.`);
+        }
+        sendStencilProgressNotification(imageId, 'articles', 'completed', `Found ${validatedExternalLinks.length} articles`, 30);
+        
+        const summaryPageDef = { type: "generated", pageId: "summary-page", title: `${topic} Summary`, contentType: "text/html" };
+
+        sendStencilProgressNotification(imageId, 'generate_summary', 'active', 'Generating summary...', 40);
+        const summaryResponse = await llmService.callLLM('summary_page', { topic: topic, allPacketContents: validatedExternalLinks });
+        if (!summaryResponse.success || !summaryResponse.data) throw new Error(summaryResponse.error || 'LLM failed to generate summary.');
+        const summaryHtmlBodyLLM = String(summaryResponse.data).trim();
+        const finalSummaryHtml = enhanceHtml(summaryHtmlBodyLLM, topic, summaryPageDef.title);
+        summaryPageDef.contentB64 = arrayBufferToBase64(new TextEncoder().encode(finalSummaryHtml));
+        sendStencilProgressNotification(imageId, 'generate_summary', 'completed', 'Summary generated', 60);
+
+        const finalSourceContent = [
+            { type: 'alternative', alternatives: [summaryPageDef] },
+            ...validatedExternalLinks,
+        ];
+
+        const packetImage = { id: imageId, topic: topic, created: new Date().toISOString(), sourceContent: finalSourceContent };
+        await storage.savePacketImage(packetImage);
+        logger.log('PacketProcessor', 'Packet Image with embedded Base64 content saved successfully', { imageId });
+        sendStencilProgressNotification(imageId, 'local_save_final', 'completed', 'Packet ready in Library', 100);
+
+        sendProgressNotification('packet_image_created', { image: packetImage });
+
+        return { success: true, imageId: imageId };
+
+    } catch (error) {
+        logger.error('PacketProcessor:processCreatePacketRequest', `Error creating packet image for topic ${topic}`, error);
+        sendProgressNotification('packet_creation_failed', { imageId: imageId, error: error.message });
+        return { success: false, error: error.message };
+    }
+}
+
+export async function processGenerateTimestampsRequest(data) {
+    const { draftId, htmlPageId, mediaPageId, htmlContentB64 } = data;
+    if (!draftId || !htmlPageId || !mediaPageId || !htmlContentB64) {
+        return { success: false, error: "Missing required data for timestamp generation." };
     }
 
     try {
-        logger.log("PacketProcessor:CustomPage", "Starting initial page generation.");
-        const generationResult = await llmService.callLLM('custom_page', { prompt, context });
-        if (!generationResult.success || !generationResult.data) {
-            throw new Error(generationResult.error || "LLM service failed to generate page.");
-        }
-        const initialHtml = generationResult.data;
-        logger.log("PacketProcessor:CustomPage", "Initial page generated. Starting modification pass.");
-
-        const modificationResult = await llmService.callLLM('modify_html_for_completion', { htmlContent: initialHtml });
-        if (!modificationResult.success || !modificationResult.data) {
-            logger.warn("PacketProcessor:CustomPage", "Modification pass failed. Using initial HTML.", modificationResult.error);
-        }
-        const finalHtml = modificationResult.data || initialHtml;
+        const htmlContent = new TextDecoder().decode(base64Decode(htmlContentB64));
         
-        const contentB64 = arrayBufferToBase64(new TextEncoder().encode(finalHtml));
-        const titleMatch = finalHtml.match(/<title[^>]*>([^<]+)<\/title>/i);
-        const pageTitle = titleMatch ? titleMatch[1] : (prompt.substring(0, 50) + (prompt.length > 50 ? '...' : ''));
+        const [plainTextForTTS, links, sourceOfTruthText] = await Promise.all([
+            getAndParseHtml(htmlContent, false),
+            getLinksFromHtml(htmlContent),
+            getAndParseHtml(htmlContent, true)
+        ]);
 
-        const isInteractive = finalHtml.includes("notifyExtensionOnCompletion()");
+        if (!links || links.length === 0) {
+            return { success: true, updatedMediaItem: null, message: "No timestampable links found." };
+        }
 
-        const newContentItem = {
-            type: 'generated',
-            pageId: `custom_${Date.now()}`,
-            title: pageTitle,
-            contentType: 'text/html',
-            contentB64: contentB64,
-            interactionBasedCompletion: isInteractive
+        const audioContent = await indexedDbStorage.getGeneratedContent(draftId, mediaPageId);
+        if (!audioContent || audioContent.length === 0) {
+            throw new Error(`Audio content not found in IndexedDB for pageId: ${mediaPageId}`);
+        }
+        const audioBuffer = audioContent[0].content;
+
+        const alignmentResponse = await ttsService.getAlignmentForExistingAudio(audioBuffer, plainTextForTTS);
+        if (!alignmentResponse.success) {
+            throw new Error(alignmentResponse.error || "Forced alignment service failed.");
+        }
+        
+        const { wordTimestamps } = alignmentResponse;
+        let timestamps = [];
+
+        if (wordTimestamps && wordTimestamps.length > 0) {
+            timestamps = runPositionalInterpolation(sourceOfTruthText, wordTimestamps, links);
+        }
+        
+        const updatedMediaItem = {
+            type: 'media',
+            pageId: mediaPageId,
+            title: "Summary Audio",
+            mimeType: 'audio/mpeg',
+            timestamps: timestamps
         };
 
-        logger.log("PacketProcessor:CustomPage", "Custom page processing complete.", { pageTitle, isInteractive });
-        return { success: true, newItem: newContentItem };
+        return { success: true, updatedMediaItem };
 
     } catch (error) {
-        logger.error("PacketProcessor:CustomPage", "Error generating custom page", error);
+        logger.error("PacketProcessor:processGenerateTimestampsRequest", "Error during timestamp generation", error);
         return { success: false, error: error.message };
     }
 }
@@ -448,360 +762,36 @@ export async function processCreatePacketRequestFromTab(initiatorTabId) {
     }
 }
 
-export async function processCreatePacketRequest(data, initiatorTabId) {
-    const { topic } = data;
-    if (!topic) { return { success: false, error: "Topic is required." }; }
-
-    const imageId = `img_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-    logger.log('PacketProcessor:processCreatePacketRequest', 'Starting image creation for topic:', { topic, imageId });
+export async function processDeletePacketImageRequest(data) {
+    const { imageId } = data;
+    if (!imageId) {
+        return { success: false, error: "Image ID is required for deletion." };
+    }
+    logger.log('PacketProcessor:processDeletePacketImage', 'Processing delete request for image:', imageId);
+    let errors = [];
 
     try {
-        sendStencilProgressNotification(imageId, 'init', 'active', 'Preparing...', 5, topic);
-
-        const activeModelConfig = await storage.getActiveModelConfig();
-        const cloudStorageEnabled = await storage.isCloudStorageEnabled();
-        if (!activeModelConfig || !cloudStorageEnabled || !(await cloudStorage.initialize())) {
-            throw new Error('LLM and Cloud Storage must be fully configured in Settings.');
-        }
-        sendStencilProgressNotification(imageId, 'config_check', 'completed', 'Configuration validated', 10);
-
-        sendStencilProgressNotification(imageId, 'articles', 'active', 'Finding articles...', 15);
-        const externalContentResponse = await llmService.callLLM('article_suggestions', { topic });
-        if (!externalContentResponse.success || !externalContentResponse.data?.contents) {
-            throw new Error(externalContentResponse.error || 'LLM failed to return articles.');
-        }
-        const validatedExternalLinks = (externalContentResponse.data.contents || [])
-            .filter(item => item?.url?.startsWith('https://en.wikipedia.org/wiki/') && item.title && item.relevance)
-            .map(item => ({ type: 'external', url: decodeURIComponent(item.url), title: item.title, relevance: item.relevance }));
-        if (validatedExternalLinks.length === 0) {
-            throw new Error(`LLM returned no valid Wikipedia articles for "${topic}". Please try a more specific topic.`);
-        }
-        sendStencilProgressNotification(imageId, 'articles', 'completed', `Found ${validatedExternalLinks.length} articles`, 30);
-        
-        const summaryPageDef = { type: "generated", pageId: "summary-page", title: `${topic} Summary`, contentType: "text/html" };
-
-        sendStencilProgressNotification(imageId, 'generate_summary', 'active', 'Generating summary...', 40);
-        const summaryResponse = await llmService.callLLM('summary_page', { topic: topic, allPacketContents: validatedExternalLinks });
-        if (!summaryResponse.success || !summaryResponse.data) throw new Error(summaryResponse.error || 'LLM failed to generate summary.');
-        const summaryHtmlBodyLLM = String(summaryResponse.data).trim();
-        const finalSummaryHtml = enhanceHtml(summaryHtmlBodyLLM, topic, summaryPageDef.title);
-        summaryPageDef.contentB64 = arrayBufferToBase64(new TextEncoder().encode(finalSummaryHtml));
-        sendStencilProgressNotification(imageId, 'generate_summary', 'completed', 'Summary generated', 60);
-
-        const finalSourceContent = [
-            { type: 'alternative', alternatives: [summaryPageDef] },
-            ...validatedExternalLinks,
-        ];
-
-        const packetImage = { id: imageId, topic: topic, created: new Date().toISOString(), sourceContent: finalSourceContent };
-        await storage.savePacketImage(packetImage);
-        logger.log('PacketProcessor', 'Packet Image with embedded Base64 content saved successfully', { imageId });
-        sendStencilProgressNotification(imageId, 'local_save_final', 'completed', 'Packet ready in Library', 100);
-
-        sendProgressNotification('packet_image_created', { image: packetImage });
-
-        return { success: true, imageId: imageId };
-
+        await storage.deletePacketImage(imageId);
+        logger.log('PacketProcessor:deleteImage', `Deleted PacketImage: ${imageId}`);
     } catch (error) {
-        logger.error('PacketProcessor:processCreatePacketRequest', `Error creating packet image for topic ${topic}`, error);
-        sendProgressNotification('packet_creation_failed', { imageId: imageId, error: error.message });
-        return { success: false, error: error.message };
-    }
-}
-
-export async function processGenerateTimestampsRequest(data) {
-    const { draftId, htmlPageId, mediaPageId, htmlContentB64 } = data;
-    if (!draftId || !htmlPageId || !mediaPageId || !htmlContentB64) {
-        return { success: false, error: "Missing required data for timestamp generation." };
+        logger.error('PacketProcessor:deleteImage', `Error deleting packet image ${imageId}`, error);
+        errors.push(error.message);
     }
 
     try {
-        const htmlContent = new TextDecoder().decode(base64Decode(htmlContentB64));
-        
-        const [plainTextForTTS, links, sourceOfTruthText] = await Promise.all([
-            getAndParseHtml(htmlContent, false),
-            getLinksFromHtml(htmlContent),
-            getAndParseHtml(htmlContent, true)
-        ]);
-
-        if (!links || links.length === 0) {
-            return { success: true, updatedMediaItem: null, message: "No timestampable links found." };
-        }
-
-        const audioContent = await indexedDbStorage.getGeneratedContent(draftId, mediaPageId);
-        if (!audioContent || audioContent.length === 0) {
-            throw new Error(`Audio content not found in IndexedDB for pageId: ${mediaPageId}`);
-        }
-        const audioBuffer = audioContent[0].content;
-
-        const alignmentResponse = await ttsService.getAlignmentForExistingAudio(audioBuffer, plainTextForTTS);
-        if (!alignmentResponse.success) {
-            throw new Error(alignmentResponse.error || "Forced alignment service failed.");
-        }
-        
-        const { wordTimestamps } = alignmentResponse;
-        let timestamps = [];
-
-        if (wordTimestamps && wordTimestamps.length > 0) {
-            timestamps = runPositionalInterpolation(sourceOfTruthText, wordTimestamps, links);
-        }
-        
-        const updatedMediaItem = {
-            type: 'media',
-            pageId: mediaPageId,
-            title: "Summary Audio",
-            mimeType: 'audio/mpeg',
-            timestamps: timestamps
-        };
-
-        return { success: true, updatedMediaItem };
-
+        await indexedDbStorage.deleteGeneratedContentForImage(imageId);
+        logger.log('PacketProcessor:deleteImage', `Deleted IndexedDB content for: ${imageId}`);
     } catch (error) {
-        logger.error("PacketProcessor:processGenerateTimestampsRequest", "Error during timestamp generation", error);
-        return { success: false, error: error.message };
+        logger.error('PacketProcessor:deleteImage', `Error deleting IDB content for image ${imageId}`, error);
+        errors.push(error.message);
     }
-}
-
-
-export async function instantiatePacket(imageId, preGeneratedInstanceId, initiatorTabId = null) {
-    const instanceId = preGeneratedInstanceId;
-    logger.log('PacketProcessor:instantiatePacket', 'Starting INSTANCE finalization', { imageId, instanceId });
-
-    try {
-        const packetImage = await storage.getPacketImage(imageId);
-        if (!packetImage) throw new Error(`Packet Image ${imageId} not found.`);
-
-        const hasGeneratedContent = packetImage.sourceContent.some(item => item.type === 'generated' || item.type === 'media' || (item.type === 'alternative' && item.alternatives.some(alt => alt.type === 'generated' || alt.type === 'media')));
-        let activeCloudConfig = null;
-
-        if (hasGeneratedContent) {
-            logger.log('PacketProcessor:instantiatePacket', 'Packet contains generated content, checking cloud storage...');
-            activeCloudConfig = await storage.getActiveCloudStorageConfig();
-            if (!activeCloudConfig) {
-                throw new Error("This packet contains generated pages, but no active cloud storage is configured for publishing.");
-            }
-            if (!(await cloudStorage.initialize())) {
-                throw new Error("Cloud storage failed to initialize for publishing.");
-            }
-        } else {
-            logger.log('PacketProcessor:instantiatePacket', 'Packet contains only external links. Skipping cloud storage checks.');
-        }
-
-        let packetInstance = {
-            instanceId: instanceId,
-            imageId: imageId,
-            topic: packetImage.topic,
-            created: packetImage.created,
-            instantiated: new Date().toISOString(),
-            contents: [],
-            visitedUrls: [],
-            visitedGeneratedPageIds: [],
-            mentionedMediaLinks: [], // *** FIX: Initialize the mentionedMediaLinks array ***
-        };
-
-        for (const sourceItem of packetImage.sourceContent) {
-            if (sourceItem.type === 'alternative') {
-                const settings = await storage.getSettings();
-                const preferAudio = settings.preferAudio && sourceItem.alternatives.some(a => a.type === 'media');
-
-                const chosenItem = preferAudio
-                    ? sourceItem.alternatives.find(a => a.type === 'media')
-                    : sourceItem.alternatives.find(a => a.type === 'generated');
-                
-                if (chosenItem) {
-                    packetInstance.contents.push(chosenItem);
-                }
-
-            } else {
-                packetInstance.contents.push(sourceItem);
-            }
-        }
-        
-        for (let i = 0; i < packetInstance.contents.length; i++) {
-            const item = packetInstance.contents[i];
-            if (item.type === 'generated') {
-                const { pageId, contentB64, contentType } = item;
-                if (!contentB64) {
-                    logger.warn('PacketProcessor:instantiate', `Generated item ${pageId} is missing Base64 content. Cannot publish.`);
-                    item.published = false;
-                    item.url = null;
-                } else {
-                    const decodedContent = base64Decode(contentB64);
-                    const filesToUpload = [{ name: 'index.html', content: new TextDecoder().decode(decodedContent), contentType }];
-                    
-                    await indexedDbStorage.saveGeneratedContent(imageId, pageId, filesToUpload);
-
-                    const uploadResult = await cloudStorage.uploadPacketFiles(instanceId, pageId, filesToUpload, 'private');
-                    if (uploadResult.success) {
-                        item.url = uploadResult.url;
-                        item.published = true;
-                        item.publishContext = {
-                            storageConfigId: activeCloudConfig.id,
-                            provider: activeCloudConfig.provider,
-                            region: activeCloudConfig.region,
-                            bucket: activeCloudConfig.bucket
-                        };
-                    } else {
-                        throw new Error(`Failed to publish ${pageId}: ${uploadResult.error}`);
-                    }
-                }
-                delete item.contentB64;
-            } else if (item.type === 'media') {
-                const { pageId, mimeType, title } = item;
-                const cachedContent = await indexedDbStorage.getGeneratedContent(imageId, pageId);
-
-                if (!cachedContent || cachedContent.length === 0) {
-                    logger.warn('PacketProcessor:instantiate', `Media item ${pageId} is missing from IndexedDB, so it cannot be published.`);
-                    item.published = false;
-                    item.url = null;
-                } else {
-                    const fileContent = cachedContent[0].content;
-                    const fileExtension = mimeType === 'audio/wav' ? '.wav' : (mimeType === 'audio/mpeg' ? '.mp3' : '');
-                    const fileName = sanitizeForFileName(title) + fileExtension;
-                    const filePath = `packets/${instanceId}/${pageId}/${fileName}`;
-                    
-                    const uploadResult = await cloudStorage.uploadFile(filePath, fileContent, mimeType, 'private');
-                    if (uploadResult.success) {
-                        item.url = uploadResult.fileName;
-                        item.published = true;
-                        item.publishContext = {
-                            storageConfigId: activeCloudConfig.id,
-                            provider: activeCloudConfig.provider,
-                            region: activeCloudConfig.region,
-                            bucket: activeCloudConfig.bucket
-                        };
-                    } else {
-                        item.published = false;
-                        item.url = null;
-                        throw new Error(`Failed to publish media ${title}: ${uploadResult.error}`);
-                    }
-                }
-            }
-        }
-
-        if (!(await storage.savePacketInstance(packetInstance))) {
-            throw new Error("Failed to save final Packet Instance.");
-        }
-        
-        await storage.savePacketBrowserState({ instanceId: instanceId, tabGroupId: null, activeTabIds: [], lastActiveUrl: null });
-        
-        await ruleManager.addOrUpdatePacketRules(packetInstance);
-        
-        logger.log('PacketProcessor:instantiatePacket', 'Final Packet Instance and BrowserState saved.', { instanceId });
-
-        return { success: true, instanceId: instanceId, instance: packetInstance };
-
-    } catch (error) {
-        logger.error('PacketProcessor:instantiatePacket', 'Error during final instantiation/publishing', { imageId, instanceId, error });
-        if (instanceId) {
-            await ruleManager.removePacketRules(instanceId);
-        }
-        return { success: false, error: error.message || 'Unknown instantiation error' };
-    }
-}
-
-export async function publishImageForSharing(imageId) {
-    if (!imageId) return { success: false, error: "Image ID is required for sharing." };
-    if (!(await cloudStorage.initialize())) {
-        return { success: false, error: "Cloud storage not initialized. Cannot share." };
-    }
-
-    try {
-        const packetImage = await storage.getPacketImage(imageId);
-        if (!packetImage) return { success: false, error: `Packet image ${imageId} not found.` };
-        
-        const imageForExport = JSON.parse(JSON.stringify(packetImage));
-
-        for (const contentItem of imageForExport.sourceContent) {
-            let itemsToProcess = [];
-            if (contentItem.type === 'media') {
-                itemsToProcess.push(contentItem);
-            } else if (contentItem.type === 'alternative' && Array.isArray(contentItem.alternatives)) {
-                itemsToProcess.push(...contentItem.alternatives.filter(alt => alt.type === 'media'));
-            }
-
-            for (const mediaItem of itemsToProcess) {
-                const mediaContent = await indexedDbStorage.getGeneratedContent(imageId, mediaItem.pageId);
-                if (mediaContent && mediaContent[0] && mediaContent[0].content) {
-                    mediaItem.contentB64 = arrayBufferToBase64(mediaContent[0].content);
-                }
-            }
-        }
-
-        const jsonString = JSON.stringify(imageForExport);
-        const shareFileName = `shared/img_${imageId.replace(/^img_/, '')}_${Date.now()}.json`;
-
-        const uploadResult = await cloudStorage.uploadFile(shareFileName, jsonString, 'application/json', 'public-read');
-
-        if (uploadResult.success && uploadResult.fileName) {
-            const publicUrl = cloudStorage.getPublicUrl(uploadResult.fileName);
-            if (!publicUrl) return { success: false, error: "Failed to construct public URL after upload." };
-            
-            logger.log('PacketProcessor:publishImageForSharing', 'Image published for sharing.', { imageId, shareUrl: publicUrl });
-            return { success: true, shareUrl: publicUrl, message: "Packet link ready to share!" };
-        } else {
-            return { success: false, error: `Failed to upload shareable image: ${uploadResult.error || 'Unknown cloud error'}` };
-        }
-    } catch (error) {
-        logger.error('PacketProcessor:publishImageForSharing', 'Error publishing image', { imageId, error });
-        return { success: false, error: error.message || "Unknown error during image sharing." };
-    }
-}
-
-export async function importImageFromUrl(url) {
-    if (!url) return { success: false, error: "URL is required for import." };
-
-    const imageId = `img_${Date.now()}_imported_${Math.random().toString(36).substring(2, 9)}`;
-
-    try {
-        sendStencilProgressNotification(imageId, 'init', 'active', 'Downloading...', 10, 'Importing Packet...');
-
-        const response = await fetch(url, { cache: 'no-store' });
-        if (!response.ok) throw new Error(`Failed to download packet from URL (${response.status})`);
-        const sharedImage = await response.json();
-
-        if (!sharedImage || !sharedImage.topic || !Array.isArray(sharedImage.sourceContent)) {
-            throw new Error("Invalid packet image format in downloaded JSON.");
-        }
-        
-        const importedPacketImage = { ...sharedImage, id: imageId, created: new Date().toISOString(), shareUrl: url };
-        
-        for (const contentItem of importedPacketImage.sourceContent) {
-            let itemsToProcess = [];
-             if (contentItem.type === 'media') {
-                itemsToProcess.push(contentItem);
-            } else if (contentItem.type === 'alternative' && Array.isArray(contentItem.alternatives)) {
-                itemsToProcess.push(...contentItem.alternatives.filter(alt => alt.type === 'media'));
-            }
-
-            for (const mediaItem of itemsToProcess) {
-                if (mediaItem.contentB64) {
-                    const audioBuffer = base64Decode(mediaItem.contentB64);
-                    if (audioBuffer) {
-                        await indexedDbStorage.saveGeneratedContent(imageId, mediaItem.pageId, [{
-                            name: 'audio.wav',
-                            content: audioBuffer,
-                            contentType: mediaItem.mimeType
-                        }]);
-                    }
-                    delete mediaItem.contentB64;
-                }
-            }
-        }
-
-        await storage.savePacketImage(importedPacketImage);
-        logger.log('PacketProcessor:importImageFromUrl', 'Packet image imported and saved.', { newImageId: imageId, originalUrl: url });
-        
-        sendStencilProgressNotification(imageId, 'complete', 'completed', 'Ready in Library', 100);
-        sendProgressNotification('packet_image_created', { image: importedPacketImage });
-
-        return { success: true, imageId: imageId };
-
-    } catch (error) {
-        logger.error('PacketProcessor:importImageFromUrl', 'Error importing image', { url, error });
-        sendProgressNotification('packet_creation_failed', { imageId: imageId, error: error.message, step: 'import_failure' });
-        return { success: false, error: error.message };
-    }
+    
+    sendProgressNotification('packet_image_deleted', { imageId: imageId });
+    
+    return {
+        success: errors.length === 0,
+        errors: errors
+    };
 }
 
 export async function processRepublishRequest(data, initiatorTabId = null) {
@@ -875,107 +865,128 @@ export async function processRepublishRequest(data, initiatorTabId = null) {
     }
 }
 
-export async function processDeletePacketImageRequest(data) {
-    const { imageId } = data;
-    if (!imageId) {
-        return { success: false, error: "Image ID is required for deletion." };
-    }
-    logger.log('PacketProcessor:processDeletePacketImage', 'Processing delete request for image:', imageId);
-    let errors = [];
-
-    try {
-        await storage.deletePacketImage(imageId);
-        logger.log('PacketProcessor:deleteImage', `Deleted PacketImage: ${imageId}`);
-    } catch (error) {
-        logger.error('PacketProcessor:deleteImage', `Error deleting packet image ${imageId}`, error);
-        errors.push(error.message);
+export async function processGenerateCustomPageRequest(data) {
+    const { prompt, context } = data;
+    if (!prompt) {
+        return { success: false, error: 'A prompt is required.' };
     }
 
     try {
-        await indexedDbStorage.deleteGeneratedContentForImage(imageId);
-        logger.log('PacketProcessor:deleteImage', `Deleted IndexedDB content for: ${imageId}`);
+        logger.log("PacketProcessor:CustomPage", "Starting initial page generation.");
+        const generationResult = await llmService.callLLM('custom_page', { prompt, context });
+        if (!generationResult.success || !generationResult.data) {
+            throw new Error(generationResult.error || "LLM service failed to generate page.");
+        }
+        const initialHtml = generationResult.data;
+        logger.log("PacketProcessor:CustomPage", "Initial page generated. Starting modification pass.");
+
+        const modificationResult = await llmService.callLLM('modify_html_for_completion', { htmlContent: initialHtml });
+        if (!modificationResult.success || !modificationResult.data) {
+            logger.warn("PacketProcessor:CustomPage", "Modification pass failed. Using initial HTML.", modificationResult.error);
+        }
+        const finalHtml = modificationResult.data || initialHtml;
+        
+        const contentB64 = arrayBufferToBase64(new TextEncoder().encode(finalHtml));
+        const titleMatch = finalHtml.match(/<title[^>]*>([^<]+)<\/title>/i);
+        const pageTitle = titleMatch ? titleMatch[1] : (prompt.substring(0, 50) + (prompt.length > 50 ? '...' : ''));
+
+        const isInteractive = finalHtml.includes("notifyExtensionOnCompletion()");
+
+        const newContentItem = {
+            type: 'generated',
+            pageId: `custom_${Date.now()}`,
+            title: pageTitle,
+            contentType: 'text/html',
+            contentB64: contentB64,
+            interactionBasedCompletion: isInteractive
+        };
+
+        logger.log("PacketProcessor:CustomPage", "Custom page processing complete.", { pageTitle, isInteractive });
+        return { success: true, newItem: newContentItem };
+
     } catch (error) {
-        logger.error('PacketProcessor:deleteImage', `Error deleting IDB content for image ${imageId}`, error);
-        errors.push(error.message);
+        logger.error("PacketProcessor:CustomPage", "Error generating custom page", error);
+        return { success: false, error: error.message };
     }
-    
-    sendProgressNotification('packet_image_deleted', { imageId: imageId });
-    
-    return {
-        success: errors.length === 0,
-        errors: errors
-    };
 }
 
-export async function processDeletePacketsRequest(data, initiatorTabId = null) {
-    const { packetIds } = data;
-    if (!Array.isArray(packetIds) || packetIds.length === 0) {
-        return { success: false, error: "No packet IDs provided for deletion." };
+export async function processImproveDraftAudio(data) {
+    const { draftId, mediaPageId } = data;
+    if (!draftId || !mediaPageId) {
+        return { success: false, error: "Missing draftId or mediaPageId for audio improvement." };
     }
-    logger.log('PacketProcessor:processDeletePacketsRequest', 'Processing delete request for packets:', packetIds);
-    let deletedCount = 0;
-    let errors = [];
 
-    for (const instanceId of packetIds) {
-        try {
-            const instance = await storage.getPacketInstance(instanceId);
-            if (!instance) {
-                logger.warn('PacketProcessor:delete', `Packet instance ${instanceId} not found for deletion.`);
-                await storage.deletePacketBrowserState(instanceId).catch(e => logger.warn('PacketProcessor:delete', `Error deleting orphaned browser state for ${instanceId}`, e));
-                await ruleManager.removePacketRules(instanceId);
-                continue;
-            }
-
-            const imageId = instance.imageId;
-            const browserState = await storage.getPacketBrowserState(instanceId);
-
-            if (browserState?.tabGroupId) {
-                logger.log('PacketProcessor:delete', `Packet ${instanceId} has tab group ${browserState.tabGroupId}. Requesting removal.`);
-                await tabGroupHandler.handleRemoveTabGroups({ groupIds: [browserState.tabGroupId] }, () => {});
-            } else if (browserState) {
-                await storage.deletePacketBrowserState(instanceId);
-            }
-            
-            for (const item of instance.contents) {
-                if (item.type === 'media' && item.pageId) {
-                    const sessionKey = `audio_progress_${instanceId}_${item.pageId}`;
-                    await storage.removeSession(sessionKey);
-                }
-            }
-
-            if (await cloudStorage.initialize()) {
-                for (const item of instance.contents) {
-                    if (item.type === 'generated' && item.pageId && item.url) {
-                        await cloudStorage.deletePacketFiles(instanceId, item.pageId)
-                            .catch(e => logger.warn('PacketProcessor:delete', `Error deleting cloud files for ${instanceId}/${item.pageId}`, e));
-                    }
-                }
-            } else {
-                logger.warn('PacketProcessor:delete', `Cloud storage not initialized, cannot delete cloud files for instance ${instanceId}.`);
-            }
-            
-            await storage.deletePacketInstance(instanceId);
-            logger.log('PacketProcessor:delete', `Deleted PacketInstance: ${instanceId}`);
-
-            await ruleManager.removePacketRules(instanceId);
-            logger.log('PacketProcessor:delete', `Removed redirect rules for: ${instanceId}`);
-
-            sendProgressNotification('packet_instance_deleted', { packetId: instanceId, source: 'user_action' });
-            
-            deletedCount++;
-        } catch (error) {
-            logger.error('PacketProcessor:delete', `Error deleting packet ${instanceId}`, error);
-            errors.push({ instanceId, error: error.message });
+    try {
+        const audioContent = await indexedDbStorage.getGeneratedContent(draftId, mediaPageId);
+        if (!audioContent || audioContent.length === 0) {
+            throw new Error(`Audio content not found in IndexedDB for pageId: ${mediaPageId}`);
         }
+        
+        const originalBlob = new Blob([audioContent[0].content], { type: audioContent[0].contentType });
+        const normalizedBlob = await normalizeAudioOffscreen(originalBlob);
+        
+        const updatedBuffer = await normalizedBlob.arrayBuffer();
+
+        // Overwrite the existing audio in IndexedDB with the improved version
+        await indexedDbStorage.saveGeneratedContent(draftId, mediaPageId, [{
+            name: 'audio.wav', // Saving as WAV as that's what our encoder produces
+            content: updatedBuffer,
+            contentType: 'audio/wav'
+        }]);
+
+        logger.log("PacketProcessor:processImproveDraftAudio", "Successfully improved and saved audio.", { draftId, mediaPageId });
+        return { success: true };
+
+    } catch (error) {
+        logger.error("PacketProcessor:processImproveDraftAudio", "Error during audio improvement", error);
+        return { success: false, error: error.message };
+    }
+}
+
+export async function publishImageForSharing(imageId) {
+    if (!imageId) return { success: false, error: "Image ID is required for sharing." };
+    if (!(await cloudStorage.initialize())) {
+        return { success: false, error: "Cloud storage not initialized. Cannot share." };
     }
 
-    const result = {
-        success: errors.length === 0,
-        deletedCount: deletedCount,
-        totalRequested: packetIds.length,
-        errors: errors,
-        message: errors.length > 0 ? `${deletedCount} deleted, ${errors.length} failed.` : `${deletedCount} packet(s) deleted successfully.`
-    };
-    sendProgressNotification('packet_deletion_complete', result);
-    return result;
+    try {
+        const packetImage = await storage.getPacketImage(imageId);
+        if (!packetImage) return { success: false, error: `Packet image ${imageId} not found.` };
+        
+        const imageForExport = JSON.parse(JSON.stringify(packetImage));
+
+        for (const contentItem of imageForExport.sourceContent) {
+            let itemsToProcess = [];
+            if (contentItem.type === 'media') {
+                itemsToProcess.push(contentItem);
+            } else if (contentItem.type === 'alternative' && Array.isArray(contentItem.alternatives)) {
+                itemsToProcess.push(...contentItem.alternatives.filter(alt => alt.type === 'media'));
+            }
+
+            for (const mediaItem of itemsToProcess) {
+                const mediaContent = await indexedDbStorage.getGeneratedContent(imageId, mediaItem.pageId);
+                if (mediaContent && mediaContent[0] && mediaContent[0].content) {
+                    mediaItem.contentB64 = arrayBufferToBase64(mediaContent[0].content);
+                }
+            }
+        }
+
+        const jsonString = JSON.stringify(imageForExport);
+        const shareFileName = `shared/img_${imageId.replace(/^img_/, '')}_${Date.now()}.json`;
+
+        const uploadResult = await cloudStorage.uploadFile(shareFileName, jsonString, 'application/json', 'public-read');
+
+        if (uploadResult.success && uploadResult.fileName) {
+            const publicUrl = cloudStorage.getPublicUrl(uploadResult.fileName);
+            if (!publicUrl) return { success: false, error: "Failed to construct public URL after upload." };
+            
+            logger.log('PacketProcessor:publishImageForSharing', 'Image published for sharing.', { imageId, shareUrl: publicUrl });
+            return { success: true, shareUrl: publicUrl, message: "Packet link ready to share!" };
+        } else {
+            return { success: false, error: `Failed to upload shareable image: ${uploadResult.error || 'Unknown cloud error'}` };
+        }
+    } catch (error) {
+        logger.error('PacketProcessor:publishImageForSharing', 'Error publishing image', { imageId, error });
+        return { success: false, error: error.message || "Unknown error during image sharing." };
+    }
 }
