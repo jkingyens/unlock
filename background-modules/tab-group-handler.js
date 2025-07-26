@@ -251,3 +251,104 @@ export function stopTabReorderingChecks() {
          tabReorderIntervalId = null;
      }
 }
+
+// Helper to find or create the draft tab group
+async function findOrCreateDraftGroup() {
+    const [existingGroup] = await chrome.tabGroups.query({ title: DRAFT_GROUP_TITLE });
+    if (existingGroup) {
+        return existingGroup;
+    }
+
+    // --- START OF THE FIX ---
+    // Get the current window to ensure the new, empty group is created in the right place.
+    const window = await chrome.windows.getCurrent();
+    const tabInWindow = (await chrome.tabs.query({ active: true, windowId: window.id }))[0];
+
+    // Create a new, empty tab group in the current window.
+    // The Chrome API requires a tabId to create a group, so we create a temporary blank tab,
+    // group it, and then immediately close it, leaving an empty group.
+    const tempTab = await chrome.tabs.create({ url: 'about:blank', active: false, windowId: window.id });
+    const groupId = await chrome.tabs.group({ tabIds: [tempTab.id] });
+    await chrome.tabs.remove(tempTab.id);
+
+    await chrome.tabGroups.update(groupId, { title: DRAFT_GROUP_TITLE });
+    const newGroup = await chrome.tabGroups.get(groupId);
+    // --- END OF THE FIX ---
+
+    return newGroup;
+}
+
+export async function syncDraftGroup(desiredUrls) {
+    if (!(await shouldUseTabGroups())) {
+        return { success: true, groupId: null };
+    }
+    try {
+        const [draftGroup] = await chrome.tabGroups.query({ title: DRAFT_GROUP_TITLE });
+
+        if (draftGroup) {
+            // If a group exists, its only job is to close tabs that are no longer needed.
+            const tabsInGroup = await chrome.tabs.query({ groupId: draftGroup.id });
+            const tabsToClose = tabsInGroup.filter(tab => !desiredUrls.includes(tab.url));
+
+            if (tabsToClose.length > 0) {
+                await chrome.tabs.remove(tabsToClose.map(t => t.id));
+            }
+        }
+        
+        // This function no longer creates the group, preventing the race condition.
+        return { success: true, groupId: draftGroup ? draftGroup.id : null };
+
+    } catch (error) {
+        // If the group is closed while we're querying it, that's okay. Just log it and continue.
+        if (error.message.includes('No group with id')) {
+            return { success: true, groupId: null };
+        }
+        logger.error('TabGroupHandler:syncDraftGroup', 'Error syncing draft group', error);
+        return { success: false, error: error.message };
+    }
+}
+
+export async function focusOrCreateDraftTab(url) {
+    if (!(await shouldUseTabGroups())) {
+        chrome.tabs.create({ url, active: true });
+        return;
+    }
+    const [existingTab] = await chrome.tabs.query({ url });
+    if (existingTab) {
+        chrome.tabs.update(existingTab.id, { active: true });
+        if (existingTab.windowId) {
+            chrome.windows.update(existingTab.windowId, { focused: true });
+        }
+        return;
+    }
+    
+    // Find an existing draft group.
+    const [draftGroup] = await chrome.tabGroups.query({ title: DRAFT_GROUP_TITLE });
+    const newTab = await chrome.tabs.create({ url, active: true });
+
+    if (draftGroup) {
+        // If a group exists, add the new tab to it.
+        await chrome.tabs.group({ tabIds: [newTab.id], groupId: draftGroup.id });
+    } else {
+        // If no group exists, create one using the new tab.
+        // This avoids creating an empty group.
+        const newGroupId = await chrome.tabs.group({ tabIds: [newTab.id] });
+        await chrome.tabGroups.update(newGroupId, { title: DRAFT_GROUP_TITLE });
+    }
+}
+
+export async function cleanupDraftGroup() {
+    if (!(await shouldUseTabGroups())) return;
+    try {
+        const [draftGroup] = await chrome.tabGroups.query({ title: DRAFT_GROUP_TITLE });
+        if (draftGroup) {
+            const tabs = await chrome.tabs.query({ groupId: draftGroup.id });
+            if (tabs.length > 0) {
+                await chrome.tabs.remove(tabs.map(t => t.id));
+            }
+        }
+    } catch (error) {
+        logger.error('TabGroupHandler:cleanupDraftGroup', 'Error cleaning up draft group', error);
+    }
+}
+

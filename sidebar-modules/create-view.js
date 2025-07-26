@@ -463,7 +463,12 @@ async function handleSaveDraftPacket() {
     if (packetToSave.id.startsWith('draft_')) {
         const originalDraftId = packetToSave.id;
         const topic = await showTitlePromptDialog();
-        if (!topic) return;
+
+        if (!topic) {
+            showRootViewStatus("A title is required to save a new packet.", "error");
+            return; // Stop the save process
+        }
+
         packetToSave.topic = topic;
         packetToSave.id = `img_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
         packetToSave.created = new Date().toISOString();
