@@ -582,7 +582,7 @@ export async function processCreatePacketRequest(data, initiatorTabId) {
 }
 
 export async function processGenerateTimestampsRequest(data) {
-    const { draftId, htmlPageId, mediaPageId, htmlContentB64 } = data;
+    const { draftId, htmlPageId, mediaPageId, htmlContentB64, originalTitle } = data; // <--CAPTURE new variable
     if (!draftId || !htmlPageId || !mediaPageId || !htmlContentB64) {
         return { success: false, error: "Missing required data for timestamp generation." };
     }
@@ -621,7 +621,7 @@ export async function processGenerateTimestampsRequest(data) {
         const updatedMediaItem = {
             type: 'media',
             pageId: mediaPageId,
-            title: "Summary Audio",
+            title: originalTitle || "Summary Audio",
             mimeType: 'audio/mpeg',
             timestamps: timestamps
         };

@@ -409,7 +409,8 @@ async function handleGenerateTimestamps(groupItem, button) {
                 draftId: draftPacket.id,
                 htmlPageId: htmlItem.pageId,
                 mediaPageId: mediaItem.pageId,
-                htmlContentB64: htmlItem.contentB64 // Pass content directly
+                htmlContentB64: htmlItem.contentB64,
+                originalTitle: mediaItem.title // <-- ADD THIS LINE
             }
         });
 
