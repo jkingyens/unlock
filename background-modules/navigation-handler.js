@@ -82,69 +82,68 @@ export async function checkAndPromptForCompletion(logPrefix, visitResult, instan
 }
 
 async function processNavigationEvent(tabId, finalUrl, details) {
-    logger.log(`[NavigationHandler Tab ${tabId}]`, 'Processing navigation event.', {
-        url: finalUrl,
-        transitionType: details.transitionType,
-        transitionQualifiers: details.transitionQualifiers,
-        fullDetails: details
-    });
 
     await injectOverlayScripts(tabId);
 
     const logPrefix = `[NavigationHandler Tab ${tabId}]`;
     clearPendingVisitTimer(tabId);
-    clearPendingNavigationActionTimer(tabId);
 
     const transitionType = details.transitionType || '';
-    const transitionQualifiers = details.transitionQualifiers || [];
 
+    // Step 1: Check for the "trusted intent" token. This is the highest priority.
     const trustedIntentKey = `trusted_intent_${tabId}`;
-    const sessionData = await storage.getSession(trustedIntentKey);
+    let sessionData = await storage.getSession(trustedIntentKey);
     const trustedContext = sessionData[trustedIntentKey];
 
     if (trustedContext) {
+        // This is the first time we've seen this tab. Stamp its identity.
+        logger.log(logPrefix, 'Trusted intent token found. Stamping tab context and setting grace period.');
         await setPacketContext(tabId, trustedContext.instanceId, trustedContext.canonicalPacketUrl, finalUrl);
+        // Set a short-lived "grace period" token to handle immediate redirects.
+        await storage.setSession({ [`grace_period_${tabId}`]: true });
+        setTimeout(() => storage.removeSession(`grace_period_${tabId}`), 1000); // Grace period of 1 second
+        
+        // Clean up the one-time trusted intent token.
         await storage.removeSession(trustedIntentKey);
     }
 
+    // Step 2: Get the tab's current context.
     let currentContext = await getPacketContext(tabId);
 
+    // Step 3: If the tab has context, determine the next action.
     if (currentContext) {
-        const isUserInitiated = ['typed', 'auto_bookmark', 'generated', 'keyword', 'form_submit'].includes(transitionType) ||
-                                (transitionType === 'link' && !transitionQualifiers.includes('client_redirect') && !transitionQualifiers.includes('server_redirect'));
+        // Step 3a: Check if we are within the grace period.
+        const gracePeriodKey = `grace_period_${tabId}`;
+        sessionData = await storage.getSession(gracePeriodKey);
+        if (sessionData[gracePeriodKey]) {
+            logger.log(logPrefix, 'Grace period active. Updating browser URL but preserving canonical context.');
+            await setPacketContext(tabId, currentContext.instanceId, currentContext.canonicalPacketUrl, finalUrl);
+        } else {
+            // Step 3b: Grace period is over. Handle as a normal navigation.
+            // THIS IS THE FIX: Re-introduce 'link' to correctly handle user clicks away from the packet.
+            const isUserInitiated = ['link', 'typed', 'auto_bookmark', 'generated', 'keyword', 'form_submit'].includes(transitionType);
 
-        // --- REVISED LOGIC ---
-        if (isUserInitiated && finalUrl !== currentContext.currentBrowserUrl) {
-            const instance = await storage.getPacketInstance(currentContext.instanceId);
-            // Capture the original context before the timer
-            const originalCanonicalUrl = currentContext.canonicalPacketUrl;
-
-            const navigationActionTimer = setTimeout(async () => {
-                pendingNavigationActionTimers.delete(tabId);
+            if (isUserInitiated) {
+                const instance = await storage.getPacketInstance(currentContext.instanceId);
                 const newItemInPacket = packetUtils.isUrlInPacket(finalUrl, instance, { returnItem: true });
 
-                if (newItemInPacket) {
-                    // THE FIX: If it's a new packet item, ignore it and restore the original context.
-                    logger.log(logPrefix, 'Timer fired. Redirect landed on another packet item. Preserving original context.', { originalUrl: originalCanonicalUrl });
-                    await setPacketContext(tabId, currentContext.instanceId, originalCanonicalUrl, finalUrl);
-                } else {
-                    // This part is correct: the URL is not in the packet, so demote.
-                    logger.log(logPrefix, 'Timer fired. New URL is not a packet item. Demoting tab.');
+                if (newItemInPacket && newItemInPacket.url !== currentContext.canonicalPacketUrl) {
+                    // User navigated to another item IN the same packet. Re-stamp the tab.
+                    logger.log(logPrefix, 'User navigated to another packet item. Re-stamping tab.', { newUrl: newItemInPacket.url });
+                    await setPacketContext(tabId, currentContext.instanceId, newItemInPacket.url, finalUrl);
+                } else if (!newItemInPacket) {
+                    // User navigated OUTSIDE the packet. Demote the tab.
+                    logger.log(logPrefix, 'User navigated away from the packet. Demoting tab.');
                     await clearPacketContext(tabId);
                     if (await shouldUseTabGroups()) {
                         await tabGroupHandler.ejectTabFromGroup(tabId, currentContext.instanceId);
                     }
                 }
-                // Trigger a full UI update after the action is taken
-                await processNavigationEvent(tabId, finalUrl, { ...details, transitionType: 'manual_update' });
-
-            }, 500);
-
-            pendingNavigationActionTimers.set(tabId, navigationActionTimer);
-            return;
+            }
         }
     }
-    
+
+    // Step 4: Re-fetch the context and reconcile browser state (unchanged).
     const finalContext = await getPacketContext(tabId);
     const finalInstance = finalContext ? await storage.getPacketInstance(finalContext.instanceId) : null;
 
@@ -160,6 +159,7 @@ async function processNavigationEvent(tabId, finalUrl, details) {
         }
     }
 
+    // Step 5: Update the UI (unchanged).
     if (sidebarHandler.isSidePanelAvailable()) {
         sidebarHandler.notifySidebar('update_sidebar_context', {
             tabId,
