@@ -1,7 +1,4 @@
 // ext/background-modules/navigation-handler.js
-// REVISED: The logic has been completely refactored into a single, robust "manager" function.
-// It now uses a permanent "stamp" for a tab's identity, which is only overwritten by an
-// explicit, user-initiated navigation action. This fixes redirect bugs and state desync issues.
 
 import {
     logger,
@@ -20,6 +17,7 @@ import * as sidebarHandler from './sidebar-handler.js';
 import * as tabGroupHandler from './tab-group-handler.js';
 
 const pendingVisitTimers = new Map();
+const pendingNavigationActionTimers = new Map();
 
 export function clearPendingVisitTimer(tabId) {
     if (pendingVisitTimers.has(tabId)) {
@@ -28,11 +26,15 @@ export function clearPendingVisitTimer(tabId) {
     }
 }
 
-// --- ADD THIS HELPER FUNCTION ---
-// This function ensures the overlay scripts are always present on the page.
+function clearPendingNavigationActionTimer(tabId) {
+    if (pendingNavigationActionTimers.has(tabId)) {
+        clearTimeout(pendingNavigationActionTimers.get(tabId));
+        pendingNavigationActionTimers.delete(tabId);
+    }
+}
+
 async function injectOverlayScripts(tabId) {
     try {
-        // The 'scripting' permission is required in manifest.json
         await chrome.scripting.executeScript({
             target: { tabId: tabId },
             files: ['overlay.js']
@@ -43,7 +45,6 @@ async function injectOverlayScripts(tabId) {
         });
     } catch (e) {
         // This is expected to fail on chrome:// pages, store pages, etc.
-        // We can safely ignore these errors as the overlay isn't needed there.
     }
 }
 
@@ -59,14 +60,10 @@ export async function onHistoryStateUpdated(details) {
 
 export async function checkAndPromptForCompletion(logPrefix, visitResult, instanceId) {
     if (visitResult?.success && visitResult?.justCompleted) {
-         // --- START OF THE FIX ---
-        // If the packet that was just completed is the one in the active media player,
-        // we must reset the player's in-memory state to prevent it from leaking.
         if (activeMediaPlayback.instanceId === instanceId) {
             logger.log('NavigationHandler', 'Completed packet was the active media packet. Resetting player state.');
             await resetActiveMediaPlayback();
         }
-        // --- END OF THE FIX ---
         const instanceDataForPrompt = visitResult.instance || await storage.getPacketInstance(instanceId);
         if (instanceDataForPrompt && sidebarHandler.isSidePanelAvailable()) {
             sidebarHandler.notifySidebar('show_confetti', { topic: instanceDataForPrompt.topic || '' });
@@ -85,64 +82,75 @@ export async function checkAndPromptForCompletion(logPrefix, visitResult, instan
 }
 
 async function processNavigationEvent(tabId, finalUrl, details) {
+    logger.log(`[NavigationHandler Tab ${tabId}]`, 'Processing navigation event.', {
+        url: finalUrl,
+        transitionType: details.transitionType,
+        transitionQualifiers: details.transitionQualifiers,
+        fullDetails: details
+    });
 
     await injectOverlayScripts(tabId);
 
     const logPrefix = `[NavigationHandler Tab ${tabId}]`;
     clearPendingVisitTimer(tabId);
+    clearPendingNavigationActionTimer(tabId);
 
     const transitionType = details.transitionType || '';
+    const transitionQualifiers = details.transitionQualifiers || [];
 
-    // Step 1: Check for the "trusted intent" token for newly created tabs.
-    // This sets the initial, permanent "stamp" for the tab's identity.
     const trustedIntentKey = `trusted_intent_${tabId}`;
     const sessionData = await storage.getSession(trustedIntentKey);
     const trustedContext = sessionData[trustedIntentKey];
 
     if (trustedContext) {
-        // This is the first time we've seen this tab. Stamp its identity.
         await setPacketContext(tabId, trustedContext.instanceId, trustedContext.canonicalPacketUrl, finalUrl);
         await storage.removeSession(trustedIntentKey);
     }
 
-    // Step 2: Get the tab's current context (its "stamp").
     let currentContext = await getPacketContext(tabId);
 
-    // Step 3: If the tab has a context, determine if the user is intentionally navigating away.
     if (currentContext) {
-        const isUserInitiated = ['typed', 'auto_bookmark', 'generated', 'keyword', 'form_submit'].includes(transitionType);
+        const isUserInitiated = ['typed', 'auto_bookmark', 'generated', 'keyword', 'form_submit'].includes(transitionType) ||
+                                (transitionType === 'link' && !transitionQualifiers.includes('client_redirect') && !transitionQualifiers.includes('server_redirect'));
 
-        if (isUserInitiated) {
+        // --- REVISED LOGIC ---
+        if (isUserInitiated && finalUrl !== currentContext.currentBrowserUrl) {
             const instance = await storage.getPacketInstance(currentContext.instanceId);
-            const newItemInPacket = packetUtils.isUrlInPacket(finalUrl, instance, { returnItem: true });
+            // Capture the original context before the timer
+            const originalCanonicalUrl = currentContext.canonicalPacketUrl;
 
-            if (newItemInPacket) {
-                // User navigated to another item IN the same packet. Re-stamp the tab.
-                logger.log(logPrefix, 'User navigated to another packet item. Re-stamping tab.', { newUrl: newItemInPacket.url });
-                await setPacketContext(tabId, currentContext.instanceId, newItemInPacket.url, finalUrl);
-            } else {
-                // User navigated OUTSIDE the packet. Demote the tab.
-                logger.log(logPrefix, 'User navigated away from the packet. Demoting tab.');
-                await clearPacketContext(tabId);
-                if (await shouldUseTabGroups()) {
-                    await tabGroupHandler.ejectTabFromGroup(tabId, currentContext.instanceId);
+            const navigationActionTimer = setTimeout(async () => {
+                pendingNavigationActionTimers.delete(tabId);
+                const newItemInPacket = packetUtils.isUrlInPacket(finalUrl, instance, { returnItem: true });
+
+                if (newItemInPacket) {
+                    // THE FIX: If it's a new packet item, ignore it and restore the original context.
+                    logger.log(logPrefix, 'Timer fired. Redirect landed on another packet item. Preserving original context.', { originalUrl: originalCanonicalUrl });
+                    await setPacketContext(tabId, currentContext.instanceId, originalCanonicalUrl, finalUrl);
+                } else {
+                    // This part is correct: the URL is not in the packet, so demote.
+                    logger.log(logPrefix, 'Timer fired. New URL is not a packet item. Demoting tab.');
+                    await clearPacketContext(tabId);
+                    if (await shouldUseTabGroups()) {
+                        await tabGroupHandler.ejectTabFromGroup(tabId, currentContext.instanceId);
+                    }
                 }
-            }
-        }
-        // For all other navigation types (redirects, reloads), we do nothing here,
-        // preserving the original "stamp" regardless of the finalUrl.
-    }
+                // Trigger a full UI update after the action is taken
+                await processNavigationEvent(tabId, finalUrl, { ...details, transitionType: 'manual_update' });
 
-    // Step 4: Re-fetch the context, which may have changed, and reconcile the browser state.
+            }, 500);
+
+            pendingNavigationActionTimers.set(tabId, navigationActionTimer);
+            return;
+        }
+    }
+    
     const finalContext = await getPacketContext(tabId);
     const finalInstance = finalContext ? await storage.getPacketInstance(finalContext.instanceId) : null;
 
     if (finalInstance) {
-        // This reconciliation step runs on every navigation. It ensures the tab is
-        // in the correct group and that the group is ordered correctly.
         await reconcileBrowserState(tabId, finalInstance.instanceId, finalInstance, finalUrl);
 
-        // Logic for visit timer (unchanged)
         const itemForVisitTimer = finalInstance.contents
             .flatMap(c => c.type === 'alternative' ? c.alternatives : c)
             .find(i => i.url === finalContext.canonicalPacketUrl);
@@ -152,7 +160,6 @@ async function processNavigationEvent(tabId, finalUrl, details) {
         }
     }
 
-    // Step 5: Update the UI.
     if (sidebarHandler.isSidePanelAvailable()) {
         sidebarHandler.notifySidebar('update_sidebar_context', {
             tabId,
@@ -179,7 +186,6 @@ async function reconcileBrowserState(tabId, instanceId, instance, currentBrowser
         stateModified = true;
     }
 
-    // The core reconciliation logic for tab groups.
     if (await shouldUseTabGroups()) {
         const ensuredGroupId = await tabGroupHandler.ensureTabInGroup(tabId, instanceId);
         if (browserState.tabGroupId !== ensuredGroupId && ensuredGroupId !== null) {
