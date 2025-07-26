@@ -537,10 +537,13 @@ async function restoreContextOnStartup() {
                     for (const tab of tabsInGroup) {
                         const matchedItem = packetUtils.isUrlInPacket(tab.url, instance, { returnItem: true });
                         if (matchedItem) {
+                            // --- THIS IS THE FIX ---
+                            // Set the context AND the grace period token for the restored tab.
+                            logger.log('Background:restoreContext', `Restoring context for tab ${tab.id} and setting grace period.`);
                             await setPacketContext(tab.id, instanceId, matchedItem.url, tab.url);
+                            await storage.setSession({ [`grace_period_${tab.id}`]: Date.now() });
+                            setTimeout(() => storage.removeSession(`grace_period_${tab.id}`), 1500); // 1.5 second grace period
                         } else {
-                            // The navigation handler will eject this tab on its next update.
-                            // We can optionally clear its context now.
                             await clearPacketContext(tab.id);
                         }
                     }

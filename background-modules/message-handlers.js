@@ -142,6 +142,9 @@ async function handleOpenContent(data, sender, sendResponse) {
     const instanceId = instance?.instanceId;
     const targetCanonicalUrl = clickedUrl;
 
+    // --- NEW LOG ---
+    logger.log(`MessageHandler:handleOpenContent`, `Received request to open content.`, { instanceId, targetCanonicalUrl });
+
     if (!instance || !instanceId || !targetCanonicalUrl) {
         sendResponse({ success: false, error: 'Missing instance data or targetCanonicalUrl' });
         return;
@@ -174,26 +177,24 @@ async function handleOpenContent(data, sender, sendResponse) {
             finalUrlToOpen = targetCanonicalUrl;
         }
 
-        // --- THIS IS THE FIX ---
-        // Create the trusted intent token first.
         const trustedIntent = {
             instanceId: instanceId,
             canonicalPacketUrl: targetCanonicalUrl,
         };
 
         if (targetTab) {
-            // If tab exists, set token for it and then update its URL.
+            // --- NEW LOG ---
+            logger.log(`MessageHandler:handleOpenContent`, `Found existing tab. Setting trusted intent for tabId: ${targetTab.id}.`);
             await storage.setSession({ [`trusted_intent_${targetTab.id}`]: trustedIntent });
             await chrome.tabs.update(targetTab.id, { url: finalUrlToOpen, active: true });
             if (targetTab.windowId) await chrome.windows.update(targetTab.windowId, { focused: true });
-            logger.log(`MessageHandler:handleOpenContent`, `Set trusted intent token for existing Tab ${targetTab.id}.`);
         } else {
-            // If tab is new, create it, then set the token for its new ID.
             const newTab = await chrome.tabs.create({ url: finalUrlToOpen, active: false });
             if (!newTab || typeof newTab.id !== 'number') throw new Error('Tab creation failed.');
+            // --- NEW LOG ---
+            logger.log(`MessageHandler:handleOpenContent`, `Created new tab. Setting trusted intent for tabId: ${newTab.id}.`);
             await storage.setSession({ [`trusted_intent_${newTab.id}`]: trustedIntent });
             await chrome.tabs.update(newTab.id, { active: true });
-            logger.log(`MessageHandler:handleOpenContent`, `Set trusted intent token for new Tab ${newTab.id}.`);
         }
         
         sendResponse({ success: true });
