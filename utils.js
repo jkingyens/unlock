@@ -580,10 +580,12 @@ async function setPacketContext(tabId, instanceId, canonicalPacketUrl, currentBr
         canonicalPacketUrl,
         currentBrowserUrl
     };
+    logger.log('Utils:setPacketContext', `Setting context for tabId: ${tabId}`, context);
     await storage.setLocal({ [getPacketContextKey(tabId)]: context });
     return true;
 }
 async function clearPacketContext(tabId) {
+    logger.log('Utils:clearPacketContext', `Clearing context for tabId: ${tabId}`);
     await storage.removeLocal(getPacketContextKey(tabId));
 }
 
