@@ -17,7 +17,6 @@ import {
 const TAB_REORDER_INTERVAL = 5 * 60 * 1000; // 5 minutes
 let tabReorderIntervalId = null;
 const DRAFT_GROUP_TITLE = "Packet Builder";
-const groupingInProgress = new Set();
 
 // --- Helper Functions (Internal - create/update/get group) ---
 function createTabGroupHelper(tabId, instance) {
@@ -51,17 +50,7 @@ export async function ensureTabInGroup(tabId, instanceId) {
     if (!(await shouldUseTabGroups())) return null;
     if (typeof tabId !== 'number' || !instanceId) return null;
 
-    if (groupingInProgress.has(instanceId)) {
-        logger.log('TabGroupHandler:ensureTabInGroup', `Grouping already in progress for instance ${instanceId}, skipping.`);
-        return null;
-    }
-
     try {
-        // *** FIX: Acquire lock INSIDE the try block. ***
-        // This guarantees the finally block will run and release the lock, even if the
-        // chrome.tabs.get or storage.getPacketInstance calls fail.
-        groupingInProgress.add(instanceId);
-
         const instance = await storage.getPacketInstance(instanceId);
         if (!instance) {
             logger.warn('TabGroupHandler:ensureTabInGroup', 'Packet instance not found for ID:', { instanceId });
@@ -107,8 +96,6 @@ export async function ensureTabInGroup(tabId, instanceId) {
     } catch (error) {
         logger.error('TabGroupHandler:ensureTabInGroup', 'Error ensuring tab is in group', { tabId, instanceId, error });
         return null;
-    } finally {
-        groupingInProgress.delete(instanceId); // Release lock
     }
 }
 
@@ -351,4 +338,3 @@ export async function cleanupDraftGroup() {
         logger.error('TabGroupHandler:cleanupDraftGroup', 'Error cleaning up draft group', error);
     }
 }
-
