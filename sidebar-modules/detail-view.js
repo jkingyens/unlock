@@ -469,10 +469,20 @@ async function createContentCard(contentItem, visitedUrlsSet, visitedGeneratedId
         }
     }
 
-    // A non-media card is visible if it's the summary page, has been visited, or has been mentioned.
+    // A non-media card's visibility depends on the context of the whole packet.
     const isSummaryPage = contentItem.relevance === 'A summary of the packet contents.';
     const isMentioned = contentItem.url && mentionedLinks.has(contentItem.url);
-    const isVisible = type === 'media' || isSummaryPage || isVisited || isMentioned;
+    
+    // Check if the packet contains any media files.
+    const hasMedia = instance.contents.some(item => item.type === 'media');
+
+    // A card is visible if:
+    // 1. It IS media.
+    // 2. It's the designated summary page.
+    // 3. It has been visited.
+    // 4. It has been mentioned by playing media.
+    // 5. It is an external link AND there is no media in the packet to reveal it.
+    const isVisible = type === 'media' || isSummaryPage || isVisited || isMentioned || ((type === 'external' || type === 'generated') && !hasMedia);
 
     if (!isVisible) {
         card.classList.add('hidden-by-rule');

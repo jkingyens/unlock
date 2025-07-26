@@ -176,6 +176,7 @@ function getDb() {
   }
   return dbPromise;
 }
+
 const indexedDbStorage = {
    async saveGeneratedContent(imageId, pageId, filesArray) {
     const key = `${imageId}::${pageId}`;
@@ -200,6 +201,7 @@ const indexedDbStorage = {
     const key = `${imageId}::${pageId}`;
     try {
         const db = await getDb();
+        // FIX: Corrected typo from INDEX_DB to INDEXED_DB
         const tx = db.transaction(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT, 'readonly');
         const store = tx.objectStore(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT);
         const request = store.get(key);
@@ -215,6 +217,7 @@ const indexedDbStorage = {
    async deleteGeneratedContentForImage(imageId) {
         try {
             const db = await getDb();
+            // FIX: Corrected typo from INDEX_DB to INDEXED_DB
             const tx = db.transaction(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT, 'readwrite');
             const store = tx.objectStore(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT);
             const request = store.openCursor();
@@ -236,6 +239,43 @@ const indexedDbStorage = {
              logger.error('IndexedDB', 'Error deleting content for image', { imageId, error });
              return false;
         }
+   },
+   async transferDraftContent(originalDraftId, finalImageId) {
+       try {
+           const db = await getDb();
+           // FIX: Corrected typo from INDEX_DB to INDEXED_DB
+           const tx = db.transaction(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT, 'readwrite');
+           const store = tx.objectStore(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT);
+           const request = store.openCursor();
+           
+           await new Promise((resolve, reject) => {
+               request.onsuccess = event => {
+                   const cursor = event.target.result;
+                   if (cursor) {
+                       const currentKey = String(cursor.key);
+                       if (currentKey.startsWith(`${originalDraftId}::`)) {
+                           const pageId = currentKey.substring(currentKey.indexOf('::') + 2);
+                           const newKey = `${finalImageId}::${pageId}`;
+                           const value = cursor.value;
+                           
+                           store.add(value, newKey);
+                           cursor.delete();
+                       }
+                       cursor.continue();
+                   } else {
+                       resolve();
+                   }
+               };
+               request.onerror = event => reject(event.target.error);
+               tx.oncomplete = resolve;
+               tx.onerror = () => reject(tx.error);
+           });
+           logger.log('IndexedDB', `Successfully transferred content from ${originalDraftId} to ${finalImageId}`);
+           return true;
+       } catch (error) {
+           logger.error('IndexedDB', 'Error transferring draft content', { originalDraftId, finalImageId, error });
+           return false;
+       }
    }
 };
 

@@ -259,23 +259,20 @@ async function handlePlaybackActionRequest(data, sender, sendResponse) {
                 const cachedAudio = await indexedDbStorage.getGeneratedContent(instance.imageId, pageId);
                 if (!cachedAudio || !cachedAudio[0]?.content) throw new Error("Could not find cached audio data.");
 
-                // Load and start playing the audio in the offscreen document first.
                 const audioB64 = arrayBufferToBase64(cachedAudio[0].content);
                 await controlAudioInOffscreen('play', { audioB64, mimeType: contentItem.mimeType, pageId, instanceId });
                 const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
 
-                // Now, update the central state, explicitly resetting any properties
-                // that could have been carried over from a previous session.
                 await setMediaPlaybackState({
                     isPlaying: true,
                     pageId,
                     instanceId,
                     topic: instance.topic,
                     tabId: activeTab ? activeTab.id : null,
-                    currentTime: 0, // Explicitly reset playback progress
-                    duration: 0, // Explicitly reset duration
-                    mentionedMediaLinks: [], // Explicitly clear mentioned links
-                    lastMentionedLink: null // Explicitly clear last mentioned link
+                    currentTime: 0,
+                    duration: 0,
+                    mentionedMediaLinks: [],
+                    lastMentionedLink: null
                 }, { source: 'play_intent' });
                 break;
 
@@ -311,7 +308,7 @@ const actionHandlers = {
             const fullState = {
                 ...activeMediaPlayback,
                 isVisible: isVisible,
-                animate: false, // Don't animate on initial load
+                animate: false,
                 animateLinkMention: false
             };
             sendResponse(fullState);
@@ -319,11 +316,13 @@ const actionHandlers = {
             logger.error('MessageHandler:get_playback_state', 'Error constructing full state', e);
             sendResponse({ ...activeMediaPlayback, isVisible: false });
         }
-        return true; // Indicates an asynchronous response
     },
     'open_sidebar_and_navigate': async (data, sender, sendResponse) => {
-        await chrome.sidePanel.open({ windowId: sender.tab.windowId });
-        chrome.runtime.sendMessage({ action: 'navigate_to_view', data });
+        const [tab] = await chrome.tabs.query({active: true, lastFocusedWindow: true});
+        if (tab) {
+            await chrome.sidePanel.open({ windowId: tab.windowId });
+            chrome.runtime.sendMessage({ action: 'navigate_to_view', data });
+        }
         sendResponse({ success: true });
     },
     'audio_time_update': (data) => {
@@ -331,8 +330,8 @@ const actionHandlers = {
             setMediaPlaybackState({ currentTime: data.currentTime, duration: data.duration }, { source: 'time_update' });
         }
     },
-    'improve_draft_audio': processImproveDraftAudio,
-    'generate_timestamps_for_packet_items': processGenerateTimestampsRequest,
+    'improve_draft_audio': (data, sender, sendResponse) => processImproveDraftAudio(data).then(sendResponse),
+    'generate_timestamps_for_packet_items': (data, sender, sendResponse) => processGenerateTimestampsRequest(data).then(sendResponse),
     'get_draft_item_for_preview': async (data, sender, sendResponse) => {
         const { pageId } = data;
         const sessionData = await storage.getSession('draftPacketForPreview');
@@ -357,21 +356,18 @@ const actionHandlers = {
         }
     },
     'get_page_details_from_dom': handleGetPageDetailsFromDOM,
-    'sync_draft_group': (data) => tabGroupHandler.syncDraftGroup(data.desiredUrls),
-    'focus_or_create_draft_tab': (data) => tabGroupHandler.focusOrCreateDraftTab(data.url),
-    'cleanup_draft_group': tabGroupHandler.cleanupDraftGroup,
-    'generate_custom_page': processGenerateCustomPageRequest,
-    'delete_packet_image': processDeletePacketImageRequest,
+    'sync_draft_group': (data, sender, sendResponse) => tabGroupHandler.syncDraftGroup(data.desiredUrls).then(sendResponse),
+    'focus_or_create_draft_tab': (data, sender, sendResponse) => tabGroupHandler.focusOrCreateDraftTab(data.url).then(sendResponse),
+    'cleanup_draft_group': (data, sender, sendResponse) => tabGroupHandler.cleanupDraftGroup().then(sendResponse),
+    'generate_custom_page': (data, sender, sendResponse) => processGenerateCustomPageRequest(data).then(sendResponse),
+    'delete_packet_image': (data, sender, sendResponse) => processDeletePacketImageRequest(data).then(sendResponse),
     'save_packet_image': async (data, sender, sendResponse) => {
         await storage.savePacketImage(data.image);
         chrome.runtime.sendMessage({ action: 'packet_image_created', data: { image: data.image } });
         sendResponse({ success: true, imageId: data.image.id });
     },
-    'initiate_packet_creation_from_tab': async (data, sender, sendResponse) => {
-        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-        sendResponse(await processCreatePacketRequestFromTab(tab.id));
-    },
-    'initiate_packet_creation': (data, sender) => processCreatePacketRequest(data, sender.tab?.id),
+    'initiate_packet_creation_from_tab': (data, sender, sendResponse) => processCreatePacketRequestFromTab(sender.tab.id).then(sendResponse),
+    'initiate_packet_creation': (data, sender, sendResponse) => processCreatePacketRequest(data, sender.tab?.id).then(sendResponse),
     'instantiate_packet': async (data, sender, sendResponse) => {
         const newInstanceId = `inst_${Date.now()}_${Math.random().toString(36).substring(2, 10)}`;
         const result = await instantiatePacket(data.imageId, newInstanceId, sender.tab?.id);
@@ -381,15 +377,11 @@ const actionHandlers = {
         sendResponse(result);
     },
     'delete_packets': async (data, sender, sendResponse) => {
-        // FIX: Aggressively clear the active media player's state if any of the
-        // packets being deleted are the one currently loaded in the player.
-        // This is done BEFORE the deletion process to prevent race conditions.
         if (data?.packetIds && activeMediaPlayback.instanceId) {
             if (data.packetIds.includes(activeMediaPlayback.instanceId)) {
                 await resetActiveMediaPlayback();
             }
         }
-
         const result = await processDeletePacketsRequest(data);
         sendResponse(result);
     },
@@ -407,29 +399,23 @@ const actionHandlers = {
     'open_content_from_overlay': async (data, sender, sendResponse) => {
         const { url } = data;
         const { instanceId } = activeMediaPlayback;
-
         if (!instanceId || !url) {
             return sendResponse({ success: false, error: 'Missing active instance or URL.' });
         }
-
         try {
             await setMediaPlaybackState({}, { animate: false, source: 'overlay_link_click' });
             const instance = await storage.getPacketInstance(instanceId);
-            if (!instance) {
-                throw new Error(`Instance ${instanceId} not found.`);
-            }
+            if (!instance) { throw new Error(`Instance ${instanceId} not found.`); }
             await handleOpenContent({ instance, url }, sender, sendResponse);
         } catch (error) {
             logger.error('MessageHandler:open_content_from_overlay', 'Error opening content', error);
             sendResponse({ success: false, error: error.message });
         }
-        return true;
     },
     'get_context_for_tab': handleGetContextForTab,
     'get_current_tab_context': handleGetCurrentTabContext,
     'set_media_playback_state': (data, sender, sendResponse) => {
-        setMediaPlaybackState({}, data); 
-        sendResponse({ success: true });
+        setMediaPlaybackState({}, data).then(() => sendResponse({ success: true }));
     },
     'page_interaction_complete': async (data, sender, sendResponse) => {
         const context = await getPacketContext(sender.tab.id);
@@ -451,8 +437,8 @@ const actionHandlers = {
     'prepare_sidebar_navigation': (data, sender, sendResponse) => {
         storage.setSession({ [PENDING_VIEW_KEY]: data }).then(success => sendResponse({ success }));
     },
-    'publish_image_for_sharing': (data) => publishImageForSharing(data.imageId),
-    'import_image_from_url': (data) => importImageFromUrl(data.url)
+    'publish_image_for_sharing': (data, sender, sendResponse) => publishImageForSharing(data.imageId).then(sendResponse),
+    'import_image_from_url': (data, sender, sendResponse) => importImageFromUrl(data.url).then(sendResponse)
 };
 
 export function handleMessage(message, sender, sendResponse) {
@@ -461,8 +447,11 @@ export function handleMessage(message, sender, sendResponse) {
         Promise.resolve(handler(message.data, sender, sendResponse))
             .catch(err => {
                 logger.error("MessageHandler", `Error in action ${message.action}:`, err);
-                if (!sendResponse._sent) {
+                // Check if a response has already been sent to avoid errors.
+                try {
                     sendResponse({ success: false, error: err.message });
+                } catch (e) {
+                    // This error is expected if a response was already sent.
                 }
             });
         return true; // Indicates async response
