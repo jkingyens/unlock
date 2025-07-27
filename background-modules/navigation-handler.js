@@ -11,7 +11,8 @@ import {
 } from '../utils.js';
 import {
     activeMediaPlayback,
-    resetActiveMediaPlayback
+    resetActiveMediaPlayback,
+    interimContextMap // <-- Make sure this is imported
 } from '../background.js';
 import * as sidebarHandler from './sidebar-handler.js';
 import * as tabGroupHandler from './tab-group-handler.js';
@@ -83,8 +84,9 @@ export async function checkAndPromptForCompletion(logPrefix, visitResult, instan
 
 async function processNavigationEvent(tabId, finalUrl, details) {
     const logPrefix = `[NavigationHandler Tab ${tabId}]`;
+    // --- FIX: Declare sessionData at the top of the function scope ---
+    let sessionData;
     
-    // --- NEW LOG (More verbose) ---
     logger.log(logPrefix, '>>> NAVIGATION EVENT START <<<', {
         url: finalUrl,
         transition: `${details.transitionType} | ${details.transitionQualifiers.join(', ')}`,
@@ -94,39 +96,43 @@ async function processNavigationEvent(tabId, finalUrl, details) {
     await injectOverlayScripts(tabId);
     clearPendingVisitTimer(tabId);
 
-    // Step 1: Check for "trusted intent" token.
-    const trustedIntentKey = `trusted_intent_${tabId}`;
-    let sessionData = await storage.getSession(trustedIntentKey);
-    const trustedContext = sessionData[trustedIntentKey];
+    // Step 1: Check for startup-specific grace period token.
+    if (interimContextMap.has(tabId)) {
+        logger.log(logPrefix, 'DECISION: Found startup grace period token from interim map.');
+        const currentContext = await getPacketContext(tabId);
+        if (currentContext) {
+            await setPacketContext(tabId, currentContext.instanceId, currentContext.canonicalPacketUrl, finalUrl);
+        }
+        interimContextMap.delete(tabId); // Consume the token
+    } else {
+        // Step 2: Normal logic for trusted intent token.
+        const trustedIntentKey = `trusted_intent_${tabId}`;
+        sessionData = await storage.getSession(trustedIntentKey);
+        const trustedContext = sessionData[trustedIntentKey];
 
-    if (trustedContext) {
-        // --- NEW LOG ---
-        logger.log(logPrefix, 'DECISION: Found trusted intent token. Stamping tab context and setting grace period.');
-        await setPacketContext(tabId, trustedContext.instanceId, trustedContext.canonicalPacketUrl, finalUrl);
-        await storage.setSession({ [`grace_period_${tabId}`]: Date.now() }); // Store timestamp
-        setTimeout(() => storage.removeSession(`grace_period_${tabId}`), 1500); // 1.5 second grace period
-        await storage.removeSession(trustedIntentKey);
+        if (trustedContext) {
+            logger.log(logPrefix, 'DECISION: Found trusted intent token. Stamping tab context and setting grace period.');
+            await setPacketContext(tabId, trustedContext.instanceId, trustedContext.canonicalPacketUrl, finalUrl);
+            await storage.setSession({ [`grace_period_${tabId}`]: Date.now() });
+            setTimeout(() => storage.removeSession(`grace_period_${tabId}`), 1500);
+            await storage.removeSession(trustedIntentKey);
+        }
     }
 
-    // Step 2: Get the tab's current context.
     let currentContext = await getPacketContext(tabId);
-    // --- NEW LOG ---
     logger.log(logPrefix, 'Current context on record:', currentContext);
 
-    // Step 3: If the tab has context, determine the next action.
     if (currentContext) {
         // Step 3a: Check if we are within the grace period.
         const gracePeriodKey = `grace_period_${tabId}`;
-        sessionData = await storage.getSession(gracePeriodKey);
+        sessionData = await storage.getSession(gracePeriodKey); // This line was causing the error
         if (sessionData[gracePeriodKey]) {
-            // --- NEW LOG ---
             const age = Date.now() - sessionData[gracePeriodKey];
             logger.log(logPrefix, `DECISION: Grace period is active (${age}ms old). Preserving original context and updating URL.`);
             await setPacketContext(tabId, currentContext.instanceId, currentContext.canonicalPacketUrl, finalUrl);
         } else {
             // Step 3b: Grace period is over. Handle as a normal navigation.
             const isUserInitiated = ['link', 'typed', 'auto_bookmark', 'generated', 'keyword', 'form_submit'].includes(details.transitionType);
-            // --- NEW LOG ---
             logger.log(logPrefix, `Is this a user-initiated navigation? -> ${isUserInitiated}`);
 
             if (isUserInitiated) {
@@ -134,18 +140,15 @@ async function processNavigationEvent(tabId, finalUrl, details) {
                 const newItemInPacket = packetUtils.isUrlInPacket(finalUrl, instance, { returnItem: true });
 
                 if (newItemInPacket && newItemInPacket.url !== currentContext.canonicalPacketUrl) {
-                     // --- NEW LOG ---
                     logger.log(logPrefix, 'DECISION: User navigated to another item within the same packet. Re-stamping tab.');
                     await setPacketContext(tabId, currentContext.instanceId, newItemInPacket.url, finalUrl);
                 } else if (!newItemInPacket) {
-                     // --- NEW LOG ---
                     logger.log(logPrefix, 'DECISION: User navigated to a URL outside the packet. Demoting tab.');
                     await clearPacketContext(tabId);
                     if (await shouldUseTabGroups()) {
                         await tabGroupHandler.ejectTabFromGroup(tabId, currentContext.instanceId);
                     }
                 } else {
-                    // --- NEW LOG ---
                     logger.log(logPrefix, 'DECISION: Navigation is to the same packet item or a non-item URL that was not user-initiated. No context change needed.');
                 }
             }
@@ -154,7 +157,6 @@ async function processNavigationEvent(tabId, finalUrl, details) {
 
     // Step 4: Re-fetch the context and reconcile browser state.
     const finalContext = await getPacketContext(tabId);
-    // --- NEW LOG ---
     logger.log(logPrefix, 'Final context after logic:', finalContext);
     const finalInstance = finalContext ? await storage.getPacketInstance(finalContext.instanceId) : null;
 

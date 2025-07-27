@@ -14,6 +14,9 @@ const audioDataCache = new Map();
 let currentDetailInstance = null;
 let saveStateDebounceTimer = null; // Timer for debounced state saving
 let currentPlayingPageId = null; // Track which media item is active in this view
+// --- THE FIX: Add a flag to prevent rapid-fire clicks ---
+let isOpeningUrl = false;
+// --- END OF THE FIX ---
 
 // Functions to be imported from the new, lean sidebar.js
 let sendMessageToBackground;
@@ -529,7 +532,15 @@ export function updateActiveCardHighlight(canonicalPacketUrl) {
 // --- Action Handlers ---
 
 async function openUrl(url, instanceId) {
+    // --- THE FIX: Implement the click lock ---
+    if (isOpeningUrl) {
+        logger.log("DetailView:openUrl", "Ignoring rapid click, URL is already being opened.");
+        return; // Prevent rapid-fire clicks
+    }
     if (!url || !instanceId) return;
+
+    isOpeningUrl = true; // Set the lock
+    // --- END OF THE FIX ---
 
     // *** THE FIX: Pass the entire instance object, not just the ID. ***
     // This uses the `currentDetailInstance` which is guaranteed to be the fresh,
@@ -537,6 +548,7 @@ async function openUrl(url, instanceId) {
     const instanceToOpen = currentDetailInstance;
     if (!instanceToOpen || instanceToOpen.instanceId !== instanceId) {
         logger.error("DetailView", "Mismatch or missing instance data for openUrl", { instanceId, currentDetailInstance });
+        isOpeningUrl = false; // Release lock on error
         return;
     }
 
@@ -546,6 +558,10 @@ async function openUrl(url, instanceId) {
         action: 'open_content',
         data: { instance: instanceToOpen, url: url } // Pass the full instance object
     }).catch(err => logger.error("DetailView", `Error opening link: ${err.message}`));
+
+    // --- THE FIX: Reset the lock after a short delay ---
+    setTimeout(() => { isOpeningUrl = false; }, 1000);
+    // --- END OF THE FIX ---
 }
 
 function handleCloseTabGroup(tabGroupId) {

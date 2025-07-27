@@ -539,11 +539,16 @@ async function restoreContextOnStartup() {
                         const matchedItem = packetUtils.isUrlInPacket(tab.url, instance, { returnItem: true });
                         if (matchedItem) {
                             // --- THIS IS THE FIX ---
-                            // Set the context AND the grace period token for the restored tab.
-                            logger.log('Background:restoreContext', `Restoring context for tab ${tab.id} and setting grace period.`);
+                            // Use the in-memory map instead of session storage for the grace period.
+                            logger.log('Background:restoreContext', `Restoring context for tab ${tab.id} and setting grace period via interim map.`);
                             await setPacketContext(tab.id, instanceId, matchedItem.url, tab.url);
-                            await storage.setSession({ [`grace_period_${tab.id}`]: Date.now() });
-                            setTimeout(() => storage.removeSession(`grace_period_${tab.id}`), 1500); // 1.5 second grace period
+                            interimContextMap.set(tab.id, { gracePeriod: true, timestamp: Date.now() });
+                            // Set a timeout to clean up the map entry just in case, preventing memory leaks.
+                            setTimeout(() => {
+                                if (interimContextMap.has(tab.id)) {
+                                    interimContextMap.delete(tab.id);
+                                }
+                            }, 5000); // 5-second cleanup
                         } else {
                             await clearPacketContext(tab.id);
                         }
