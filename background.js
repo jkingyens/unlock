@@ -29,6 +29,10 @@ import * as tabGroupHandler from './background-modules/tab-group-handler.js';
 import * as sidebarHandler from './background-modules/sidebar-handler.js';
 import cloudStorage from './cloud-storage.js';
 
+// --- THE FIX: Call the listener registration at the top level ---
+attachNavigationListeners();
+// --- END OF THE FIX ---
+
 const ACTIVE_MEDIA_KEY = 'activeMediaPlaybackState';
 const AUDIO_KEEP_ALIVE_ALARM = 'audio-keep-alive';
 
@@ -284,8 +288,6 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     await cloudStorage.initialize().catch(err => logger.error('Background:onInstalled', 'Initial cloud storage init failed', err));
     await ruleManager.refreshAllRules();
 
-    attachNavigationListeners();
-
     const tabs = await chrome.tabs.query({ url: ["http://*/*", "https://*/*"] });
     for (const tab of tabs) {
         if (tab.id) {
@@ -322,7 +324,6 @@ chrome.runtime.onStartup.addListener(async () => {
      await garbageCollectTabContexts();
      await restoreContextOnStartup();
      await ruleManager.refreshAllRules();
-     attachNavigationListeners();
      if (await shouldUseTabGroups()) {
          tabGroupHandler.startTabReorderingChecks();
      }
