@@ -14,9 +14,7 @@ const audioDataCache = new Map();
 let currentDetailInstance = null;
 let saveStateDebounceTimer = null; // Timer for debounced state saving
 let currentPlayingPageId = null; // Track which media item is active in this view
-// --- THE FIX: Add a flag to prevent rapid-fire clicks ---
 let isOpeningUrl = false;
-// --- END OF THE FIX ---
 
 // Functions to be imported from the new, lean sidebar.js
 let sendMessageToBackground;
@@ -70,6 +68,16 @@ export function updatePlaybackUI(state) {
             if (mentionedUrlsSet.has(url)) {
                 card.classList.remove('hidden-by-rule');
                 if (wasHidden) {
+                    // --- THE FIX: Listen for the end of the transition ---
+                    // This ensures the card has finished its reveal animation before we scroll.
+                    const handleTransitionEnd = () => {
+                        card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                        // Clean up the listener so it doesn't fire again.
+                        card.removeEventListener('transitionend', handleTransitionEnd);
+                    };
+                    card.addEventListener('transitionend', handleTransitionEnd, { once: true });
+                    // --- END OF THE FIX ---
+
                     // Highlight the newly revealed card
                     card.classList.add('link-mentioned');
                     setTimeout(() => card.classList.remove('link-mentioned'), 2000);
@@ -532,23 +540,18 @@ export function updateActiveCardHighlight(canonicalPacketUrl) {
 // --- Action Handlers ---
 
 async function openUrl(url, instanceId) {
-    // --- THE FIX: Implement the click lock ---
     if (isOpeningUrl) {
         logger.log("DetailView:openUrl", "Ignoring rapid click, URL is already being opened.");
-        return; // Prevent rapid-fire clicks
+        return;
     }
     if (!url || !instanceId) return;
 
-    isOpeningUrl = true; // Set the lock
-    // --- END OF THE FIX ---
+    isOpeningUrl = true;
 
-    // *** THE FIX: Pass the entire instance object, not just the ID. ***
-    // This uses the `currentDetailInstance` which is guaranteed to be the fresh,
-    // in-memory version of the instance, avoiding a read from storage.
     const instanceToOpen = currentDetailInstance;
     if (!instanceToOpen || instanceToOpen.instanceId !== instanceId) {
         logger.error("DetailView", "Mismatch or missing instance data for openUrl", { instanceId, currentDetailInstance });
-        isOpeningUrl = false; // Release lock on error
+        isOpeningUrl = false;
         return;
     }
 
@@ -556,24 +559,19 @@ async function openUrl(url, instanceId) {
 
     sendMessageToBackground({
         action: 'open_content',
-        data: { instance: instanceToOpen, url: url } // Pass the full instance object
+        data: { instance: instanceToOpen, url: url }
     }).catch(err => logger.error("DetailView", `Error opening link: ${err.message}`));
 
-    // --- THE FIX: Reset the lock after a short delay ---
     setTimeout(() => { isOpeningUrl = false; }, 1000);
-    // --- END OF THE FIX ---
 }
 
 function handleCloseTabGroup(tabGroupId) {
-    // THE FIX: Navigate immediately for a responsive feel.
     navigateTo('root');
 
-    // Send the command to the background to clean up the tabs without waiting.
     sendMessageToBackground({
         action: 'remove_tab_groups',
         data: { groupIds: [tabGroupId] }
     }).catch(err => {
-        // Log any errors silently. The user has already moved on in the UI.
         logger.error("DetailView", `Error sending close group message: ${err.message}`);
     });
 }
