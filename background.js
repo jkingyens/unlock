@@ -82,17 +82,28 @@ chrome.tabs.onMoved.addListener(async (tabId, moveInfo) => {
 
 // --- Add a flag to gate navigation events during startup ---
 let isRestoring = true;
+let resolveInitialization;
 
-chrome.storage.session.get(['isBrowserStartupComplete']).then(async (result) => {
-    if (result.isBrowserStartupComplete) {
-        // If the flag is true, this is just a wake-up, not a real startup.
-        // Immediately flip the volatile flag to false.
-        isRestoring = false;
-        logger.log('Background:Lifecycle', 'Service worker woke up. Navigation processing is active.');
-    }
-    // If the flag is not set, we proceed with the onStartup/onInstalled listeners,
-    // which will handle setting it for the first time.
+// This promise will be awaited by critical event listeners.
+// It ensures they don't run until we've confirmed the extension's state.
+const initializationPromise = new Promise(resolve => {
+    resolveInitialization = resolve;
 });
+
+// This self-executing function checks the session state immediately when the worker starts.
+(async () => {
+    const isBrowserStartupComplete = await chrome.storage.session.get('isBrowserStartupComplete');
+    if (isBrowserStartupComplete) {
+        // This is a simple wake-up, not a fresh start.
+        // The onStartup/onInstalled listeners will NOT run.
+        isRestoring = false;
+        logger.log('Background:Lifecycle', 'Service worker woke up. Initialization complete.');
+        // Resolve the promise immediately so event listeners can proceed.
+        resolveInitialization(); // <<< ADD THIS LINE();
+    }
+    // If the flag is not set, we do nothing. We wait for onStartup or onInstalled
+    // to run and eventually call resolveInitialization().
+})();
 
 const ACTIVE_MEDIA_KEY = 'activeMediaPlaybackState';
 const AUDIO_KEEP_ALIVE_ALARM = 'audio-keep-alive';
@@ -373,6 +384,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
         // This will now run regardless of whether the try block succeeded or failed
         isRestoring = false;
         logger.log('Background:onInstalled', 'Installation complete. Navigation processing is now enabled.');
+        resolveInitialization();
     }
 });
 
@@ -391,6 +403,7 @@ chrome.runtime.onStartup.addListener(async () => {
         // This guarantees the extension becomes active even if an init step fails
         isRestoring = false;
         logger.log('Background:onStartup', 'Startup process complete. Navigation processing is now enabled.');
+        resolveInitialization();
     }
 });
 
@@ -500,10 +513,17 @@ chrome.tabs.onReplaced.addListener(async (addedTabId, removedTabId) => {
     }
 });
 
+// Do the same for the other navigation listener
+
+
+// ext/background.js
+
 function attachNavigationListeners() {
     if (!chrome.webNavigation) { return; }
 
-    const onCommittedWrapper = (details) => {
+    // This is the wrapper you already have, we just add the await line.
+    const onCommittedWrapper = async (details) => { // Make it async
+        await initializationPromise; // This line pauses execution until the state is confirmed
         if (isRestoring) {
             logger.log('Background:onCommitted', 'Ignoring navigation event during restore.', { url: details.url });
             return;
@@ -511,7 +531,8 @@ function attachNavigationListeners() {
         onCommitted(details);
     };
 
-    const onHistoryStateUpdatedWrapper = (details) => {
+    const onHistoryStateUpdatedWrapper = async (details) => { // Make it async
+        await initializationPromise; // This line pauses execution until the state is confirmed
         if (isRestoring) {
             logger.log('Background:onHistoryStateUpdated', 'Ignoring navigation event during restore.', { url: details.url });
             return;
