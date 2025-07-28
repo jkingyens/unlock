@@ -98,6 +98,7 @@ export function cacheDomReferences() {
         // Other Settings Refs
         tabGroupsEnabledCheckbox: document.getElementById('tab-groups-enabled'),
         confettiEnabledCheckbox: document.getElementById('confetti-enabled'),
+        mediaOverlayEnabledCheckbox: document.getElementById('media-overlay-enabled'),
         preferAudioEnabledCheckbox: document.getElementById('prefer-audio-enabled'),
         waveformLinkMarkersEnabledCheckbox: document.getElementById('waveform-link-markers-enabled'),
         visitThresholdSecondsInput: document.getElementById('visit-threshold-seconds'),

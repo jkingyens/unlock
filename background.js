@@ -11,6 +11,7 @@ import {
     setPacketContext,
     getDb,
     shouldUseTabGroups,
+    shouldShowOverlay,
     getInstanceIdFromGroupTitle,
     CONFIG,
     clearPacketContext,
@@ -233,7 +234,8 @@ export async function setMediaPlaybackState(newState, options = { animate: false
     }
 
     const { isSidebarOpen } = await storage.getSession({ isSidebarOpen: false });
-    const isVisible = hasActiveTrack && !isSidebarOpen;
+    const overlayEnabled = await shouldShowOverlay();
+    const isVisible = hasActiveTrack && !isSidebarOpen && overlayEnabled;
 
     const finalState = {
         ...activeMediaPlayback,

@@ -101,6 +101,7 @@ export function setupSettingsListeners() {
     // Other Settings
     s.themeRadios?.forEach(radio => radio.addEventListener('change', requestSave));
     s.tabGroupsEnabledCheckbox?.addEventListener('change', requestSave);
+    s.mediaOverlayEnabledCheckbox?.addEventListener('change', requestSave);
     s.preferAudioEnabledCheckbox?.addEventListener('change', requestSave);
     s.waveformLinkMarkersEnabledCheckbox?.addEventListener('change', requestSave);
     s.visitThresholdSecondsInput?.addEventListener('change', requestSave);
@@ -168,6 +169,7 @@ async function loadSettings() {
         domRefs.tabGroupsEnabledCheckbox.parentElement.title = isTabGroupsAvailable() ? '' : 'Tab Groups API not available in this browser version.';
 
         domRefs.confettiEnabledCheckbox.checked = loadedSettings.confettiEnabled ?? true;
+        domRefs.mediaOverlayEnabledCheckbox.checked = loadedSettings.mediaOverlayEnabled ?? true;
         domRefs.preferAudioEnabledCheckbox.checked = loadedSettings.preferAudio ?? false;
         domRefs.waveformLinkMarkersEnabledCheckbox.checked = loadedSettings.waveformLinkMarkersEnabled ?? true;
         domRefs.visitThresholdSecondsInput.value = loadedSettings.visitThresholdSeconds ?? 5;
@@ -253,6 +255,7 @@ function debounceSaveSettings() {
 async function gatherAndSaveSettings() {
     showSettingsStatus('Saving...', 'info', false);
     try {
+        const oldSettings = await storage.getSettings();
         let visitThreshold = parseInt(domRefs.visitThresholdSecondsInput.value, 10);
         if (isNaN(visitThreshold) || visitThreshold < 1) {
             visitThreshold = 5; // Fallback to default if input is invalid
@@ -265,6 +268,7 @@ async function gatherAndSaveSettings() {
             activeStorageId: currentActiveStorageIdSetting,
             themePreference: domRefs.themeLightRadio.checked ? 'light' : (domRefs.themeDarkRadio.checked ? 'dark' : 'auto'),
             tabGroupsEnabled: domRefs.tabGroupsEnabledCheckbox.checked,
+            mediaOverlayEnabled: domRefs.mediaOverlayEnabledCheckbox.checked,
             preferAudio: domRefs.preferAudioEnabledCheckbox.checked,
             waveformLinkMarkersEnabled: domRefs.waveformLinkMarkersEnabledCheckbox.checked,
             confettiEnabled: domRefs.confettiEnabledCheckbox.checked,
@@ -273,8 +277,15 @@ async function gatherAndSaveSettings() {
         };
         await storage.saveSettings(settingsToSave);
         showSettingsStatus('Settings saved.', 'success');
-        await applyThemeMode();
-        await sendMessageToBackground({ action: 'theme_preference_updated' });
+        
+        if (oldSettings.themePreference !== settingsToSave.themePreference) {
+            await applyThemeMode();
+            await sendMessageToBackground({ action: 'theme_preference_updated' });
+        }
+        if (oldSettings.mediaOverlayEnabled !== settingsToSave.mediaOverlayEnabled) {
+            await sendMessageToBackground({ action: 'overlay_setting_updated' });
+        }
+
     } catch (error) {
         showSettingsStatus(`Error saving: ${error.message}`, 'error', false);
     }

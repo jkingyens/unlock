@@ -92,6 +92,7 @@ const CONFIG = {
     themePreference: 'auto',
     confettiEnabled: true,
     tabGroupsEnabled: true,
+    mediaOverlayEnabled: true,
     preferAudio: false,
     waveformLinkMarkersEnabled: true,
     visitThresholdSeconds: 5,
@@ -620,6 +621,11 @@ async function shouldUseTabGroups() {
     return settings.tabGroupsEnabled;
 }
 
+async function shouldShowOverlay() {
+    const settings = await storage.getSettings();
+    return settings.mediaOverlayEnabled;
+}
+
 function arrayBufferToBase64(buffer) {
     let binary = '';
     const bytes = new Uint8Array(buffer);
@@ -656,6 +662,7 @@ export {
   clearPacketContext,
   getDb,
   shouldUseTabGroups,
+  shouldShowOverlay,
   arrayBufferToBase64,
   base64Decode,
   sanitizeForFileName,
