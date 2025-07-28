@@ -83,6 +83,17 @@ chrome.tabs.onMoved.addListener(async (tabId, moveInfo) => {
 // --- Add a flag to gate navigation events during startup ---
 let isRestoring = true;
 
+chrome.storage.session.get(['isBrowserStartupComplete']).then(async (result) => {
+    if (result.isBrowserStartupComplete) {
+        // If the flag is true, this is just a wake-up, not a real startup.
+        // Immediately flip the volatile flag to false.
+        isRestoring = false;
+        logger.log('Background:Lifecycle', 'Service worker woke up. Navigation processing is active.');
+    }
+    // If the flag is not set, we proceed with the onStartup/onInstalled listeners,
+    // which will handle setting it for the first time.
+});
+
 const ACTIVE_MEDIA_KEY = 'activeMediaPlaybackState';
 const AUDIO_KEEP_ALIVE_ALARM = 'audio-keep-alive';
 
@@ -329,61 +340,59 @@ async function restoreMediaStateOnStartup() {
 
 // --- Event Listeners ---
 chrome.runtime.onInstalled.addListener(async (details) => {
-    logger.log('Background:onInstalled', `Extension ${details.reason}`);
-    await initializeStorageAndSettings();
-    await restoreMediaStateOnStartup();
-    await cloudStorage.initialize().catch(err => logger.error('Background:onInstalled', 'Initial cloud storage init failed', err));
-    await ruleManager.refreshAllRules();
-
-    const tabs = await chrome.tabs.query({ url: ["http://*/*", "https://*/*"] });
-    for (const tab of tabs) {
-        if (tab.id) {
-            injectOverlayScripts(tab.id);
-        }
-    }
-
-    /*
-    if (await shouldUseTabGroups()) {
-         tabGroupHandler.startTabReorderingChecks();
-    } else {
-         tabGroupHandler.stopTabReorderingChecks();
-    }
-    */ 
-
+    // Wrap the entire installation process in a try...finally block
     try {
-        if (chrome.sidePanel && chrome.sidePanel.setPanelBehavior) {
-             await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false });
+        logger.log('Background:onInstalled', `Extension ${details.reason}`);
+        await initializeStorageAndSettings();
+        await restoreMediaStateOnStartup();
+        await cloudStorage.initialize().catch(err => logger.error('Background:onInstalled', 'Initial cloud storage init failed', err));
+        await ruleManager.refreshAllRules();
+
+        const tabs = await chrome.tabs.query({ url: ["http://*/*", "https://*/*"] });
+        for (const tab of tabs) {
+            if (tab.id) {
+                injectOverlayScripts(tab.id);
+            }
         }
-    } catch (error) {
-         logger.error('Background:onInstalled', 'Error setting side panel behavior:', error);
+
+        try {
+            if (chrome.sidePanel && chrome.sidePanel.setPanelBehavior) {
+                 await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false });
+            }
+        } catch (error) {
+             logger.error('Background:onInstalled', 'Error setting side panel behavior:', error);
+        }
+        await getDb();
+
+        chrome.alarms.create(RULE_REFRESH_ALARM_NAME, {
+            delayInMinutes: 55,
+            periodInMinutes: 55
+        });
+        await chrome.storage.session.set({ isBrowserStartupComplete: true });
+    } finally {
+        // This will now run regardless of whether the try block succeeded or failed
+        isRestoring = false;
+        logger.log('Background:onInstalled', 'Installation complete. Navigation processing is now enabled.');
     }
-    await getDb();
-    // await garbageCollectTabContexts();
-
-    chrome.alarms.create(RULE_REFRESH_ALARM_NAME, {
-        delayInMinutes: 55,
-        periodInMinutes: 55
-    });
-
-    isRestoring = false;
-    logger.log('Background:onInstalled', 'Installation complete. Navigation processing is now enabled.');
 });
 
 chrome.runtime.onStartup.addListener(async () => {
-     logger.log('Background:onStartup', 'Browser startup detected. Navigation processing is paused.');
-     await initializeStorageAndSettings();
-     await restoreMediaStateOnStartup();
-     await cloudStorage.initialize().catch(err => {});
-     await restoreContextOnStartup();
-     await ruleManager.refreshAllRules();
-     // if (await shouldUseTabGroups()) {
-     //     tabGroupHandler.startTabReorderingChecks();
-     // }
-     await getDb();
-     isRestoring = false;
-     await garbageCollectTabContexts();
-     logger.log('Background:onStartup', 'Startup process complete. Navigation processing is now enabled.');
- });
+    // Wrap the entire startup process in a try...finally block
+    try {
+        logger.log('Background:onStartup', 'Browser startup detected. Navigation processing is paused.');
+        await initializeStorageAndSettings();
+        await restoreMediaStateOnStartup();
+        await cloudStorage.initialize().catch(err => {});
+        await restoreContextOnStartup();
+        await ruleManager.refreshAllRules();
+        await getDb();
+        await garbageCollectTabContexts();
+    } finally {
+        // This guarantees the extension becomes active even if an init step fails
+        isRestoring = false;
+        logger.log('Background:onStartup', 'Startup process complete. Navigation processing is now enabled.');
+    }
+});
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return msgHandler.handleMessage(message, sender, sendResponse);
