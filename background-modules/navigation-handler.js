@@ -128,8 +128,29 @@ async function processNavigationEvent(tabId, finalUrl, details) {
                 const newItemInPacket = packetUtils.isUrlInPacket(finalUrl, instance, { returnItem: true });
 
                 if (newItemInPacket && newItemInPacket.url !== currentContext.canonicalPacketUrl) {
-                    logger.log(logPrefix, 'DECISION: User navigated to another item within the same packet. Re-stamping tab.');
-                    await setPacketContext(tabId, currentContext.instanceId, newItemInPacket.url, finalUrl);
+                    // --- Start Duplicate Tab Cleanup Logic ---
+                    let duplicateTab = null;
+                    const allTabs = await chrome.tabs.query({});
+                    for (const tab of allTabs) {
+                        if (tab.id !== tabId) { // Don't check against the current tab
+                            const otherContext = await getPacketContext(tab.id);
+                            if (otherContext && otherContext.instanceId === currentContext.instanceId && otherContext.canonicalPacketUrl === newItemInPacket.url) {
+                                duplicateTab = tab;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (duplicateTab) {
+                        logger.log(logPrefix, `DECISION: User navigated to an item that is already open in tab ${duplicateTab.id}. Closing the pre-existing tab.`);
+                        await chrome.tabs.remove(duplicateTab.id);
+                        await setPacketContext(tabId, currentContext.instanceId, newItemInPacket.url, finalUrl);
+                    } else {
+                         logger.log(logPrefix, 'DECISION: User navigated to another item within the same packet. Re-stamping tab.');
+                        await setPacketContext(tabId, currentContext.instanceId, newItemInPacket.url, finalUrl);
+                    }
+                    // --- End Duplicate Tab Cleanup Logic ---
+
                 } else if (!newItemInPacket) {
                     logger.log(logPrefix, 'DECISION: User navigated to a URL outside the packet. Demoting tab.');
                     await clearPacketContext(tabId);
