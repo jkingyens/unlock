@@ -645,8 +645,10 @@ async function restoreContextOnStartup() {
             
             const tabsInGroup = await chrome.tabs.query({ groupId: group.id });
 
-            const tabbableContents = instance.contents.filter(item => item.type == 'external');
-
+            const tabbableContents = instance.contents.filter(item =>
+                item.type === 'external' || item.type === 'generated'
+            );
+            
             for (let i = 0; i < tabsInGroup.length; i++) {
                 const tab = tabsInGroup[i];
                 const contentItem = tabbableContents[i];
