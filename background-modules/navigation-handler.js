@@ -11,8 +11,7 @@ import {
 } from '../utils.js';
 import {
     activeMediaPlayback,
-    resetActiveMediaPlayback,
-    interimContextMap // <-- Make sure this is imported
+    resetActiveMediaPlayback
 } from '../background.js';
 import * as sidebarHandler from './sidebar-handler.js';
 import * as tabGroupHandler from './tab-group-handler.js';
@@ -96,27 +95,16 @@ async function processNavigationEvent(tabId, finalUrl, details) {
     await injectOverlayScripts(tabId);
     clearPendingVisitTimer(tabId);
 
-    // Step 1: Check for startup-specific grace period token.
-    if (interimContextMap.has(tabId)) {
-        logger.log(logPrefix, 'DECISION: Found startup grace period token from interim map.');
-        const currentContext = await getPacketContext(tabId);
-        if (currentContext) {
-            await setPacketContext(tabId, currentContext.instanceId, currentContext.canonicalPacketUrl, finalUrl);
-        }
-        interimContextMap.delete(tabId); // Consume the token
-    } else {
-        // Step 2: Normal logic for trusted intent token.
-        const trustedIntentKey = `trusted_intent_${tabId}`;
-        sessionData = await storage.getSession(trustedIntentKey);
-        const trustedContext = sessionData[trustedIntentKey];
+    const trustedIntentKey = `trusted_intent_${tabId}`;
+    sessionData = await storage.getSession(trustedIntentKey);
+    const trustedContext = sessionData[trustedIntentKey];
 
-        if (trustedContext) {
-            logger.log(logPrefix, 'DECISION: Found trusted intent token. Stamping tab context and setting grace period.');
-            await setPacketContext(tabId, trustedContext.instanceId, trustedContext.canonicalPacketUrl, finalUrl);
-            await storage.setSession({ [`grace_period_${tabId}`]: Date.now() });
-            setTimeout(() => storage.removeSession(`grace_period_${tabId}`), 1500);
-            await storage.removeSession(trustedIntentKey);
-        }
+    if (trustedContext) {
+        logger.log(logPrefix, 'DECISION: Found trusted intent token. Stamping tab context and setting grace period.');
+        await setPacketContext(tabId, trustedContext.instanceId, trustedContext.canonicalPacketUrl, finalUrl);
+        await storage.setSession({ [`grace_period_${tabId}`]: Date.now() });
+        setTimeout(() => storage.removeSession(`grace_period_${tabId}`), 1500);
+        await storage.removeSession(trustedIntentKey);
     }
 
     let currentContext = await getPacketContext(tabId);
