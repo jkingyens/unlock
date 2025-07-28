@@ -8,6 +8,7 @@ import {
     storage,
     packetUtils,
     shouldUseTabGroups,
+    shouldShowOverlay,
     setPacketContext,
     getPacketContext,
     clearPacketContext,
@@ -308,7 +309,8 @@ const actionHandlers = {
         try {
             const hasActiveTrack = !!activeMediaPlayback.pageId;
             const { isSidebarOpen } = await storage.getSession({ isSidebarOpen: false });
-            const isVisible = hasActiveTrack && !isSidebarOpen;
+            const overlayEnabled = await shouldShowOverlay();
+            const isVisible = hasActiveTrack && !isSidebarOpen && overlayEnabled;
     
             const fullState = {
                 ...activeMediaPlayback,
@@ -334,6 +336,10 @@ const actionHandlers = {
         if (activeMediaPlayback.pageId === data.pageId) {
             setMediaPlaybackState({ currentTime: data.currentTime, duration: data.duration }, { source: 'time_update' });
         }
+    },
+    'overlay_setting_updated': async (data, sender, sendResponse) => {
+        await setMediaPlaybackState({}, { animate: false, source: 'settings_update' });
+        sendResponse({success: true});
     },
     'improve_draft_audio': (data, sender, sendResponse) => processImproveDraftAudio(data).then(sendResponse),
     'generate_timestamps_for_packet_items': (data, sender, sendResponse) => processGenerateTimestampsRequest(data).then(sendResponse),
