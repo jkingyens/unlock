@@ -699,3 +699,37 @@ body.dark-mode .llm-model-item button:hover {
   max-height: 200px; /* Set a max-height for transition */
   overflow: hidden;
 }
+
+/* --- NEW: Waveform Link Marker Styles --- */
+.waveform-marker-container {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none; /* Allow clicks to pass through to the canvas */
+}
+
+.waveform-link-marker {
+    position: absolute;
+    top: 10%; /* Position from the top */
+    height: 80%; /* Height of the marker line */
+    width: 2px; /* Width of the marker line */
+    background-color: #FFFFFF; /* --- THE FIX: Hardcode to white --- */
+    opacity: 0.7;
+    border-radius: 1px;
+    transform: translateX(-50%); /* Center the marker on its percentage position */
+}
+
+.waveform-link-marker.visited {
+    background-color: var(--status-success-color);
+    opacity: 0.8;
+}
+
+body.dark-mode .waveform-link-marker {
+     background-color: #FFFFFF; /* --- THE FIX: Hardcode to white in dark mode too --- */
+}
+
+body.dark-mode .waveform-link-marker.visited {
+     background-color: var(--status-success-color);
+}

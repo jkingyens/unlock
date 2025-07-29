@@ -236,28 +236,13 @@ function removeCloseGroupDialogListeners() {
     closeGroupConfirmListener = closeGroupCancelListener = closeGroupOverlayClickListener = null;
 }
 
-async function handleCloseTabGroup(tabGroupId) {
-    try {
-        // THE FIX: Wait for the background script to confirm the tabs are closed.
-        await sendMessageToBackground({
-            action: 'remove_tab_groups',
-            data: { groupIds: [tabGroupId] }
-        });
-        // This navigation will now only happen AFTER the tabs are gone.
-        navigateTo('root');
-    } catch (err) {
-        logger.error("DetailView", `Error closing group: ${err.message}`);
-        // Still navigate to root even if there was an error (e.g., group already gone).
-        navigateTo('root');
-    }
-}
-
 function handleConfirmCloseGroup(tabGroupId) {
-    // THE FIX: Hide the dialog and navigate the UI immediately.
+    // --- THE FIX: Remove the imperative navigation call. ---
     hideCloseGroupDialog();
-    navigateTo('root');
+    // The navigateTo('root') call that was here has been removed.
 
     // Send the command to the background to handle independently.
+    // The UI will update reactively when the navigation handler sends a new context.
     sendMessageToBackground({ action: 'remove_tab_groups', data: { groupIds: [tabGroupId] } })
         .catch(err => logger.error("DialogHandler", `Error sending close group message: ${err.message}`));
 }
