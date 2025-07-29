@@ -472,34 +472,37 @@ const packetUtils = {
         return options.returnItem ? null : false;
     }
 
-    // Perform an exact, case-sensitive match against the raw URL string.
     for (const item of instance.contents) {
         if (item.type === 'alternative') {
-            // Recurse into alternatives if present
             for (const alt of item.alternatives) {
                 const result = this.isUrlInPacket(loadedUrl, { contents: [alt] }, options);
                 if (result) return result;
             }
         } else {
-            // For external links, do an exact match.
             if (item.type === 'external' && item.url === loadedUrl) {
                 return options.returnItem ? item : true;
             }
             
-            // For generated content, we must check if the loadedUrl (which may be
-            // a pre-signed URL) corresponds to the canonical S3 key stored in item.url.
-            if ((item.type === 'generated' || item.type === 'media') && item.publishContext) {
-                 try {
-                    const loadedUrlObj = new URL(loadedUrl);
-                    const { publishContext } = item;
-                    let expectedPathname = (publishContext.provider === 'google')
-                        ? `/${publishContext.bucket}/${item.url}`
-                        : `/${item.url}`;
-                    
-                    if (decodeURIComponent(loadedUrlObj.pathname) === expectedPathname) {
-                        return options.returnItem ? item : true;
-                    }
-                } catch (e) { /* The loadedUrl might not be a valid URL, so we ignore the error and continue. */ }
+            if ((item.type === 'generated' || item.type === 'media') && item.url) {
+                // *** THE FIX: Check for direct match first, for when called with canonical URL. ***
+                if (item.url === loadedUrl) {
+                    return options.returnItem ? item : true;
+                }
+                
+                // Then, check for pre-signed URL match, for when called with browser URL.
+                if (item.publishContext) {
+                    try {
+                        const loadedUrlObj = new URL(loadedUrl);
+                        const { publishContext } = item;
+                        let expectedPathname = (publishContext.provider === 'google')
+                            ? `/${publishContext.bucket}/${item.url}`
+                            : `/${item.url}`;
+                        
+                        if (decodeURIComponent(loadedUrlObj.pathname) === expectedPathname) {
+                            return options.returnItem ? item : true;
+                        }
+                    } catch (e) { /* loadedUrl might not be a valid URL. */ }
+                }
             }
         }
     }
@@ -517,21 +520,35 @@ const packetUtils = {
     return colors[Math.abs(hash) % colors.length];
   },
   async markUrlAsVisited(instanceId, url) {
+    logger.log('markUrlAsVisited', 'Attempting to mark URL as visited', { instanceId, url });
     let instance = await storage.getPacketInstance(instanceId);
-    if (!instance) return { success: false, error: 'Packet instance not found' };
+    if (!instance) {
+        logger.warn('markUrlAsVisited', 'Packet instance not found', { instanceId });
+        return { success: false, error: 'Packet instance not found' };
+    }
 
     const wasCompletedBefore = this.isPacketInstanceCompleted(instance);
     const foundItem = this.isUrlInPacket(url, instance, { returnItem: true });
 
-    if (!foundItem) return { success: true, notTrackable: true };
+    if (!foundItem) {
+        logger.log('markUrlAsVisited', 'URL not trackable in this packet', { url });
+        return { success: true, notTrackable: true };
+    }
+
+    logger.log('markUrlAsVisited', 'Found matching item in packet', { item: foundItem });
 
     const isGenerated = (foundItem.type === 'generated' || foundItem.type === 'media');
     const alreadyVisited = isGenerated
         ? (instance.visitedGeneratedPageIds || []).includes(foundItem.pageId)
-        : (instance.visitedUrls || []).includes(foundItem.url); // Use the canonical URL from the found item
+        : (instance.visitedUrls || []).includes(foundItem.url);
 
-    if (alreadyVisited) return { success: true, alreadyVisited: true };
+    if (alreadyVisited) {
+        logger.log('markUrlAsVisited', 'Item has already been visited', { isGenerated, pageId: foundItem.pageId, url: foundItem.url });
+        return { success: true, alreadyVisited: true };
+    }
     
+    logger.log('markUrlAsVisited', 'Item not visited yet. Updating instance.', { isGenerated, instanceBefore: JSON.parse(JSON.stringify(instance)) });
+
     if (isGenerated) {
         instance.visitedGeneratedPageIds = [...(instance.visitedGeneratedPageIds || []), foundItem.pageId];
     } else {
@@ -540,6 +557,8 @@ const packetUtils = {
 
     await storage.savePacketInstance(instance);
     const justCompleted = !wasCompletedBefore && this.isPacketInstanceCompleted(instance);
+    
+    logger.log('markUrlAsVisited', 'Successfully updated instance.', { instanceAfter: instance, justCompleted });
 
     return { success: true, modified: true, instance, justCompleted };
   },
