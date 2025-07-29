@@ -226,7 +226,7 @@ async function reconcileBrowserState(tabId, instanceId, instance, currentBrowser
     }
 }
 
-async function startVisitTimer(tabId, instanceId, canonicalPacketUrl, logPrefix) {
+export async function startVisitTimer(tabId, instanceId, canonicalPacketUrl, logPrefix) {
     const settings = await storage.getSettings();
     const visitThresholdMs = (settings.visitThresholdSeconds ?? 5) * 1000;
 
