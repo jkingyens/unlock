@@ -14,6 +14,7 @@ const audioDataCache = new Map();
 let currentDetailInstance = null;
 let saveStateDebounceTimer = null; // Timer for debounced state saving
 let currentPlayingPageId = null; // Track which media item is active in this view
+let openUrl; // This will be injected from sidebar.js
 
 // Functions to be imported from the new, lean sidebar.js
 let sendMessageToBackground;
@@ -26,8 +27,10 @@ let navigateTo; // <--- ADD THIS LINE
  */
 export function init(dependencies) {
     sendMessageToBackground = dependencies.sendMessageToBackground;
-        navigateTo = dependencies.navigateTo; // <--- ADD THIS LINE
+    navigateTo = dependencies.navigateTo; // <--- ADD THIS LINE
+    openUrl = dependencies.openUrl; // <-- THE FIX: Receive openUrl from sidebar.js
 }
+
 
 /**
  * Clears the internal state of the detail view.
@@ -103,7 +106,7 @@ function requestDebouncedStateSave() {
     }, 1500); // 1.5 second delay
 }
 
-async function triggerImmediateSave() {
+export async function triggerImmediateSave() {
     clearTimeout(saveStateDebounceTimer);
     if (currentDetailInstance) {
         logger.log("DetailView:ImmediateSave", "Persisting state immediately due to navigation or pause.", { id: currentDetailInstance.instanceId });
@@ -114,12 +117,7 @@ async function triggerImmediateSave() {
 
 // --- Waveform Generation and Drawing ---
 async function drawWaveform(canvas, audioSamples, options) {
-    const {
-        accentColor, playedColor, linkColor, currentTime,
-        linkMarkersEnabled, timestamps, audioDuration,
-        visitedUrlsSet,
-        visitedLinkColor
-    } = options;
+    const { accentColor, playedColor, currentTime } = options;
     const dpr = window.devicePixelRatio || 1;
     const canvasWidth = canvas.clientWidth;
     const canvasHeight = canvas.clientHeight;
@@ -137,27 +135,16 @@ async function drawWaveform(canvas, audioSamples, options) {
     const barGap = 1;
     const numBars = Math.floor(canvasWidth / (barWidth + barGap));
     const samplesPerBar = Math.floor(audioSamples.length / numBars);
-    const timePerBar = audioDuration / numBars;
+    
+    // THE FIX: Calculate time per pixel for the new marker drawing function
+    const timePerPixel = options.audioDuration / canvasWidth;
 
-    const links = timestamps.map(t => ({ startTime: t.startTime, url: t.url }));
 
     for (let i = 0; i < numBars; i++) {
-        const barStartTime = i * timePerBar;
+        const barStartTime = i * (samplesPerBar / options.audioSampleRate);
         const isPlayed = barStartTime < currentTime;
 
-        const activeLink = linkMarkersEnabled ? links.find(lt => barStartTime >= lt.startTime && barStartTime < lt.startTime + timePerBar) : null;
-
-        if (activeLink) {
-            if (visitedUrlsSet && visitedUrlsSet.has(activeLink.url)) {
-                ctx.fillStyle = visitedLinkColor;
-            } else {
-                ctx.fillStyle = linkColor;
-            }
-        } else if (isPlayed) {
-            ctx.fillStyle = playedColor;
-        } else {
-            ctx.fillStyle = accentColor;
-        }
+        ctx.fillStyle = isPlayed ? playedColor : accentColor;
 
         const start = i * samplesPerBar;
         let max = 0;
@@ -171,7 +158,35 @@ async function drawWaveform(canvas, audioSamples, options) {
         const y = (canvasHeight - barHeight) / 2;
         ctx.fillRect(i * (barWidth + barGap), y, barWidth, barHeight);
     }
+    return timePerPixel;
 }
+
+// --- NEW: Function to draw link markers over the waveform ---
+function drawLinkMarkers(markerContainer, options) {
+    const { timestamps, audioDuration, visitedUrlsSet } = options;
+    markerContainer.innerHTML = ''; // Clear existing markers
+
+    if (!options.linkMarkersEnabled || !timestamps || timestamps.length === 0) {
+        return;
+    }
+
+    const containerWidth = markerContainer.clientWidth;
+
+    timestamps.forEach(ts => {
+        const marker = document.createElement('div');
+        marker.className = 'waveform-link-marker';
+        
+        const percentage = (ts.startTime / audioDuration) * 100;
+        marker.style.left = `${percentage}%`;
+
+        if (visitedUrlsSet && visitedUrlsSet.has(ts.url)) {
+            marker.classList.add('visited');
+        }
+
+        markerContainer.appendChild(marker);
+    });
+}
+
 
 // --- Function to redraw waveforms on state update ---
 async function redrawAllVisibleWaveforms(playbackState = {}) {
@@ -184,8 +199,6 @@ async function redrawAllVisibleWaveforms(playbackState = {}) {
     const colorOptions = {
         accentColor: getComputedStyle(domRefs.packetDetailView).getPropertyValue('--packet-color-accent').trim(),
         playedColor: getComputedStyle(domRefs.packetDetailView).getPropertyValue('--packet-color-progress-fill').trim(),
-        linkColor: getComputedStyle(domRefs.packetDetailView).getPropertyValue('--packet-color-link-marker').trim(),
-        visitedLinkColor: '#81c995', // A pleasant green for visited links
         linkMarkersEnabled: settings.waveformLinkMarkersEnabled,
         visitedUrlsSet: new Set(currentDetailInstance.visitedUrls || [])
     };
@@ -193,6 +206,7 @@ async function redrawAllVisibleWaveforms(playbackState = {}) {
     for (const card of mediaCards) {
         const pageId = card.dataset.pageId;
         const canvas = card.querySelector('.waveform-canvas');
+        const markerContainer = card.querySelector('.waveform-marker-container');
         const contentItem = currentDetailInstance.contents.find(item => item.pageId === pageId);
         const audioCacheKey = `${currentDetailInstance.imageId}::${pageId}`;
         const audioSamples = audioDataCache.get(audioCacheKey);
@@ -204,8 +218,15 @@ async function redrawAllVisibleWaveforms(playbackState = {}) {
 
             drawWaveform(canvas, audioSamples, {
                 ...colorOptions,
-                timestamps: contentItem.timestamps || [],
                 currentTime,
+                audioDuration,
+                audioSampleRate: 44100 // Assuming standard sample rate
+            });
+
+            // Call the new marker drawing function
+            drawLinkMarkers(markerContainer, {
+                ...colorOptions,
+                timestamps: contentItem.timestamps || [],
                 audioDuration
             });
         }
@@ -214,8 +235,7 @@ async function redrawAllVisibleWaveforms(playbackState = {}) {
 
 
 // --- Main Rendering Function ---
-export async function displayPacketContent(instance, canonicalPacketUrl) {
-
+export async function displayPacketContent(instance, browserState, canonicalPacketUrl) {
     logger.log('DetailView:displayPacketContent', 'CRITICAL LOG: Received instance for display.', {
         instanceId: instance?.instanceId,
         mentionedMediaLinks: instance?.mentionedMediaLinks,
@@ -225,7 +245,7 @@ export async function displayPacketContent(instance, canonicalPacketUrl) {
 
     const uniqueCallId = Date.now();
     if (isDisplayingPacketContent) {
-        queuedDisplayRequest = { instance, canonicalPacketUrl };
+        queuedDisplayRequest = { instance, browserState, canonicalPacketUrl };
         logger.warn(`DetailView[${uniqueCallId}]`, 'Display already Started. Queuing request for instance:', instance?.instanceId);
         return;
     }
@@ -281,6 +301,13 @@ export async function displayPacketContent(instance, canonicalPacketUrl) {
             const progressBarContainer = domRefs.detailProgressContainer?.querySelector('.progress-bar-container');
             if (progressBarContainer) progressBarContainer.title = `${progressPercentage}% Complete`;
             
+            // --- THE FIX: We also need to re-render the action buttons on updates ---
+            const oldActionButtonContainer = document.getElementById('detail-action-button-container');
+            const newActionButtonContainer = await createActionButtons(instance, browserState);
+            if (oldActionButtonContainer) {
+                oldActionButtonContainer.replaceWith(newActionButtonContainer);
+            }
+            
             await redrawAllVisibleWaveforms(currentState);
 
         } else {
@@ -294,7 +321,7 @@ export async function displayPacketContent(instance, canonicalPacketUrl) {
 
             const fragment = document.createDocumentFragment();
             fragment.appendChild(createProgressSection(instance));
-            fragment.appendChild(await createActionButtons(instance));
+            fragment.appendChild(await createActionButtons(instance, browserState));
             const cardsWrapper = await createCardsSection(instance);
             cardsWrapper.dataset.instanceId = instance.instanceId;
             fragment.appendChild(cardsWrapper);
@@ -338,11 +365,12 @@ export async function displayPacketContent(instance, canonicalPacketUrl) {
     }
 }
 
+
 function processQueuedDisplayRequest() {
     if (queuedDisplayRequest) {
-        const { instance, canonicalPacketUrl } = queuedDisplayRequest;
+        const { instance, browserState, canonicalPacketUrl } = queuedDisplayRequest;
         queuedDisplayRequest = null;
-        Promise.resolve().then(() => displayPacketContent(instance, canonicalPacketUrl));
+        Promise.resolve().then(() => displayPacketContent(instance, browserState, canonicalPacketUrl));
     }
 }
 
@@ -357,23 +385,21 @@ function createProgressSection(instance) {
     return progressWrapper;
 }
 
-async function createActionButtons(instance) {
+async function createActionButtons(instance, browserState) {
     const actionButtonContainer = document.createElement('div');
     actionButtonContainer.id = 'detail-action-button-container';
 
     const isCompleted = packetUtils.isPacketInstanceCompleted(instance);
-    let browserState = instance.instanceId ? await storage.getPacketBrowserState(instance.instanceId) : null;
     const tabGroupId = browserState?.tabGroupId;
     let groupHasTabs = false;
 
-    // THE FIX: Check if the group exists AND has tabs.
     if (tabGroupId && chrome.tabs) {
         try {
             const tabsInGroup = await chrome.tabs.query({ groupId: tabGroupId });
             if (tabsInGroup.length > 0) {
                 groupHasTabs = true;
             }
-        } catch (e) { /* Group is gone, so it has no tabs. */ }
+        } catch (e) { /* Group might be gone, which is fine. */ }
     }
 
     // Only show the button if the packet is complete AND its tab group still has open tabs.
@@ -464,6 +490,7 @@ async function createContentCard(contentItem, visitedUrlsSet, visitedGeneratedId
         card.innerHTML = `
             <div class="media-waveform-container">
                  <canvas class="waveform-canvas"></canvas>
+                 <div class="waveform-marker-container"></div>
             </div>`;
     }
 
@@ -506,17 +533,10 @@ async function createContentCard(contentItem, visitedUrlsSet, visitedGeneratedId
         if (type === 'media') {
             playMediaInCard(card, contentItem, instance);
         } else {
-            card.addEventListener('click', async (e) => {
-                const cardElement = e.currentTarget;
-                if (cardElement.classList.contains('opening')) {
-                    logger.log("DetailView:openUrl", "Ignoring rapid click, this card is already being opened.");
-                    return;
+            card.addEventListener('click', (e) => {
+                if (typeof openUrl === 'function') {
+                    openUrl(urlToOpen, instance.instanceId);
                 }
-                cardElement.classList.add('opening');
-                await openUrl(urlToOpen, instance.instanceId);
-                setTimeout(() => {
-                    cardElement.classList.remove('opening');
-                }, 1000);
             });
         }
     }
@@ -547,27 +567,8 @@ export function updateActiveCardHighlight(canonicalPacketUrl) {
 
 // --- Action Handlers ---
 
-async function openUrl(url, instanceId) {
-    if (!url || !instanceId) return;
-
-    const instanceToOpen = currentDetailInstance;
-    if (!instanceToOpen || instanceToOpen.instanceId !== instanceId) {
-        logger.error("DetailView", "Mismatch or missing instance data for openUrl", { instanceId, currentDetailInstance });
-        return;
-    }
-
-    await triggerImmediateSave();
-
-    sendMessageToBackground({
-        action: 'open_content',
-        data: { instance: instanceToOpen, url: url }
-    }).catch(err => logger.error("DetailView", `Error opening link: ${err.message}`));
-}
-
-
 function handleCloseTabGroup(tabGroupId) {
-    navigateTo('root');
-
+    // --- THE FIX: Only send the message. Do not navigate the UI. ---
     sendMessageToBackground({
         action: 'remove_tab_groups',
         data: { groupIds: [tabGroupId] }

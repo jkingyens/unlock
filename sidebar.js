@@ -20,6 +20,7 @@ let currentPacketUrl = null; // The canonical packet URL from the packet definit
 let isNavigating = false;
 let nextNavigationRequest = null;
 const PENDING_VIEW_KEY = 'pendingSidebarView';
+let isOpeningPacketItem = false; // --- THE FIX: Navigation lock flag ---
 
 
 // --- Initialization ---
@@ -29,7 +30,7 @@ async function initialize() {
     cacheDomReferences();
 
     // Inject dependencies into each module
-    const dependencies = { navigateTo, showRootViewStatus, sendMessageToBackground, showSettingsStatus, showConfetti };
+    const dependencies = { navigateTo, showRootViewStatus, sendMessageToBackground, showSettingsStatus, showConfetti, openUrl };
     dialogHandler.init(dependencies);
     rootView.init(dependencies);
     detailView.init(dependencies);
@@ -106,14 +107,22 @@ export async function navigateTo(viewName, instanceId = null, data = null) {
     try {
         switch(viewName) {
             case 'packet-detail':
-                const instanceData = await storage.getPacketInstance(instanceId);
+                // --- THE FIX: Fetch instance and browser state together to avoid race conditions ---
+                const [instanceData, browserState] = await Promise.all([
+                    storage.getPacketInstance(instanceId),
+                    storage.getPacketBrowserState(instanceId)
+                ]);
+
                 if (!instanceData) throw new Error(`Packet instance ${instanceId} not found.`);
+                
                 currentView = 'packet-detail';
                 currentInstanceId = instanceData.instanceId;
                 currentInstanceData = instanceData;
                 newSidebarTitle = instanceData.topic || 'Packet Details';
                 domRefs.packetDetailView.classList.remove('hidden');
-                await detailView.displayPacketContent(instanceData, currentPacketUrl);
+                
+                // --- THE FIX: Pass both the instance and its browser state to the renderer ---
+                await detailView.displayPacketContent(instanceData, browserState, currentPacketUrl);
                 break;
             case 'create':
                 currentView = 'create';
@@ -160,11 +169,12 @@ async function updateSidebarContext(contextData) {
     const newPacketUrl = contextData?.packetUrl ?? null;
     let newInstanceData = contextData?.instance ?? null;
 
-    if (newInstanceId === null && currentView === 'packet-detail') {
+    // --- THE FIX: Check the navigation lock ---
+    if (isOpeningPacketItem && newInstanceId === null) {
+        logger.log('Sidebar:updateSidebarContext', 'Ignoring transient null context due to navigation lock.');
         return;
     }
-
-    // *** FIX: Make the logic "stickier" to prevent flashing. ***
+    
     // Only navigate away from the detail view if we receive a definitive new context
     // that is different, or if the view is not the detail view.
     if (newInstanceId !== currentInstanceId) {
@@ -182,8 +192,35 @@ async function updateSidebarContext(contextData) {
         // Just update the content without a full navigation.
         currentInstanceData = newInstanceData;
         currentPacketUrl = newPacketUrl;
-        await detailView.displayPacketContent(currentInstanceData, currentPacketUrl);
+        
+        // --- THE FIX: Fetch the browser state along with the instance to ensure it's up-to-date ---
+        const browserState = await storage.getPacketBrowserState(currentInstanceId);
+        await detailView.displayPacketContent(currentInstanceData, browserState, currentPacketUrl);
     }
+}
+
+async function openUrl(url, instanceId) {
+    if (!url || !instanceId) return;
+
+    const instanceToOpen = currentInstanceData;
+    if (!instanceToOpen || instanceToOpen.instanceId !== instanceId) {
+        logger.error("Sidebar", "Mismatch or missing instance data for openUrl", { instanceId, currentInstanceData });
+        return;
+    }
+
+    // --- THE FIX: Set the navigation lock ---
+    isOpeningPacketItem = true;
+    setTimeout(() => { isOpeningPacketItem = false; }, 1500); // Release lock after 1.5s
+
+    await detailView.triggerImmediateSave();
+
+    sendMessageToBackground({
+        action: 'open_content',
+        data: { instance: instanceToOpen, url: url }
+    }).catch(err => {
+        logger.error("Sidebar", `Error opening link: ${err.message}`);
+        isOpeningPacketItem = false; // Release lock on error
+    });
 }
 
 
@@ -256,7 +293,9 @@ async function handleBackgroundMessage(message) {
             if (currentView === 'root') {
                 rootView.updateInstanceRowUI(data.instance);
             } else if (currentView === 'packet-detail' && currentInstanceId === data.instance.instanceId) {
-                await updateSidebarContext({ instanceId: data.instance.instanceId, instance: data.instance, packetUrl: currentPacketUrl });
+                // When an instance is updated, we need its browser state too
+                const browserState = await storage.getPacketBrowserState(data.instance.instanceId);
+                await detailView.displayPacketContent(data.instance, browserState, currentPacketUrl);
             }
             break;
         case 'packet_instance_deleted':

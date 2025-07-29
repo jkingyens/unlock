@@ -175,14 +175,22 @@ export async function handleRemoveTabGroups(data, sendResponse) {
     const errors = [];
     for (const groupId of groupIds) {
         try {
-            logger.log('TabGroupHandler:handleRemove', `Querying for tabs in group ${groupId}`);
             const tabsInGroup = await chrome.tabs.query({ groupId });
 
             if (tabsInGroup.length > 0) {
-                const tabIds = tabsInGroup.map(t => t.id);
-                logger.log('TabGroupHandler:handleRemove', `Found ${tabIds.length} tabs to remove`, { tabIds });
-                await chrome.tabs.remove(tabIds);
-                logger.log('TabGroupHandler:handleRemove', `Successfully removed tabs for group ${groupId}`);
+                const windowId = tabsInGroup[0].windowId;
+                const tabsInWindow = await chrome.tabs.query({ windowId });
+
+                const willCloseWindow = tabsInWindow.length === tabsInGroup.length;
+                
+                // --- THE FIX: Create the new tab *before* removing the old ones ---
+                if (willCloseWindow) {
+                    await chrome.tabs.create({ windowId });
+                }
+                
+                const tabIdsToRemove = tabsInGroup.map(t => t.id);
+                await chrome.tabs.remove(tabIdsToRemove);
+
             } else {
                 logger.log('TabGroupHandler:handleRemove', `No tabs found for group ${groupId}, considering it closed.`);
             }
@@ -200,6 +208,7 @@ export async function handleRemoveTabGroups(data, sendResponse) {
     logger.log('TabGroupHandler:handleRemove', 'Sending response', response);
     sendResponse(response);
 }
+
 
 export async function handleTabRemovalCleanup(tabId, removeInfo) {
     if (removeInfo.isWindowClosing) return;
