@@ -402,6 +402,8 @@ const actionHandlers = {
         const visitResult = await packetUtils.markPageIdAsVisited(data.instanceId, data.pageId);
         if (visitResult.success && visitResult.modified) {
             sidebarHandler.notifySidebar('packet_instance_updated', { instance: visitResult.instance });
+            // --- THE FIX: Trigger the green glow animation on the overlay ---
+            await setMediaPlaybackState({}, { showVisitedAnimation: true, source: 'media_complete_visit' });
             await checkAndPromptForCompletion('MessageHandler', visitResult, data.instanceId);
         }
         sendResponse(visitResult);

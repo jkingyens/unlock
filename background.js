@@ -28,7 +28,7 @@ import * as ruleManager from './background-modules/rule-manager.js';
 import { onCommitted, onHistoryStateUpdated, checkAndPromptForCompletion } from './background-modules/navigation-handler.js';
 import * as tabGroupHandler from './background-modules/tab-group-handler.js';
 import * as sidebarHandler from './background-modules/sidebar-handler.js';
-import cloudStorage from './cloud-storage.js';
+import cloudStorage from '../cloud-storage.js';
 
 // --- THE FIX: Call the listener registration at the top level ---
 attachNavigationListeners();
@@ -308,7 +308,8 @@ export async function setMediaPlaybackState(newState, options = { animate: false
         ...activeMediaPlayback,
         isVisible,
         animate: options.animate,
-        animateLinkMention: aNewLinkWasMentioned && options.source === 'time_update'
+        animateLinkMention: aNewLinkWasMentioned && options.source === 'time_update',
+        showVisitedAnimation: options.showVisitedAnimation || false
     };
     
     let targetTabId = activeMediaPlayback.tabId;

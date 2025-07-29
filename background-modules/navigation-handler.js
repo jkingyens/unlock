@@ -11,7 +11,8 @@ import {
 } from '../utils.js';
 import {
     activeMediaPlayback,
-    resetActiveMediaPlayback
+    resetActiveMediaPlayback,
+    setMediaPlaybackState
 } from '../background.js';
 import * as sidebarHandler from './sidebar-handler.js';
 import * as tabGroupHandler from './tab-group-handler.js';
@@ -238,6 +239,8 @@ async function startVisitTimer(tabId, instanceId, canonicalPacketUrl, logPrefix)
                 if (visitResult.success && visitResult.modified) {
                     const updatedInstance = visitResult.instance || await storage.getPacketInstance(instanceId);
                     sidebarHandler.notifySidebar('packet_instance_updated', { instance: updatedInstance, source: 'dwell_visit' });
+                    // --- THE FIX: Trigger the green glow animation on the overlay ---
+                    await setMediaPlaybackState({ instanceId: instanceId, tabId: tabId, topic: updatedInstance.topic }, { showVisitedAnimation: true, source: 'dwell_visit' });
                     await checkAndPromptForCompletion(logPrefix, visitResult, instanceId);
                 }
             }
