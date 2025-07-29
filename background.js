@@ -25,7 +25,7 @@ import {
 } from './utils.js';
 import * as msgHandler from './background-modules/message-handlers.js';
 import * as ruleManager from './background-modules/rule-manager.js';
-import { onCommitted, onHistoryStateUpdated, checkAndPromptForCompletion } from './background-modules/navigation-handler.js';
+import { onCommitted, onHistoryStateUpdated, checkAndPromptForCompletion, startVisitTimer, clearPendingVisitTimer } from './background-modules/navigation-handler.js';
 import * as tabGroupHandler from './background-modules/tab-group-handler.js';
 import * as sidebarHandler from './background-modules/sidebar-handler.js';
 import cloudStorage from '../cloud-storage.js';
@@ -483,8 +483,8 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
     }
     await sidebarHandler.updateActionForTab(tabId);
     const context = await getPacketContext(tabId);
+    const instance = context ? await storage.getPacketInstance(context.instanceId) : null;
     if (sidebarHandler.isSidePanelAvailable()) {
-        const instance = context ? await storage.getPacketInstance(context.instanceId) : null;
         sidebarHandler.notifySidebar('update_sidebar_context', {
             tabId,
             instanceId: instance ? instance.instanceId : null,
@@ -493,7 +493,17 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
             currentUrl: instance ? context.currentBrowserUrl : null
         });
     }
+
+    // --- THE FIX: Start visit timer on tab activation ---
+    if (instance && context?.canonicalPacketUrl) {
+        const itemForVisitTimer = instance.contents.find(i => i.url === context.canonicalPacketUrl);
+        if (itemForVisitTimer && !itemForVisitTimer.interactionBasedCompletion) {
+            clearPendingVisitTimer(tabId); // Ensure no old timer is running for this tab
+            startVisitTimer(tabId, instance.instanceId, itemForVisitTimer.url, '[onActivated]');
+        }
+    }
 });
+
 
 chrome.tabs.onRemoved.addListener(async (tabId, removeInfo) => {
     if (tabId === activeMediaPlayback.tabId) {
