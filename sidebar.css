@@ -264,6 +264,10 @@ body.dark-mode .creation-stage-text {
   border-color: var(--border-primary);
   border-left-color: var(--border-focus);
 }
+#detail-cards-container .card.clickable.opening {
+  opacity: 0.7;
+  cursor: wait;
+}
 #detail-cards-container .card.visited {
   border-left-color: var(--card-border-visited);
   opacity: 0.85;

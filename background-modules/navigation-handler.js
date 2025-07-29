@@ -172,8 +172,8 @@ async function processNavigationEvent(tabId, finalUrl, details) {
     if (finalInstance) {
         await reconcileBrowserState(tabId, finalInstance.instanceId, finalInstance, finalUrl);
         
+        // *** THE FIX: The packet instance contents are already flattened, so a direct .find() is correct. ***
         const itemForVisitTimer = finalInstance.contents
-            .flatMap(c => c.type === 'alternative' ? c.alternatives : c)
             .find(i => i.url === finalContext.canonicalPacketUrl);
 
         if (itemForVisitTimer && !itemForVisitTimer.interactionBasedCompletion) {

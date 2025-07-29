@@ -14,7 +14,6 @@ const audioDataCache = new Map();
 let currentDetailInstance = null;
 let saveStateDebounceTimer = null; // Timer for debounced state saving
 let currentPlayingPageId = null; // Track which media item is active in this view
-let isOpeningUrl = false;
 
 // Functions to be imported from the new, lean sidebar.js
 let sendMessageToBackground;
@@ -507,8 +506,17 @@ async function createContentCard(contentItem, visitedUrlsSet, visitedGeneratedId
         if (type === 'media') {
             playMediaInCard(card, contentItem, instance);
         } else {
-            card.addEventListener('click', async () => {
+            card.addEventListener('click', async (e) => {
+                const cardElement = e.currentTarget;
+                if (cardElement.classList.contains('opening')) {
+                    logger.log("DetailView:openUrl", "Ignoring rapid click, this card is already being opened.");
+                    return;
+                }
+                cardElement.classList.add('opening');
                 await openUrl(urlToOpen, instance.instanceId);
+                setTimeout(() => {
+                    cardElement.classList.remove('opening');
+                }, 1000);
             });
         }
     }
@@ -540,18 +548,11 @@ export function updateActiveCardHighlight(canonicalPacketUrl) {
 // --- Action Handlers ---
 
 async function openUrl(url, instanceId) {
-    if (isOpeningUrl) {
-        logger.log("DetailView:openUrl", "Ignoring rapid click, URL is already being opened.");
-        return;
-    }
     if (!url || !instanceId) return;
-
-    isOpeningUrl = true;
 
     const instanceToOpen = currentDetailInstance;
     if (!instanceToOpen || instanceToOpen.instanceId !== instanceId) {
         logger.error("DetailView", "Mismatch or missing instance data for openUrl", { instanceId, currentDetailInstance });
-        isOpeningUrl = false;
         return;
     }
 
@@ -561,9 +562,8 @@ async function openUrl(url, instanceId) {
         action: 'open_content',
         data: { instance: instanceToOpen, url: url }
     }).catch(err => logger.error("DetailView", `Error opening link: ${err.message}`));
-
-    setTimeout(() => { isOpeningUrl = false; }, 1000);
 }
+
 
 function handleCloseTabGroup(tabGroupId) {
     navigateTo('root');
