@@ -35,6 +35,25 @@
     opacity: 1;
 }
 
+/* --- NEW: Visited Animation Styles --- */
+@keyframes glow-green {
+  0% {
+    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3), inset 0 0 0px 0px rgba(129, 201, 149, 0);
+  }
+  50% {
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4), inset 0 0 10px 3px rgba(129, 201, 149, 0.9);
+  }
+  100% {
+    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3), inset 0 0 0px 0px rgba(129, 201, 149, 0);
+  }
+}
+
+#unlock-media-overlay.visited-complete {
+  animation: glow-green 1.5s ease-in-out;
+}
+/* --- END: Visited Animation Styles --- */
+
+
 .unlock-overlay-content-wrapper {
     display: flex;
     align-items: center;

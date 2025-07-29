@@ -125,6 +125,14 @@ function syncState(state) {
         linkMention.style.display = 'none';
         delete linkMention.dataset.url;
     }
+
+    // --- Visited Animation ---
+    if (state.showVisitedAnimation) {
+        overlay.classList.add('visited-complete');
+        setTimeout(() => {
+            overlay.classList.remove('visited-complete');
+        }, 1500); // Duration of the animation
+    }
 }
 
 
