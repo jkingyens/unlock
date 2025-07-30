@@ -457,26 +457,34 @@ async function handleSaveDraftPacket() {
     }
     
     if (draftActiveAudio) draftActiveAudio.pause();
-    await cleanupDraftGroup();
-
+    
     let packetToSave = { ...draftPacket };
 
     if (packetToSave.id.startsWith('draft_')) {
         const originalDraftId = packetToSave.id;
-        const topic = await showTitlePromptDialog();
+        
+        // --- START OF THE FIX ---
+        // 1. Prompt for the title FIRST, before making any permanent changes.
+        const topic = await showTitlePromptDialog(packetToSave.topic || '');
 
         if (!topic) {
-            showRootViewStatus("A title is required to save a new packet.", "error");
-            return; // Stop the save process
+            // If the user cancels, do nothing. The draft remains untouched and valid.
+            showRootViewStatus("Save cancelled.", "info");
+            return; 
         }
 
+        // 2. Only after confirming the title, generate the new ID and update the packet.
         packetToSave.topic = topic;
         packetToSave.id = `img_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
         packetToSave.created = new Date().toISOString();
         
-        // Move content in IndexedDB from draft key to final key
+        // 3. Now, perform the database transfer with the original and new IDs.
         await indexedDbStorage.transferDraftContent(originalDraftId, packetToSave.id);
+        // --- END OF THE FIX ---
     }
+    
+    // Cleanup and final save operation remain the same.
+    await cleanupDraftGroup();
 
     try {
         const response = await sendMessageToBackground({ action: 'save_packet_image', data: { image: packetToSave } });

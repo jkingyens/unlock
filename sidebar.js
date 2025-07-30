@@ -23,9 +23,23 @@ const PENDING_VIEW_KEY = 'pendingSidebarView';
 let isOpeningPacketItem = false; // --- THE FIX: Navigation lock flag ---
 
 
+function resetSidebarState() {
+    currentView = 'root';
+    currentInstanceId = null;
+    currentInstanceData = null;
+    currentPacketUrl = null;
+    isNavigating = false;
+    nextNavigationRequest = null;
+    isOpeningPacketItem = false;
+    logger.log('Sidebar', 'Internal state has been reset.');
+}
+
 // --- Initialization ---
 
 async function initialize() {
+    // --- THE FIX: Call the reset function at the very beginning of initialization. ---
+    resetSidebarState();
+    
     await applyThemeMode();
     cacheDomReferences();
 
@@ -258,6 +272,21 @@ async function handleBackgroundMessage(message) {
     const { action, data } = message;
 
     switch (action) {
+        case 'draft_packet_created':
+            if (data.draft) {
+                // --- THE FIX: Hide the progress dialog before navigating ---
+                dialogHandler.hideCreateSourceDialog();
+                navigateTo('create', null, data.draft);
+            }
+            break;
+
+        case 'packet_creation_failed':
+            // --- THE FIX: Hide the progress dialog before showing the error ---
+            dialogHandler.hideCreateSourceDialog();
+            dialogHandler.hideImportDialog();
+            rootView.removeInProgressStencil(data.imageId);
+            showRootViewStatus(`Creation failed: ${data?.error || 'Unknown'}`, 'error');
+            break;
         case 'playback_state_updated':
             if (currentView === 'packet-detail') {
                 detailView.updatePlaybackUI(data);

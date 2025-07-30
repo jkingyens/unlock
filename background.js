@@ -387,7 +387,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
 
         try {
             if (chrome.sidePanel && chrome.sidePanel.setPanelBehavior) {
-                 await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false });
+                 await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
             }
         } catch (error) {
              logger.error('Background:onInstalled', 'Error setting side panel behavior:', error);
@@ -459,12 +459,6 @@ chrome.runtime.onMessageExternal.addListener(async (message, sender, sendRespons
 chrome.alarms.onAlarm.addListener((alarm) => {
     if (alarm.name === RULE_REFRESH_ALARM_NAME) {
         ruleManager.refreshAllRules();
-    }
-});
-
-chrome.action.onClicked.addListener((tab) => {
-    if (tab.id) {
-        chrome.sidePanel.open({ windowId: tab.windowId });
     }
 });
 

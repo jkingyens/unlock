@@ -39,7 +39,7 @@ export async function updateActionForTab(tabId) {
             await chrome.action.setPopup({ tabId: tabId, popup: 'popup.html' });
         }
     } catch (error) {
-        if (!error.message.toLowerCase().includes('invalid tab id')) {
+        if (!error.message.toLowerCase().includes('invalid tab id') && !error.message.toLowerCase().includes('no tab with id')) {
             logger.error(logPrefix, 'Error updating action state', error);
         }
     }
