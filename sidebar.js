@@ -188,6 +188,16 @@ async function updateSidebarContext(contextData) {
             navigateTo('root');
         }
     } else if (currentView === 'packet-detail' && newInstanceId !== null) {
+        // --- START OF THE FIX ---
+        // If we receive an update for the current instance but the instance data is null,
+        // it means the packet was likely deleted. We should navigate away gracefully.
+        if (!newInstanceData) {
+            logger.warn('Sidebar:updateSidebarContext', `Received null instance data for current instance ID ${newInstanceId}. Navigating to root.`);
+            navigateTo('root');
+            return; // Stop further processing
+        }
+        // --- END OF THE FIX ---
+
         // The instance is the same, but the active URL might have changed.
         // Just update the content without a full navigation.
         currentInstanceData = newInstanceData;
