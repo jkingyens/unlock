@@ -361,6 +361,34 @@ async function handleStartPacket(imageId) {
     showRootViewStatus('Checking for existing packet...', 'info', false);
 
     try {
+        // --- START of the new implementation ---
+        const image = await storage.getPacketImage(imageId);
+        if (!image) {
+            throw new Error("Packet not found in the library.");
+        }
+
+        const needsPublishing = image.sourceContent.some(item =>
+            item.type === 'generated' || item.type === 'media' ||
+            (item.type === 'alternative' && item.alternatives.some(alt => alt.type === 'generated' || alt.type === 'media'))
+        );
+
+        if (needsPublishing) {
+            const isCloudConfigured = await storage.isCloudStorageEnabled();
+            if (!isCloudConfigured) {
+                const goToSettings = await showConfirmDialog(
+                    "This packet contains content that needs to be published. Please configure Cloud Storage in Settings to continue.",
+                    "Go to Settings",
+                    "Cancel"
+                );
+                if (goToSettings) {
+                    navigateTo('settings');
+                }
+                // Stop further execution if storage is not configured
+                return;
+            }
+        }
+        // --- END of the new implementation ---
+
         const allInstances = await storage.getPacketInstances();
         const instancesForImage = Object.values(allInstances).filter(inst => inst.imageId === imageId);
 
@@ -381,7 +409,6 @@ async function handleStartPacket(imageId) {
         logger.error('RootView:handleStartPacket', 'Error during start packet logic', err);
     }
 }
-
 async function handleEditPacket(imageId) {
     try {
         const image = await storage.getPacketImage(imageId);
