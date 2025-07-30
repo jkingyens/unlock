@@ -273,7 +273,7 @@ function hideConfirmDialog(confirmedResult = false) {
     confirmDialogResolve = null;
 }
 
-export function showTitlePromptDialog() {
+export function showTitlePromptDialog(defaultValue = '') {
     return new Promise((resolve) => {
         titlePromptResolve = resolve;
         const dialog = domRefs.titlePromptDialog;
@@ -282,8 +282,8 @@ export function showTitlePromptDialog() {
             return resolve(null); // Resolve with null if dialog doesn't exist
         }
 
-        // Clear previous input and add listeners
-        domRefs.titlePromptInput.value = '';
+        // --- THE FIX: Use the provided defaultValue to pre-populate the input ---
+        domRefs.titlePromptInput.value = defaultValue;
         
         titlePromptConfirmListener = () => hideTitlePromptDialog(domRefs.titlePromptInput.value.trim());
         titlePromptCancelListener = () => hideTitlePromptDialog(null);
@@ -301,15 +301,14 @@ export function showTitlePromptDialog() {
         // Show dialog
         dialog.style.display = 'flex';
         
-        // Use requestAnimationFrame to ensure focus happens after the dialog is visible and ready.
         requestAnimationFrame(() => {
             dialog.classList.add('visible');
-            // A second requestAnimationFrame can sometimes help ensure the focus call
-            // happens *after* the CSS transition has started.
             requestAnimationFrame(() => {
                 domRefs.titlePromptInput.focus();
+                domRefs.titlePromptInput.select(); // Select the text for easy editing
             });
         });
+
     });
 }
 
@@ -333,4 +332,62 @@ function hideTitlePromptDialog(valueToResolve) {
         titlePromptResolve(valueToResolve);
         titlePromptResolve = null;
     }
+}
+
+// --- NEW DIALOG: Create Source ---
+let createSourceDialogResolve = null;
+
+export function showCreateSourceDialog() {
+    return new Promise((resolve) => {
+        createSourceDialogResolve = resolve;
+        const dialog = document.getElementById('create-source-dialog');
+        if (dialog) {
+            // --- THE FIX: The main action buttons now only resolve the promise. ---
+            // The calling function will decide whether to hide the dialog or change its state.
+            dialog.querySelector('#create-from-blank-btn').onclick = () => {
+                if (createSourceDialogResolve) createSourceDialogResolve('blank');
+            };
+            dialog.querySelector('#create-from-tab-btn').onclick = () => {
+                if (createSourceDialogResolve) createSourceDialogResolve('tab');
+            };
+
+            // Cancel and overlay clicks still hide the dialog immediately.
+            dialog.querySelector('#cancel-create-source-btn').onclick = () => hideCreateSourceDialog('cancel');
+            dialog.onclick = (e) => { 
+                if (e.target === dialog) hideCreateSourceDialog('cancel');
+            };
+            
+            dialog.style.display = 'flex';
+            setTimeout(() => dialog.classList.add('visible'), 10);
+        } else {
+            resolve(null);
+        }
+    });
+}
+
+export function showCreateSourceDialogProgress(message) {
+    const dialog = document.getElementById('create-source-dialog');
+    if (dialog) {
+        const buttonDiv = document.getElementById('create-source-dialog-buttons');
+        const progressDiv = document.getElementById('create-source-dialog-progress');
+        const progressMessage = document.getElementById('create-source-dialog-progress-message');
+
+        if (buttonDiv) buttonDiv.classList.add('hidden');
+        if (progressMessage) progressMessage.textContent = message || 'Processing...';
+        if (progressDiv) progressDiv.classList.remove('hidden');
+    }
+}
+
+export function hideCreateSourceDialog(reason) {
+    const dialog = document.getElementById('create-source-dialog');
+    if (dialog) {
+        // ... (cleanup listeners) ...
+        dialog.classList.remove('visible');
+        setTimeout(() => { if (dialog) dialog.style.display = 'none'; }, 300);
+    }
+    // If the dialog is being hidden due to cancellation, resolve the promise with null.
+    if (reason === 'cancel' && createSourceDialogResolve) {
+        createSourceDialogResolve(null);
+    }
+    createSourceDialogResolve = null;
 }

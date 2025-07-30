@@ -186,19 +186,23 @@ const indexedDbStorage = {
         const tx = db.transaction(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT, 'readwrite');
         const store = tx.objectStore(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT);
         const request = store.put(filesArray, key);
+        
+        // --- THE FIX: Await the full transaction completion, not just the request. ---
         await new Promise((resolve, reject) => {
-            request.onsuccess = resolve;
+            // The request can fail independently of the transaction.
             request.onerror = () => reject(request.error);
-            tx.oncomplete = resolve;
+            
+            // The promise resolves ONLY when the transaction is fully committed.
+            tx.oncomplete = () => resolve();
             tx.onerror = () => reject(tx.error);
         });
+        // --- END OF THE FIX ---
         return true;
     } catch (error) {
         logger.error('IndexedDB', 'Error saving generated content', { key, error });
         return false;
     }
-   },
-   async getGeneratedContent(imageId, pageId) {
+   },   async getGeneratedContent(imageId, pageId) {
     const key = `${imageId}::${pageId}`;
     try {
         const db = await getDb();
@@ -244,12 +248,13 @@ const indexedDbStorage = {
    async transferDraftContent(originalDraftId, finalImageId) {
        try {
            const db = await getDb();
-           // FIX: Corrected typo from INDEX_DB to INDEXED_DB
            const tx = db.transaction(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT, 'readwrite');
            const store = tx.objectStore(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT);
-           const request = store.openCursor();
            
+           // --- THE FIX: Await the full transaction completion, not just the cursor. ---
            await new Promise((resolve, reject) => {
+               const request = store.openCursor();
+
                request.onsuccess = event => {
                    const cursor = event.target.result;
                    if (cursor) {
@@ -259,18 +264,22 @@ const indexedDbStorage = {
                            const newKey = `${finalImageId}::${pageId}`;
                            const value = cursor.value;
                            
+                           // These operations are queued within the transaction
                            store.add(value, newKey);
                            cursor.delete();
                        }
                        cursor.continue();
-                   } else {
-                       resolve();
                    }
+                   // When the cursor is done, we don't resolve. We wait for the transaction to complete.
                };
-               request.onerror = event => reject(event.target.error);
-               tx.oncomplete = resolve;
+               
+               // Set up final transaction state handlers for the promise.
+               request.onerror = () => reject(request.error);
+               tx.oncomplete = () => resolve(); // The promise resolves ONLY when the transaction is fully committed.
                tx.onerror = () => reject(tx.error);
            });
+           // --- END OF THE FIX ---
+
            logger.log('IndexedDB', `Successfully transferred content from ${originalDraftId} to ${finalImageId}`);
            return true;
        } catch (error) {

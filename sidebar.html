@@ -452,8 +452,24 @@
       </div>
     </div>
   </div>
-  
-  <div id="library-action-dialog" class="confirm-dialog-overlay" style="display: none;">
+<div id="create-source-dialog" class="confirm-dialog-overlay" style="display: none;">
+    <div class="confirm-dialog">
+      <div id="create-source-dialog-buttons">
+        <p id="create-source-dialog-message">Create a new packet from:</p>
+        <div class="dialog-buttons" style="flex-direction: column; gap: 12px;">
+          <button id="create-from-blank-btn" class="sidebar-action-button">Blank Packet</button>
+          <button id="create-from-tab-btn" class="sidebar-action-button primary">Current Tab</button>
+          <button id="cancel-create-source-btn" class="sidebar-action-button tertiary" style="margin-top: 10px;">Cancel</button>
+        </div>
+      </div>
+      <div id="create-source-dialog-progress" class="hidden">
+        <p id="create-source-dialog-progress-message">Analyzing page...</p>
+        <div class="dialog-progress-container">
+          <div class="dialog-progress-bar"></div>
+        </div>
+      </div>
+    </div>
+  </div>  <div id="library-action-dialog" class="confirm-dialog-overlay" style="display: none;">
     <div class="confirm-dialog" style="text-align: left;">
       <p id="library-action-title" style="text-align: center; margin-bottom: 20px;">Packet Actions</p>
       <div class="dialog-buttons" style="flex-direction: column; gap: 12px;">

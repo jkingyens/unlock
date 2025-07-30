@@ -246,7 +246,6 @@ export async function displayPacketContent(instance, browserState, canonicalPack
     const uniqueCallId = Date.now();
     if (isDisplayingPacketContent) {
         queuedDisplayRequest = { instance, browserState, canonicalPacketUrl };
-        logger.warn(`DetailView[${uniqueCallId}]`, 'Display already Started. Queuing request for instance:', instance?.instanceId);
         return;
     }
     isDisplayingPacketContent = true;

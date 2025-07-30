@@ -5,7 +5,7 @@
 import { domRefs } from './dom-references.js';
 // *** FIX: Import the progress calculation function from utils ***
 import { logger, storage, packetUtils, isTabGroupsAvailable, shouldUseTabGroups } from '../utils.js';
-import { showConfirmDialog, showImportDialog, exportPacketAndShowDialog } from './dialog-handler.js';
+import { showConfirmDialog, showImportDialog, exportPacketAndShowDialog, showCreateSourceDialog, showCreateSourceDialogProgress } from './dialog-handler.js';
 
 // --- Module-specific State ---
 let activeListTab = 'library';
@@ -43,7 +43,7 @@ export function setupRootViewListeners() {
     domRefs.tabInProgress?.addEventListener('click', () => switchListTab('in-progress'));
     domRefs.tabCompleted?.addEventListener('click', () => switchListTab('completed'));
     domRefs.sidebarDeleteBtn?.addEventListener('click', handleDeleteSelectedInstances);
-    domRefs.createPacketSidebarBtn?.addEventListener('click', () => navigateTo('create'));
+    domRefs.createPacketSidebarBtn?.addEventListener('click', handleCreateButtonClick);
     domRefs.rootView?.addEventListener('change', (event) => {
         if (event.target.classList.contains('packet-checkbox')) {
             updateActionButtonsVisibility();
@@ -72,6 +72,37 @@ export function setupRootViewListeners() {
         });
         dialog.querySelector('#lib-action-cancel-btn')?.addEventListener('click', hideLibraryActionDialog);
         dialog.addEventListener('click', (e) => { if (e.target === dialog) hideLibraryActionDialog(); });
+    }
+}
+
+// --- NEW FUNCTION to handle the create button logic ---
+async function handleCreateButtonClick() {
+    try {
+        const response = await sendMessageToBackground({ action: 'is_current_tab_packetizable' });
+
+        if (response.success && response.isPacketizable) {
+            // --- THE FIX: The logic is now centralized here. ---
+            const choice = await showCreateSourceDialog(); 
+            
+            if (choice === 'blank') {
+                // If user chose blank, now we hide the dialog and navigate.
+                hideCreateSourceDialog();
+                navigateTo('create');
+            } else if (choice === 'tab') {
+                // If user chose tab, we keep the dialog open and switch it to progress mode.
+                showCreateSourceDialogProgress('Analyzing page...');
+                sendMessageToBackground({ action: 'create_draft_from_tab' });
+            }
+            // If choice is null (cancelled), the dialog is already hidden. Do nothing.
+
+        } else {
+            // If the tab isn't valid, skip the dialog entirely.
+            navigateTo('create');
+        }
+    } catch (error) {
+        logger.error("RootView", "Error in create button logic", error);
+        showRootViewStatus(`Error: ${error.message}`, 'error');
+        navigateTo('create');
     }
 }
 

@@ -83,6 +83,116 @@ async function getLinksFromHtml(html) {
     }
 }
 
+export async function generateDraftPacketFromTab(initiatorTabId) {
+    let analysisResult = null;
+
+    try {
+        const tab = await chrome.tabs.get(initiatorTabId);
+        if (!tab || !tab.url || !tab.url.startsWith('http')) {
+            throw new Error("Cannot create a packet from the current page. Invalid or inaccessible URL.");
+        }
+
+        const sourcePageContentItem = {
+            type: 'external',
+            url: tab.url,
+            title: tab.title || 'Source Page',
+            relevance: 'The original source page this packet was created from.'
+        };
+
+        const activeModelConfig = await storage.getActiveModelConfig();
+        if (!activeModelConfig) {
+            throw new Error('LLM must be configured in Settings.');
+        }
+
+        const injectionResults = await chrome.scripting.executeScript({
+            target: { tabId: tab.id },
+            func: () => document.documentElement.outerHTML,
+        });
+
+        if (!injectionResults || !injectionResults.length === 0 || !injectionResults[0].result) {
+            throw new Error("Could not retrieve page content.");
+        }
+        const plainTextForTopic = await getAndParseHtml(injectionResults[0].result);
+
+        const llmAnalysis = await llmService.callLLM('extract_topic_from_html', { htmlContent: plainTextForTopic });
+        if (!llmAnalysis.success || !llmAnalysis.data?.topic) {
+            throw new Error(llmAnalysis.error || 'LLM failed to analyze page content.');
+        }
+        analysisResult = llmAnalysis.data;
+        const topic = analysisResult.topic;
+
+        const externalContentResponse = await llmService.callLLM('article_suggestions', { topic: topic, contentSummary: analysisResult.contentSummary });
+        const validatedExternalLinks = externalContentResponse.success ? (externalContentResponse.data.contents || [])
+            .filter(item => item?.url?.startsWith('https://en.wikipedia.org/wiki/') && item.title && item.relevance)
+            .map(item => ({ type: 'external', url: decodeURIComponent(item.url), title: item.title, relevance: item.relevance })) : [];
+
+        const summaryPageDef = { type: "generated", pageId: "summary-page", title: `${topic} Summary`, contentType: "text/html" };
+        let audioMediaItem = null;
+
+        const allContentForSummary = [...validatedExternalLinks, sourcePageContentItem];
+        const summaryContext = { topic: topic, allPacketContents: allContentForSummary };
+        
+        const summaryResponse = await llmService.callLLM('summary_page', summaryContext);
+        if (!summaryResponse.success || !summaryResponse.data) throw new Error(summaryResponse.error || 'LLM failed to generate summary.');
+        
+        const summaryHtmlBodyLLM = String(summaryResponse.data).trim();
+        
+        const plainTextForTTS = await getAndParseHtml(summaryHtmlBodyLLM, false);
+        const ttsResponse = await ttsService.generateAudioAndTimestamps(plainTextForTTS);
+        
+        const draftId = `draft_${Date.now()}`; 
+
+        if (ttsResponse.success && ttsResponse.audioBlob) {
+            const normalizedAudioBlob = await normalizeAudioOffscreen(ttsResponse.audioBlob);
+            const audioBuffer = await normalizedAudioBlob.arrayBuffer();
+            audioMediaItem = {
+                type: 'media',
+                pageId: `audio_summary_${Date.now()}`,
+                title: summaryPageDef.title,
+                mimeType: 'audio/wav',
+                timestamps: [],
+                published: false 
+            };
+            
+            // --- START OF THE FIX: Reverted to the original, more reliable two-call method ---
+            const links = await getLinksFromHtml(summaryHtmlBodyLLM);
+            // This second call gets more accurate alignment data for existing audio.
+            const alignmentResponse = await ttsService.getAlignmentForExistingAudio(audioBuffer, plainTextForTTS);
+            
+            if (alignmentResponse.success && alignmentResponse.wordTimestamps) {
+                if (links.length > 0 && alignmentResponse.wordTimestamps.length > 0) {
+                     const sourceOfTruthText = await getAndParseHtml(summaryHtmlBodyLLM, true);
+                     audioMediaItem.timestamps = runPositionalInterpolation(sourceOfTruthText, alignmentResponse.wordTimestamps, links);
+                }
+            } else {
+                logger.warn("PacketProcessor:generateDraftFromTab", "Forced alignment call failed, timestamps will be empty.", alignmentResponse.error);
+            }
+            // --- END OF THE FIX ---
+            
+            await indexedDbStorage.saveGeneratedContent(draftId, audioMediaItem.pageId, [{ name: 'audio.wav', content: audioBuffer, contentType: 'audio/wav' }]);
+        }
+
+        summaryPageDef.contentB64 = arrayBufferToBase64(new TextEncoder().encode(enhanceHtml(summaryHtmlBodyLLM, topic, summaryPageDef.title)));
+        
+        const summaryContent = { type: 'alternative', alternatives: [summaryPageDef] };
+        if (audioMediaItem) summaryContent.alternatives.push(audioMediaItem);
+        
+        const finalSourceContent = [summaryContent, ...validatedExternalLinks, sourcePageContentItem];
+        
+        const draftPacket = {
+            id: draftId,
+            topic: topic,
+            sourceContent: finalSourceContent
+        };
+
+        return { success: true, draft: draftPacket };
+
+    } catch (error) {
+        logger.error('PacketProcessor:generateDraftFromTab', `Error creating draft from tab ${initiatorTabId}`, error);
+        return { success: false, error: error.message };
+    }
+}
+
 // --- Audio Post-Processing function using offscreen document ---
 async function normalizeAudioOffscreen(audioBlob) {
     await setupOffscreenDocument();
