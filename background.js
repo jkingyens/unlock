@@ -218,6 +218,19 @@ async function injectOverlayScripts(tabId) {
         });
     } catch (e) {
         // This is expected to fail on chrome:// pages, store pages, etc. We can safely ignore these errors.
+
+        const expectedErrors = [
+            "Cannot access a chrome:// URL",
+            "Cannot access a chrome-extension:// URL",
+            "The tab was closed.",
+            "No tab with id",
+            "Cannot access contents of the page" // For pages like the Chrome Web Store
+        ];
+        // Only log errors that are not expected.
+        if (!expectedErrors.some(msg => e.message.includes(msg))) {
+            logger.error('Background:injectOverlayScripts', `Failed to inject scripts into tab ${tabId}`, e);
+        }
+
     }
 }
 
@@ -324,6 +337,7 @@ export async function setMediaPlaybackState(newState, options = { animate: false
     
     if (previousTabId && previousTabId !== targetTabId) {
          try {
+             await injectOverlayScripts(previousTabId);
              await chrome.tabs.sendMessage(previousTabId, {
                 action: 'sync_overlay_state',
                 data: { isVisible: false }
@@ -333,6 +347,7 @@ export async function setMediaPlaybackState(newState, options = { animate: false
     
     if (targetTabId) {
         try {
+            await injectOverlayScripts(targetTabId);
             await chrome.tabs.sendMessage(targetTabId, {
                 action: 'sync_overlay_state',
                 data: finalState
@@ -400,6 +415,16 @@ chrome.runtime.onStartup.addListener(async () => {
         await ruleManager.refreshAllRules();
         await getDb();
         await garbageCollectTabContexts();
+
+        logger.log('Background:onStartup', 'Injecting overlay scripts into existing tabs.');
+        const tabs = await chrome.tabs.query({ url: ["http://*/*", "https://*/*"] });
+        for (const tab of tabs) {
+            if (tab.id) {
+                // Use a 'fire and forget' approach to avoid blocking startup
+                injectOverlayScripts(tab.id).catch(e => logger.warn('Background:onStartup', `Failed to inject script into tab ${tab.id}`, e));
+            }
+        }
+        
     } finally {
         // This guarantees the extension becomes active even if an init step fails
         isRestoring = false;
