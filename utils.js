@@ -93,9 +93,9 @@ const CONFIG = {
     confettiEnabled: true,
     tabGroupsEnabled: true,
     mediaOverlayEnabled: true,
-    preferAudio: false,
+    preferAudio: true,
     waveformLinkMarkersEnabled: true,
-    visitThresholdSeconds: 5,
+    visitThresholdSeconds: 2,
     elevenlabsApiKey: ''
   },
   INDEXED_DB: {
