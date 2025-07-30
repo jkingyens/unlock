@@ -74,12 +74,15 @@ export function notifySidebar(action, data, retry = true) {
         const lastError = chrome.runtime.lastError;
         if (lastError) {
              const errorMsg = lastError.message || '';
+             // --- THE FIX: Added a check for the "port closed" error ---
              const isExpectedError = errorMsg.includes("Could not establish connection") || 
-                                     errorMsg.includes("Receiving end does not exist");
+                                     errorMsg.includes("Receiving end does not exist") ||
+                                     errorMsg.includes("The message port closed before a response was received");
 
              if (!isExpectedError) {
                   logger.warn('SidebarHandler:notify', 'Send failed with an unexpected error', { action, error: errorMsg });
              }
+             // --- END of the fix ---
              isSidebarReady = false;
              if (retry) {
                  pendingSidebarNotifications.push({ action, data: data, timestamp: Date.now() });

@@ -235,13 +235,16 @@ async function injectOverlayScripts(tabId) {
 }
 
 
-// --- State Management and Broadcasting ---
 export async function setMediaPlaybackState(newState, options = { animate: false, source: 'unknown' }) {
-    logger.log('Background:setMediaPlaybackState', 'CRITICAL LOG: State update requested.', {
-        source: options.source,
-        newState: newState,
-        currentMentionedLinks: activeMediaPlayback.mentionedMediaLinks
-    });
+    // --- THE FIX: Only log state updates that are not high-frequency time updates ---
+    if (options.source !== 'time_update') {
+        logger.log('Background:setMediaPlaybackState', 'State update requested.', {
+            source: options.source,
+            newState: newState,
+            currentMentionedLinks: activeMediaPlayback.mentionedMediaLinks
+        });
+    }
+    // --- END of the fix ---
 
     const oldLink = activeMediaPlayback.lastMentionedLink;
     const { lastMentionedLink, ...restOfNewState } = newState;
