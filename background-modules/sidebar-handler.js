@@ -93,14 +93,32 @@ export function notifySidebar(action, data, retry = true) {
     });
 }
 
-export function processPendingNotifications() {
+export async function processPendingNotifications() {
     if (pendingSidebarNotifications.length === 0 || !isSidebarReady) return;
     const notificationsToProcess = [...pendingSidebarNotifications];
     pendingSidebarNotifications = [];
 
-    notificationsToProcess.forEach(n => {
+    for (const n of notificationsToProcess) {
+        // --- THE FIX: Intercept completion-related notifications to re-verify state ---
+        if ((n.action === 'show_confetti' || n.action === 'prompt_close_tab_group')) {
+            const instanceId = n.data.packetId || n.data.instanceId;
+            if (instanceId) {
+                try {
+                    const instance = await storage.getPacketInstance(instanceId);
+                    // If the instance has been deleted or completion has been acknowledged, drop the notification.
+                    if (!instance || instance.completionAcknowledged) {
+                        logger.log('SidebarHandler:processPending', `Skipping stale completion notification for ${instanceId}`, { action: n.action });
+                        continue; // Skip to the next notification
+                    }
+                } catch (e) {
+                    logger.error('SidebarHandler:processPending', `Error checking instance state for pending notification`, e);
+                }
+            }
+        }
+        // --- END of the fix ---
+        
         notifySidebar(n.action, n.data, false);
-    });
+    }
 }
 
 /**

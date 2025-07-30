@@ -60,21 +60,42 @@ export async function onHistoryStateUpdated(details) {
 }
 
 export async function checkAndPromptForCompletion(logPrefix, visitResult, instanceId) {
+    // Only proceed if the visit resulted in the packet being completed for the *first* time.
     if (visitResult?.success && visitResult?.justCompleted) {
+        // Get the most up-to-date instance data to check our flag.
+        const instanceData = visitResult.instance || await storage.getPacketInstance(instanceId);
+
+        // If we have already shown the completion prompt for this packet, do nothing.
+        if (!instanceData || instanceData.completionAcknowledged) {
+            if(instanceData) logger.log('NavigationHandler', 'Completion already acknowledged for instance:', instanceId);
+            return;
+        }
+
+        logger.log('NavigationHandler', 'Packet just completed. Acknowledging and showing prompt.', instanceId);
+
+        // --- THE FIX: Set the acknowledgement flag and save it immediately ---
+        instanceData.completionAcknowledged = true;
+        await storage.savePacketInstance(instanceData);
+        // Let the rest of the system know about this important state change.
+        sidebarHandler.notifySidebar('packet_instance_updated', { instance: instanceData, source: 'completion_ack' });
+
+
+        // Now, proceed with the original logic of showing prompts.
         if (activeMediaPlayback.instanceId === instanceId) {
             logger.log('NavigationHandler', 'Completed packet was the active media packet. Resetting player state.');
             await resetActiveMediaPlayback();
         }
-        const instanceDataForPrompt = visitResult.instance || await storage.getPacketInstance(instanceId);
-        if (instanceDataForPrompt && sidebarHandler.isSidePanelAvailable()) {
-            sidebarHandler.notifySidebar('show_confetti', { topic: instanceDataForPrompt.topic || '' });
+
+        if (sidebarHandler.isSidePanelAvailable()) {
+            // --- MODIFIED LINE: Added instanceId to the confetti data ---
+            sidebarHandler.notifySidebar('show_confetti', { topic: instanceData.topic || '', instanceId: instanceId });
             if (await shouldUseTabGroups()) {
                 const browserState = await storage.getPacketBrowserState(instanceId);
                 if (browserState?.tabGroupId) {
                     sidebarHandler.notifySidebar('prompt_close_tab_group', {
                         instanceId: instanceId,
                         tabGroupId: browserState.tabGroupId,
-                        topic: instanceDataForPrompt.topic || 'this packet'
+                        topic: instanceData.topic || 'this packet'
                     });
                 }
             }
