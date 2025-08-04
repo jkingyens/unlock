@@ -118,11 +118,9 @@ export let activeMediaPlayback = {
 
 // This is the single, authoritative function for clearing the in-memory state.
 export async function resetActiveMediaPlayback() {
-    // --- START OF THE FIX ---
-    // The call to saveCurrentTime(..., 0) has been removed.
-    // The playback time should only be saved on pause or on media end,
-    // not when the user actively stops playback to switch contexts.
-    // --- END OF THE FIX ---
+    if (activeMediaPlayback.isPlaying && activeMediaPlayback.instanceId && activeMediaPlayback.pageId) {
+        await saveCurrentTime(activeMediaPlayback.instanceId, activeMediaPlayback.pageId);
+    }
     logger.log('Background', 'CRITICAL LOG: Resetting global activeMediaPlayback state.');
     
     const initialMediaPlaybackState = {
