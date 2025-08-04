@@ -114,6 +114,10 @@ export let activeMediaPlayback = {
     pageId: null,
     isPlaying: false,
     topic: '',
+    // --- START OF THE FIX: Add authoritative real-time state here ---
+    currentTime: 0,
+    duration: 0
+    // --- END OF THE FIX ---
 };
 
 // This is the single, authoritative function for clearing the in-memory state.
@@ -129,6 +133,10 @@ export async function resetActiveMediaPlayback() {
         pageId: null,
         isPlaying: false,
         topic: '',
+        // --- START OF THE FIX: Ensure reset includes new properties ---
+        currentTime: 0,
+        duration: 0
+        // --- END OF THE FIX ---
     };
 
     activeMediaPlayback = { ...initialMediaPlaybackState };
@@ -311,14 +319,17 @@ export async function notifyUIsOfStateChange(instanceOverride = null, options = 
     }
 
     const mediaItem = findMediaItemInInstance(instance, activeMediaPlayback.pageId);
+    
+    // --- START OF THE FIX: Prioritize the real-time global state for playback data ---
     const playbackStateForUI = {
         ...activeMediaPlayback,
-        currentTime: mediaItem?.currentTime || 0,
-        duration: mediaItem?.duration || 0,
+        currentTime: activeMediaPlayback.currentTime || 0,
+        duration: activeMediaPlayback.duration || 0,
         mentionedMediaLinks: instance.mentionedMediaLinks || [],
-        lastMentionedLink: calculateLastMentionedLink(instance, mediaItem),
+        lastMentionedLink: calculateLastMentionedLink(instance, { ...mediaItem, currentTime: activeMediaPlayback.currentTime }),
         ...options
     };
+    // --- END OF THE FIX ---
 
     const { isSidebarOpen } = await storage.getSession({ isSidebarOpen: false });
     const overlayEnabled = await shouldShowOverlay();

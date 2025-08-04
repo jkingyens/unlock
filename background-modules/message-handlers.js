@@ -292,13 +292,10 @@ async function handlePlaybackActionRequest(data, sender, sendResponse) {
             case 'play':
                 if (!instanceId || !pageId) throw new Error('instanceId and pageId required for play intent.');
 
-                // --- START OF THE FIX ---
-                // If another track is playing, save its progress before stopping it.
                 if (activeMediaPlayback.isPlaying && (activeMediaPlayback.instanceId !== instanceId || activeMediaPlayback.pageId !== pageId)) {
                     await saveCurrentTime(activeMediaPlayback.instanceId, activeMediaPlayback.pageId);
                     await controlAudioInOffscreen('stop', {});
                 }
-                // --- END OF THE FIX ---
 
                 const instance = await storage.getPacketInstance(instanceId);
                 if (!instance) throw new Error(`Could not find instance ${instanceId}.`);
@@ -320,6 +317,10 @@ async function handlePlaybackActionRequest(data, sender, sendResponse) {
                 activeMediaPlayback.instanceId = instanceId;
                 activeMediaPlayback.topic = instance.topic;
                 activeMediaPlayback.tabId = activeTab ? activeTab.id : null;
+                activeMediaPlayback.currentTime = startTime; 
+                // --- START OF THE FIX ---
+                activeMediaPlayback.duration = mediaItem.duration || 0;
+                // --- END OF THE FIX ---
                 await storage.setSession({ [CONFIG.STORAGE_KEYS.ACTIVE_MEDIA_KEY]: activeMediaPlayback });
                 await notifyUIsOfStateChange(instance);
                 break;
@@ -393,7 +394,6 @@ const actionHandlers = {
     },
     'request_playback_action': handlePlaybackActionRequest,
     'get_playback_state': async (data, sender, sendResponse) => {
-        // This now returns the full state derived from the instance
         const instance = activeMediaPlayback.instanceId ? await storage.getPacketInstance(activeMediaPlayback.instanceId) : null;
         if (instance) {
             const mediaItem = findMediaItemInInstance(instance, activeMediaPlayback.pageId);
@@ -402,10 +402,10 @@ const actionHandlers = {
 
             sendResponse({
                 ...activeMediaPlayback,
-                currentTime: mediaItem?.currentTime || 0,
-                duration: mediaItem?.duration || 0,
+                currentTime: activeMediaPlayback.currentTime || 0,
+                duration: activeMediaPlayback.duration || 0,
                 mentionedMediaLinks: instance.mentionedMediaLinks || [],
-                lastMentionedLink: calculateLastMentionedLink(instance, mediaItem),
+                lastMentionedLink: calculateLastMentionedLink(instance, { ...mediaItem, currentTime: activeMediaPlayback.currentTime }),
                 isVisible: !!activeMediaPlayback.pageId && !isSidebarOpen && overlayEnabled,
                 animate: false
             });
@@ -422,7 +422,10 @@ const actionHandlers = {
         sendResponse({ success: true });
     },
     'audio_time_update': async (data) => {
-        if (activeMediaPlayback.pageId !== data.pageId) return;
+        if (activeMediaPlayback.pageId !== data.pageId || !activeMediaPlayback.isPlaying) return;
+
+        activeMediaPlayback.currentTime = data.currentTime;
+        activeMediaPlayback.duration = data.duration;
 
         const instance = await storage.getPacketInstance(activeMediaPlayback.instanceId);
         if (!instance) return;
@@ -430,9 +433,10 @@ const actionHandlers = {
         const mediaItem = findMediaItemInInstance(instance, data.pageId);
         if (!mediaItem) return;
 
-        const oldMentionedLink = calculateLastMentionedLink(instance, mediaItem);
-        mediaItem.currentTime = data.currentTime;
-        mediaItem.duration = data.duration;
+        const tempMediaItemForCalc = { ...mediaItem, currentTime: data.currentTime };
+        const newMentionedLink = calculateLastMentionedLink(instance, tempMediaItemForCalc);
+        const animateLinkMention = newMentionedLink && (!calculateLastMentionedLink(instance, mediaItem) || newMentionedLink.url !== calculateLastMentionedLink(instance, mediaItem).url);
+
         const mentionedUrls = new Set(instance.mentionedMediaLinks || []);
         if (mediaItem.timestamps) {
             mediaItem.timestamps.forEach(ts => {
@@ -442,11 +446,10 @@ const actionHandlers = {
             });
         }
         instance.mentionedMediaLinks = Array.from(mentionedUrls);
-
+        mediaItem.currentTime = data.currentTime;
+        mediaItem.duration = data.duration;
+        
         debouncedSaveInstance(instance);
-
-        const newMentionedLink = calculateLastMentionedLink(instance, mediaItem);
-        const animateLinkMention = newMentionedLink && (!oldMentionedLink || newMentionedLink.url !== oldMentionedLink.url);
 
         await notifyUIsOfStateChange(instance, { animateLinkMention });
     },
