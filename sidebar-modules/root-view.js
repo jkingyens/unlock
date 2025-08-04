@@ -5,7 +5,7 @@
 import { domRefs } from './dom-references.js';
 // *** FIX: Import the progress calculation function from utils ***
 import { logger, storage, packetUtils, isTabGroupsAvailable, shouldUseTabGroups } from '../utils.js';
-import { showConfirmDialog, showImportDialog, exportPacketAndShowDialog, showCreateSourceDialog, showCreateSourceDialogProgress } from './dialog-handler.js';
+import { showConfirmDialog, showImportDialog, exportPacketAndShowDialog, showCreateSourceDialog, showCreateSourceDialogProgress, hideCreateSourceDialog } from './dialog-handler.js';
 
 // --- Module-specific State ---
 let activeListTab = 'library';
