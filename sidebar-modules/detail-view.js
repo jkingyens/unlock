@@ -260,9 +260,6 @@ export async function displayPacketContent(instance, browserState, canonicalPack
     }
 
     const currentState = await sendMessageToBackground({ action: 'get_playback_state' });
-    if (currentState.instanceId && currentState.instanceId !== instance.instanceId) {
-        await stopAndClearActiveAudio(); 
-    }
     
     currentDetailInstance = instance;
     if (!Array.isArray(currentDetailInstance.mentionedMediaLinks)) {
