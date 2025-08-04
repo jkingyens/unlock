@@ -116,7 +116,8 @@ export let activeMediaPlayback = {
     topic: '',
     // --- START OF THE FIX: Add authoritative real-time state here ---
     currentTime: 0,
-    duration: 0
+    duration: 0,
+    lastMentionedLink: null
     // --- END OF THE FIX ---
 };
 
@@ -135,7 +136,8 @@ export async function resetActiveMediaPlayback() {
         topic: '',
         // --- START OF THE FIX: Ensure reset includes new properties ---
         currentTime: 0,
-        duration: 0
+        duration: 0,
+        lastMentionedLink: null
         // --- END OF THE FIX ---
     };
 
