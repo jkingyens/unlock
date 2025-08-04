@@ -73,7 +73,7 @@ export async function checkAndPromptForCompletion(logPrefix, visitResult, instan
 
         logger.log('NavigationHandler', 'Packet just completed. Acknowledging and showing prompt.', instanceId);
 
-        // --- THE FIX: Set the acknowledgement flag and save it immediately ---
+        
         instanceData.completionAcknowledged = true;
         await storage.savePacketInstance(instanceData);
         // Let the rest of the system know about this important state change.
@@ -87,7 +87,7 @@ export async function checkAndPromptForCompletion(logPrefix, visitResult, instan
         }
 
         if (sidebarHandler.isSidePanelAvailable()) {
-            // --- MODIFIED LINE: Added instanceId to the confetti data ---
+            
             sidebarHandler.notifySidebar('show_confetti', { topic: instanceData.topic || '', instanceId: instanceId });
             if (await shouldUseTabGroups()) {
                 const browserState = await storage.getPacketBrowserState(instanceId);
@@ -105,7 +105,7 @@ export async function checkAndPromptForCompletion(logPrefix, visitResult, instan
 
 async function processNavigationEvent(tabId, finalUrl, details) {
     const logPrefix = `[NavigationHandler Tab ${tabId}]`;
-    // --- FIX: Declare sessionData at the top of the function scope ---
+    
     let sessionData;
     
     logger.log(logPrefix, '>>> NAVIGATION EVENT START <<<', {
@@ -135,7 +135,7 @@ async function processNavigationEvent(tabId, finalUrl, details) {
     if (currentContext) {
         // Step 3a: Check if we are within the grace period.
         const gracePeriodKey = `grace_period_${tabId}`;
-        sessionData = await storage.getSession(gracePeriodKey); // This line was causing the error
+        sessionData = await storage.getSession(gracePeriodKey); 
         if (sessionData[gracePeriodKey]) {
             const age = Date.now() - sessionData[gracePeriodKey];
             logger.log(logPrefix, `DECISION: Grace period is active (${age}ms old). Preserving original context and updating URL.`);
@@ -194,7 +194,7 @@ async function processNavigationEvent(tabId, finalUrl, details) {
     if (finalInstance) {
         await reconcileBrowserState(tabId, finalInstance.instanceId, finalInstance, finalUrl);
         
-        // *** THE FIX: The packet instance contents are already flattened, so a direct .find() is correct. ***
+        
         const itemForVisitTimer = finalInstance.contents
             .find(i => i.url === finalContext.canonicalPacketUrl);
 
@@ -260,7 +260,7 @@ export async function startVisitTimer(tabId, instanceId, canonicalPacketUrl, log
                 if (visitResult.success && visitResult.modified) {
                     const updatedInstance = visitResult.instance || await storage.getPacketInstance(instanceId);
                     sidebarHandler.notifySidebar('packet_instance_updated', { instance: updatedInstance, source: 'dwell_visit' });
-                    // --- THE FIX: Trigger the green glow animation on the overlay ---
+                    
                     await setMediaPlaybackState({ instanceId: instanceId, tabId: tabId, topic: updatedInstance.topic }, { showVisitedAnimation: true, source: 'dwell_visit' });
                     await checkAndPromptForCompletion(logPrefix, visitResult, instanceId);
                 }

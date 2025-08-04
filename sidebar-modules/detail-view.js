@@ -209,19 +209,24 @@ async function redrawAllVisibleWaveforms(playbackState = {}) {
         const markerContainer = card.querySelector('.waveform-marker-container');
         const contentItem = currentDetailInstance.contents.find(item => item.pageId === pageId);
         const audioCacheKey = `${currentDetailInstance.imageId}::${pageId}`;
-        const audioSamples = audioDataCache.get(audioCacheKey);
+        
+        // --- START OF THE FIX ---
+        const cachedAudioData = audioDataCache.get(audioCacheKey);
+        if (!cachedAudioData) continue;
+        const { samples: audioSamples, sampleRate, duration: cachedDuration } = cachedAudioData;
 
         if (canvas && contentItem && audioSamples) {
             const isTheActiveTrack = playbackState.pageId === pageId;
-            const currentTime = isTheActiveTrack ? (playbackState.currentTime || 0) : 0;
-            const audioDuration = isTheActiveTrack && playbackState.duration > 0 ? playbackState.duration : (audioSamples.length / 44100);
-
+            const currentTime = isTheActiveTrack ? (playbackState.currentTime || 0) : (contentItem.currentTime || 0);
+            const audioDuration = isTheActiveTrack && playbackState.duration > 0 ? playbackState.duration : cachedDuration;
+            
             drawWaveform(canvas, audioSamples, {
                 ...colorOptions,
                 currentTime,
                 audioDuration,
-                audioSampleRate: 44100 // Assuming standard sample rate
+                audioSampleRate: sampleRate
             });
+            // --- END OF THE FIX ---
 
             // Call the new marker drawing function
             drawLinkMarkers(markerContainer, {
@@ -340,7 +345,14 @@ export async function displayPacketContent(instance, browserState, canonicalPack
                             const audioContext = new (window.AudioContext || window.webkitAudioContext)();
                             const decodedData = await audioContext.decodeAudioData(audioData.slice(0)); // Use slice(0) to create a copy
                             const samples = decodedData.getChannelData(0);
-                            audioDataCache.set(`${instance.imageId}::${contentItem.pageId}`, samples);
+                            
+                            // --- START OF THE FIX ---
+                            audioDataCache.set(`${instance.imageId}::${contentItem.pageId}`, {
+                                samples: samples,
+                                sampleRate: decodedData.sampleRate,
+                                duration: decodedData.duration
+                            });
+                            // --- END OF THE FIX ---
                             
                             redrawAllVisibleWaveforms(currentState);
 
