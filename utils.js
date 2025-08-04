@@ -17,7 +17,8 @@ const CONFIG = {
     PACKET_BROWSER_STATES: 'packetBrowserStates', // Stores PacketBrowserState objects (map)
     SETTINGS: 'settings',
     PENDING_VIEW_KEY: 'pendingSidebarView',
-    PACKET_CONTEXT_PREFIX: 'packetContext_' // Stores { instanceId, canonicalPacketUrl, currentBrowserUrl } for a tab
+    PACKET_CONTEXT_PREFIX: 'packetContext_', // Stores { instanceId, canonicalPacketUrl, currentBrowserUrl } for a tab
+    ACTIVE_MEDIA_KEY: 'activeMediaPlaybackState'
   },
   DEFAULT_SETTINGS: {
     selectedModelId: 'default_openai_gpt4o',

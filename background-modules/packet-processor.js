@@ -442,6 +442,8 @@ export async function instantiatePacket(imageId, preGeneratedInstanceId, initiat
                 }
                 delete item.contentB64;
             } else if (item.type === 'media') {
+                item.currentTime = 0;
+                item.duration = 0;
                 const { pageId, mimeType, title } = item;
                 const cachedContent = await indexedDbStorage.getGeneratedContent(imageId, pageId);
 

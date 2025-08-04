@@ -41,11 +41,22 @@ import {
     setMediaPlaybackState,
     controlAudioInOffscreen,
     activeMediaPlayback,
-    resetActiveMediaPlayback
+    resetActiveMediaPlayback,
+    notifyUIsOfStateChange,
+    saveCurrentTime
 } from '../background.js';
 import { checkAndPromptForCompletion } from './navigation-handler.js';
 
 const PENDING_VIEW_KEY = 'pendingSidebarView';
+
+let saveInstanceDebounceTimer = null;
+function debouncedSaveInstance(instance) {
+    clearTimeout(saveInstanceDebounceTimer);
+    saveInstanceDebounceTimer = setTimeout(() => {
+        storage.savePacketInstance(instance);
+    }, 1000); // Save after 1 second of inactivity
+}
+
 
 // --- Context Request Handlers ---
 async function handleGetContextForTab(data, sender, sendResponse) {
@@ -245,53 +256,89 @@ async function handleSidebarReady(data, sender, sendResponse) {
     }
 }
 
+function findMediaItemInInstance(instance, pageId) {
+    if (!instance || !instance.contents || !pageId) return null;
+    for (const item of instance.contents) {
+        if (item.pageId === pageId) return item;
+        if (item.type === 'alternative' && item.alternatives) {
+            const found = item.alternatives.find(alt => alt.pageId === pageId);
+            if (found) return found;
+        }
+    }
+    return null;
+}
+
+function calculateLastMentionedLink(instance, mediaItem) {
+    if (!instance || !mediaItem || !mediaItem.timestamps || typeof mediaItem.currentTime !== 'number') {
+        return null;
+    }
+    let lastMentionedTimestamp = null;
+    mediaItem.timestamps.forEach(ts => {
+        if (mediaItem.currentTime >= ts.startTime) {
+            if (!lastMentionedTimestamp || ts.startTime > lastMentionedTimestamp.startTime) {
+                lastMentionedTimestamp = ts;
+            }
+        }
+    });
+    const linkItem = lastMentionedTimestamp ? instance.contents.find(i => i.url === lastMentionedTimestamp.url) : null;
+    return linkItem ? { url: linkItem.url, title: linkItem.title } : null;
+}
+
+
 async function handlePlaybackActionRequest(data, sender, sendResponse) {
     const { intent, instanceId, pageId } = data;
-    const currentState = { ...activeMediaPlayback };
     try {
         switch (intent) {
             case 'play':
                 if (!instanceId || !pageId) throw new Error('instanceId and pageId required for play intent.');
+
+                // --- START OF THE FIX ---
+                // If another track is playing, save its progress before stopping it.
+                if (activeMediaPlayback.isPlaying && (activeMediaPlayback.instanceId !== instanceId || activeMediaPlayback.pageId !== pageId)) {
+                    await saveCurrentTime(activeMediaPlayback.instanceId, activeMediaPlayback.pageId);
+                    await controlAudioInOffscreen('stop', {});
+                }
+                // --- END OF THE FIX ---
+
                 const instance = await storage.getPacketInstance(instanceId);
                 if (!instance) throw new Error(`Could not find instance ${instanceId}.`);
-                let contentItem;
-                instance.contents.forEach(item => {
-                    if (item.pageId === pageId) contentItem = item;
-                    else if (item.type === 'alternative') {
-                        const alt = item.alternatives.find(a => a.pageId === pageId);
-                        if (alt) contentItem = alt;
-                    }
-                });
-                if (!contentItem) throw new Error(`Could not find track ${pageId} in packet.`);
+
+                const mediaItem = findMediaItemInInstance(instance, pageId);
+                if (!mediaItem) throw new Error(`Could not find track ${pageId} in packet.`);
+
                 const cachedAudio = await indexedDbStorage.getGeneratedContent(instance.imageId, pageId);
                 if (!cachedAudio || !cachedAudio[0]?.content) throw new Error("Could not find cached audio data.");
 
                 const audioB64 = arrayBufferToBase64(cachedAudio[0].content);
-                await controlAudioInOffscreen('play', { audioB64, mimeType: contentItem.mimeType, pageId, instanceId });
-                const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+                const startTime = mediaItem.currentTime || 0;
 
-                await setMediaPlaybackState({
-                    isPlaying: true,
-                    pageId,
-                    instanceId,
-                    topic: instance.topic,
-                    tabId: activeTab ? activeTab.id : null,
-                    currentTime: 0,
-                    duration: 0,
-                    mentionedMediaLinks: [],
-                    lastMentionedLink: null
-                }, { source: 'play_intent' });
+                await controlAudioInOffscreen('play', { audioB64, mimeType: mediaItem.mimeType, pageId, instanceId, startTime });
+
+                const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+                activeMediaPlayback.isPlaying = true;
+                activeMediaPlayback.pageId = pageId;
+                activeMediaPlayback.instanceId = instanceId;
+                activeMediaPlayback.topic = instance.topic;
+                activeMediaPlayback.tabId = activeTab ? activeTab.id : null;
+                await storage.setSession({ [CONFIG.STORAGE_KEYS.ACTIVE_MEDIA_KEY]: activeMediaPlayback });
+                await notifyUIsOfStateChange(instance);
                 break;
 
             case 'pause':
             case 'toggle':
-                if (!currentState.pageId) throw new Error('No active media to toggle/pause.');
+                if (!activeMediaPlayback.pageId) throw new Error('No active media to toggle/pause.');
                 await controlAudioInOffscreen(intent, {});
-                await setMediaPlaybackState({ isPlaying: intent === 'toggle' ? !currentState.isPlaying : false });
+                activeMediaPlayback.isPlaying = intent === 'toggle' ? !activeMediaPlayback.isPlaying : false;
+
+                if (!activeMediaPlayback.isPlaying) {
+                     await saveCurrentTime(activeMediaPlayback.instanceId, activeMediaPlayback.pageId);
+                }
+
+                await storage.setSession({ [CONFIG.STORAGE_KEYS.ACTIVE_MEDIA_KEY]: activeMediaPlayback });
+                await notifyUIsOfStateChange();
                 break;
             case 'stop':
-                if (currentState.pageId) {
-                    await controlAudioInOffscreen('stop', {});
+                if (activeMediaPlayback.pageId) {
                     await resetActiveMediaPlayback();
                 }
                 break;
@@ -300,6 +347,7 @@ async function handlePlaybackActionRequest(data, sender, sendResponse) {
         }
         sendResponse({ success: true });
     } catch (err) {
+        logger.error("MessageHandler:handlePlaybackActionRequest", `Error handling intent '${intent}'`, err);
         sendResponse({ success: false, error: err.message });
     }
 }
@@ -345,22 +393,24 @@ const actionHandlers = {
     },
     'request_playback_action': handlePlaybackActionRequest,
     'get_playback_state': async (data, sender, sendResponse) => {
-        try {
-            const hasActiveTrack = !!activeMediaPlayback.pageId;
+        // This now returns the full state derived from the instance
+        const instance = activeMediaPlayback.instanceId ? await storage.getPacketInstance(activeMediaPlayback.instanceId) : null;
+        if (instance) {
+            const mediaItem = findMediaItemInInstance(instance, activeMediaPlayback.pageId);
             const { isSidebarOpen } = await storage.getSession({ isSidebarOpen: false });
             const overlayEnabled = await shouldShowOverlay();
-            const isVisible = hasActiveTrack && !isSidebarOpen && overlayEnabled;
-    
-            const fullState = {
+
+            sendResponse({
                 ...activeMediaPlayback,
-                isVisible: isVisible,
-                animate: false,
-                animateLinkMention: false
-            };
-            sendResponse(fullState);
-        } catch (e) {
-            logger.error('MessageHandler:get_playback_state', 'Error constructing full state', e);
-            sendResponse({ ...activeMediaPlayback, isVisible: false });
+                currentTime: mediaItem?.currentTime || 0,
+                duration: mediaItem?.duration || 0,
+                mentionedMediaLinks: instance.mentionedMediaLinks || [],
+                lastMentionedLink: calculateLastMentionedLink(instance, mediaItem),
+                isVisible: !!activeMediaPlayback.pageId && !isSidebarOpen && overlayEnabled,
+                animate: false
+            });
+        } else {
+            sendResponse({ ...activeMediaPlayback, isVisible: false, currentTime: 0, duration: 0, mentionedMediaLinks: [], lastMentionedLink: null });
         }
     },
     'open_sidebar_and_navigate': async (data, sender, sendResponse) => {
@@ -371,13 +421,37 @@ const actionHandlers = {
         }
         sendResponse({ success: true });
     },
-    'audio_time_update': (data) => {
-        if (activeMediaPlayback.pageId === data.pageId) {
-            setMediaPlaybackState({ currentTime: data.currentTime, duration: data.duration }, { source: 'time_update' });
+    'audio_time_update': async (data) => {
+        if (activeMediaPlayback.pageId !== data.pageId) return;
+
+        const instance = await storage.getPacketInstance(activeMediaPlayback.instanceId);
+        if (!instance) return;
+
+        const mediaItem = findMediaItemInInstance(instance, data.pageId);
+        if (!mediaItem) return;
+
+        const oldMentionedLink = calculateLastMentionedLink(instance, mediaItem);
+        mediaItem.currentTime = data.currentTime;
+        mediaItem.duration = data.duration;
+        const mentionedUrls = new Set(instance.mentionedMediaLinks || []);
+        if (mediaItem.timestamps) {
+            mediaItem.timestamps.forEach(ts => {
+                if (data.currentTime >= ts.startTime) {
+                    mentionedUrls.add(ts.url);
+                }
+            });
         }
+        instance.mentionedMediaLinks = Array.from(mentionedUrls);
+
+        debouncedSaveInstance(instance);
+
+        const newMentionedLink = calculateLastMentionedLink(instance, mediaItem);
+        const animateLinkMention = newMentionedLink && (!oldMentionedLink || newMentionedLink.url !== oldMentionedLink.url);
+
+        await notifyUIsOfStateChange(instance, { animateLinkMention });
     },
     'overlay_setting_updated': async (data, sender, sendResponse) => {
-        await setMediaPlaybackState({}, { animate: false, source: 'settings_update' });
+        await notifyUIsOfStateChange();
         sendResponse({success: true});
     },
     'improve_draft_audio': (data, sender, sendResponse) => processImproveDraftAudio(data).then(sendResponse),
@@ -437,12 +511,11 @@ const actionHandlers = {
     },
     'mark_url_visited': handleMarkUrlVisited,
     'media_playback_complete': async (data, sender, sendResponse) => {
-        await handlePlaybackActionRequest({ data: { intent: 'stop' } }, sender, () => {});
+        await saveCurrentTime(data.instanceId, data.pageId, 0, true);
+        activeMediaPlayback.isPlaying = false;
         const visitResult = await packetUtils.markPageIdAsVisited(data.instanceId, data.pageId);
         if (visitResult.success && visitResult.modified) {
-            sidebarHandler.notifySidebar('packet_instance_updated', { instance: visitResult.instance });
-            // --- THE FIX: Trigger the green glow animation on the overlay ---
-            await setMediaPlaybackState({}, { showVisitedAnimation: true, source: 'media_complete_visit' });
+            await notifyUIsOfStateChange(visitResult.instance, { showVisitedAnimation: true });
             await checkAndPromptForCompletion('MessageHandler', visitResult, data.instanceId);
         }
         sendResponse(visitResult);
