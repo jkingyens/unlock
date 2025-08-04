@@ -612,18 +612,35 @@ function attachNavigationListeners() {
 chrome.runtime.onConnect.addListener(async (port) => {
   if (port.name === 'sidebar') {
     await storage.setSession({ isSidebarOpen: true });
-    // FIX: Replaced the incorrect function call with the correct one.
+    // This correctly notifies UIs when the sidebar opens (e.g., to hide the overlay)
     await notifyUIsOfStateChange();
 
     port.onDisconnect.addListener(async () => {
       await storage.setSession({ isSidebarOpen: false });
-      // FIX: Replaced the incorrect function call with the correct one.
+      
+      // --- START OF THE FIX ---
+      // When the sidebar closes, we need to ensure the overlay appears on the
+      // currently active tab, not a potentially stale one from when playback started.
+      if (activeMediaPlayback.pageId) { // Only run this logic if media is active
+          try {
+              // Query for the tab that is active in the last focused window.
+              const [activeTab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+              if (activeTab && activeTab.id) {
+                  // Update the global state to point to this correct, current tab.
+                  activeMediaPlayback.tabId = activeTab.id;
+              }
+          } catch (e) {
+              logger.warn('Background:onDisconnect', 'Could not get active tab when sidebar closed.', e);
+          }
+      }
+      // --- END OF THE FIX ---
+
+      // Now, notify UIs of the state change. This will use the fresh tabId
+      // to correctly inject and show the overlay on the active tab.
       await notifyUIsOfStateChange(null, { animate: true });
     });
   }
 });
-
-
 
 // --- Garbage Collection ---
 async function garbageCollectTabContexts() {
