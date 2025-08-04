@@ -318,6 +318,7 @@ async function handlePlaybackActionRequest(data, sender, sendResponse) {
                 activeMediaPlayback.topic = instance.topic;
                 activeMediaPlayback.tabId = activeTab ? activeTab.id : null;
                 activeMediaPlayback.currentTime = startTime; 
+                activeMediaPlayback.lastMentionedLink = null;
                 // --- START OF THE FIX ---
                 activeMediaPlayback.duration = mediaItem.duration || 0;
                 // --- END OF THE FIX ---
@@ -433,10 +434,17 @@ const actionHandlers = {
         const mediaItem = findMediaItemInInstance(instance, data.pageId);
         if (!mediaItem) return;
 
+        // --- START OF THE FIX ---
         const tempMediaItemForCalc = { ...mediaItem, currentTime: data.currentTime };
         const newMentionedLink = calculateLastMentionedLink(instance, tempMediaItemForCalc);
-        const animateLinkMention = newMentionedLink && (!calculateLastMentionedLink(instance, mediaItem) || newMentionedLink.url !== calculateLastMentionedLink(instance, mediaItem).url);
 
+        // Compare the newly calculated link with the link from the PREVIOUS state, stored in our global object.
+        const animateLinkMention = newMentionedLink && (!activeMediaPlayback.lastMentionedLink || newMentionedLink.url !== activeMediaPlayback.lastMentionedLink.url);
+
+        // Update the global state for the next tick.
+        activeMediaPlayback.lastMentionedLink = newMentionedLink;
+        // --- END OF THE FIX ---
+        
         const mentionedUrls = new Set(instance.mentionedMediaLinks || []);
         if (mediaItem.timestamps) {
             mediaItem.timestamps.forEach(ts => {
