@@ -15,15 +15,19 @@ let titlePromptCancelListener = null;
 let titlePromptKeyListener = null;
 
 let sendMessageToBackground;
-let showRootViewStatus; // Add this
-let navigateTo; // <--- ADD THIS LINE
+let showRootViewStatus;
+// --- START OF THE FIX ---
+let navigateTo;
+// --- END OF THE FIX ---
 
 
 // --- Initialization ---
 export function init(dependencies) {
     sendMessageToBackground = dependencies.sendMessageToBackground;
-    showRootViewStatus = dependencies.showRootViewStatus; // Store this dependency
-    navigateTo = dependencies.navigateTo; // <--- ADD THIS LINE
+    showRootViewStatus = dependencies.showRootViewStatus;
+    // --- START OF THE FIX ---
+    navigateTo = dependencies.navigateTo;
+    // --- END OF THE FIX ---
 }
 
 /**
@@ -237,14 +241,19 @@ function removeCloseGroupDialogListeners() {
 }
 
 function handleConfirmCloseGroup(tabGroupId) {
-    // --- THE FIX: Remove the imperative navigation call. ---
     hideCloseGroupDialog();
-    // The navigateTo('root') call that was here has been removed.
 
-    // Send the command to the background to handle independently.
-    // The UI will update reactively when the navigation handler sends a new context.
+    // Send the command to the background to handle the actual browser tabs.
     sendMessageToBackground({ action: 'remove_tab_groups', data: { groupIds: [tabGroupId] } })
         .catch(err => logger.error("DialogHandler", `Error sending close group message: ${err.message}`));
+
+    // --- START OF THE FIX ---
+    // Explicitly navigate the sidebar UI to the root view immediately.
+    // This bypasses the navigation lock and prevents the UI from getting stuck.
+    if (typeof navigateTo === 'function') {
+        navigateTo('root');
+    }
+    // --- END OF THE FIX ---
 }
 
 export function showConfirmDialog(message, confirmText = 'Confirm', cancelText = 'Cancel', isDangerAction = false) {
@@ -282,7 +291,6 @@ export function showTitlePromptDialog(defaultValue = '') {
             return resolve(null); // Resolve with null if dialog doesn't exist
         }
 
-        // --- THE FIX: Use the provided defaultValue to pre-populate the input ---
         domRefs.titlePromptInput.value = defaultValue;
         
         titlePromptConfirmListener = () => hideTitlePromptDialog(domRefs.titlePromptInput.value.trim());
@@ -342,8 +350,6 @@ export function showCreateSourceDialog() {
         createSourceDialogResolve = resolve;
         const dialog = document.getElementById('create-source-dialog');
         if (dialog) {
-            // --- THE FIX: The main action buttons now only resolve the promise. ---
-            // The calling function will decide whether to hide the dialog or change its state.
             dialog.querySelector('#create-from-blank-btn').onclick = () => {
                 if (createSourceDialogResolve) createSourceDialogResolve('blank');
             };

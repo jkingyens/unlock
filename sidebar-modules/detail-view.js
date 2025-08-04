@@ -14,11 +14,11 @@ const audioDataCache = new Map();
 let currentDetailInstance = null;
 let saveStateDebounceTimer = null; // Timer for debounced state saving
 let currentPlayingPageId = null; // Track which media item is active in this view
-let openUrl; // This will be injected from sidebar.js
-
-// Functions to be imported from the new, lean sidebar.js
 let sendMessageToBackground;
-let navigateTo; // <--- ADD THIS LINE
+// --- START OF THE FIX ---
+let navigateTo;
+// --- END OF THE FIX ---
+let openUrl;
 
 
 /**
@@ -27,8 +27,10 @@ let navigateTo; // <--- ADD THIS LINE
  */
 export function init(dependencies) {
     sendMessageToBackground = dependencies.sendMessageToBackground;
-    navigateTo = dependencies.navigateTo; // <--- ADD THIS LINE
-    openUrl = dependencies.openUrl; // <-- THE FIX: Receive openUrl from sidebar.js
+    // --- START OF THE FIX ---
+    navigateTo = dependencies.navigateTo;
+    // --- END OF THE FIX ---
+    openUrl = dependencies.openUrl;
 }
 
 
@@ -70,15 +72,11 @@ export function updatePlaybackUI(state) {
             if (mentionedUrlsSet.has(url)) {
                 card.classList.remove('hidden-by-rule');
                 if (wasHidden) {
-                    // --- THE FIX: Listen for the end of the transition ---
-                    // This ensures the card has finished its reveal animation before we scroll.
                     const handleTransitionEnd = () => {
                         card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-                        // Clean up the listener so it doesn't fire again.
                         card.removeEventListener('transitionend', handleTransitionEnd);
                     };
                     card.addEventListener('transitionend', handleTransitionEnd, { once: true });
-                    // --- END OF THE FIX ---
 
                     // Highlight the newly revealed card
                     card.classList.add('link-mentioned');
@@ -136,7 +134,6 @@ async function drawWaveform(canvas, audioSamples, options) {
     const numBars = Math.floor(canvasWidth / (barWidth + barGap));
     const samplesPerBar = Math.floor(audioSamples.length / numBars);
     
-    // THE FIX: Calculate time per pixel for the new marker drawing function
     const timePerPixel = options.audioDuration / canvasWidth;
 
 
@@ -161,7 +158,6 @@ async function drawWaveform(canvas, audioSamples, options) {
     return timePerPixel;
 }
 
-// --- NEW: Function to draw link markers over the waveform ---
 function drawLinkMarkers(markerContainer, options) {
     const { timestamps, audioDuration, visitedUrlsSet } = options;
     markerContainer.innerHTML = ''; // Clear existing markers
@@ -210,7 +206,6 @@ async function redrawAllVisibleWaveforms(playbackState = {}) {
         const contentItem = currentDetailInstance.contents.find(item => item.pageId === pageId);
         const audioCacheKey = `${currentDetailInstance.imageId}::${pageId}`;
         
-        // --- START OF THE FIX ---
         const cachedAudioData = audioDataCache.get(audioCacheKey);
         if (!cachedAudioData) continue;
         const { samples: audioSamples, sampleRate, duration: cachedDuration } = cachedAudioData;
@@ -226,9 +221,7 @@ async function redrawAllVisibleWaveforms(playbackState = {}) {
                 audioDuration,
                 audioSampleRate: sampleRate
             });
-            // --- END OF THE FIX ---
 
-            // Call the new marker drawing function
             drawLinkMarkers(markerContainer, {
                 ...colorOptions,
                 timestamps: contentItem.timestamps || [],
@@ -302,7 +295,6 @@ export async function displayPacketContent(instance, browserState, canonicalPack
             const progressBarContainer = domRefs.detailProgressContainer?.querySelector('.progress-bar-container');
             if (progressBarContainer) progressBarContainer.title = `${progressPercentage}% Complete`;
             
-            // --- THE FIX: We also need to re-render the action buttons on updates ---
             const oldActionButtonContainer = document.getElementById('detail-action-button-container');
             const newActionButtonContainer = await createActionButtons(instance, browserState);
             if (oldActionButtonContainer) {
@@ -346,13 +338,11 @@ export async function displayPacketContent(instance, browserState, canonicalPack
                             const decodedData = await audioContext.decodeAudioData(audioData.slice(0)); // Use slice(0) to create a copy
                             const samples = decodedData.getChannelData(0);
                             
-                            // --- START OF THE FIX ---
                             audioDataCache.set(`${instance.imageId}::${contentItem.pageId}`, {
                                 samples: samples,
                                 sampleRate: decodedData.sampleRate,
                                 duration: decodedData.duration
                             });
-                            // --- END OF THE FIX ---
                             
                             redrawAllVisibleWaveforms(currentState);
 
@@ -514,19 +504,11 @@ async function createContentCard(contentItem, visitedUrlsSet, visitedGeneratedId
         }
     }
 
-    // A non-media card's visibility depends on the context of the whole packet.
     const isSummaryPage = contentItem.relevance === 'A summary of the packet contents.';
     const isMentioned = contentItem.url && mentionedLinks.has(contentItem.url);
     
-    // Check if the packet contains any media files.
     const hasMedia = instance.contents.some(item => item.type === 'media');
 
-    // A card is visible if:
-    // 1. It IS media.
-    // 2. It's the designated summary page.
-    // 3. It has been visited.
-    // 4. It has been mentioned by playing media.
-    // 5. It is an external link AND there is no media in the packet to reveal it.
     const isVisible = type === 'media' || isSummaryPage || isVisited || isMentioned || ((type === 'external' || type === 'generated') && !hasMedia);
 
     if (!isVisible) {
@@ -560,7 +542,6 @@ export function updateActiveCardHighlight(canonicalPacketUrl) {
 
     let activeCardElement = null;
     cardsContainer.querySelectorAll('.card').forEach(card => {
-        // Highlight is now based on an exact match with the canonical packet URL.
         const isActive = (canonicalPacketUrl && card.dataset.url === canonicalPacketUrl);
         card.classList.toggle('active', isActive);
         if (isActive) {
@@ -576,13 +557,19 @@ export function updateActiveCardHighlight(canonicalPacketUrl) {
 // --- Action Handlers ---
 
 function handleCloseTabGroup(tabGroupId) {
-    // --- THE FIX: Only send the message. Do not navigate the UI. ---
     sendMessageToBackground({
         action: 'remove_tab_groups',
         data: { groupIds: [tabGroupId] }
     }).catch(err => {
         logger.error("DetailView", `Error sending close group message: ${err.message}`);
     });
+
+    // --- START OF THE FIX ---
+    // Explicitly navigate the sidebar UI to the root view immediately.
+    if (typeof navigateTo === 'function') {
+        navigateTo('root');
+    }
+    // --- END OF THE FIX ---
 }
 export async function stopAndClearActiveAudio() {
     sendMessageToBackground({
