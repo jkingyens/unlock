@@ -105,7 +105,6 @@ const initializationPromise = new Promise(resolve => {
     // to run and eventually call resolveInitialization().
 })();
 
-const ACTIVE_MEDIA_KEY = 'activeMediaPlaybackState';
 const AUDIO_KEEP_ALIVE_ALARM = 'audio-keep-alive';
 
 // This object holds the current state and is exported for other modules to read.
@@ -115,34 +114,27 @@ export let activeMediaPlayback = {
     pageId: null,
     isPlaying: false,
     topic: '',
-    currentTime: 0,
-    duration: 0,
-    mentionedMediaLinks: [],
-    lastMentionedLink: null
 };
 
 // This is the single, authoritative function for clearing the in-memory state.
 export async function resetActiveMediaPlayback() {
+    if (activeMediaPlayback.isPlaying && activeMediaPlayback.instanceId && activeMediaPlayback.pageId) {
+        await saveCurrentTime(activeMediaPlayback.instanceId, activeMediaPlayback.pageId);
+    }
     logger.log('Background', 'CRITICAL LOG: Resetting global activeMediaPlayback state.');
     
-    // FIX: Define the initial state *inside* the function.
-    // This resolves the ReferenceError because the constant is now in the correct scope.
     const initialMediaPlaybackState = {
         tabId: null,
         instanceId: null,
         pageId: null,
         isPlaying: false,
         topic: '',
-        currentTime: 0,
-        duration: 0,
-        mentionedMediaLinks: [],
-        lastMentionedLink: null
     };
 
     activeMediaPlayback = { ...initialMediaPlaybackState };
     
-    // Broadcast the cleared state to all UI components to ensure they hide.
-    await setMediaPlaybackState({}, { source: 'reset' });
+    await storage.removeSession(CONFIG.STORAGE_KEYS.ACTIVE_MEDIA_KEY);
+    await notifyUIsOfStateChange();
 }
 
 // Rule refresh alarm name
@@ -208,6 +200,15 @@ export async function controlAudioInOffscreen(command, data) {
 // --- Universal Script Injection ---
 async function injectOverlayScripts(tabId) {
     try {
+        // --- START OF THE FIX ---
+        // Check if the tab exists and has a valid URL before trying to inject.
+        // This prevents errors when tabs are closed during other operations.
+        const tab = await chrome.tabs.get(tabId);
+        if (!tab || !tab.url || !tab.url.startsWith('http')) {
+            return;
+        }
+        // --- END OF THE FIX ---
+
         await chrome.scripting.executeScript({
             target: { tabId: tabId },
             files: ['overlay.js']
@@ -217,89 +218,139 @@ async function injectOverlayScripts(tabId) {
             files: ['overlay.css']
         });
     } catch (e) {
-        // This is expected to fail on chrome:// pages, store pages, etc. We can safely ignore these errors.
-
         const expectedErrors = [
             "Cannot access a chrome:// URL",
             "Cannot access a chrome-extension:// URL",
             "The tab was closed.",
             "No tab with id",
-            "Cannot access contents of the page" // For pages like the Chrome Web Store
+            "Cannot access contents of the page",
+            "Frame with ID 0 was removed." // Explicitly ignore this error now
         ];
-        // Only log errors that are not expected.
         if (!expectedErrors.some(msg => e.message.includes(msg))) {
             logger.error('Background:injectOverlayScripts', `Failed to inject scripts into tab ${tabId}`, e);
         }
-
     }
+}
+
+function findMediaItemInInstance(instance, pageId) {
+    if (!instance || !instance.contents || !pageId) return null;
+    for (const item of instance.contents) {
+        if (item.pageId === pageId) return item;
+        if (item.type === 'alternative' && item.alternatives) {
+            const found = item.alternatives.find(alt => alt.pageId === pageId);
+            if (found) return found;
+        }
+    }
+    return null;
+}
+
+function calculateLastMentionedLink(instance, mediaItem) {
+    if (!instance || !mediaItem || !mediaItem.timestamps || typeof mediaItem.currentTime !== 'number') {
+        return null;
+    }
+    let lastMentionedTimestamp = null;
+    mediaItem.timestamps.forEach(ts => {
+        if (mediaItem.currentTime >= ts.startTime) {
+            if (!lastMentionedTimestamp || ts.startTime > lastMentionedTimestamp.startTime) {
+                lastMentionedTimestamp = ts;
+            }
+        }
+    });
+    const linkItem = lastMentionedTimestamp ? instance.contents.find(i => i.url === lastMentionedTimestamp.url) : null;
+    return linkItem ? { url: linkItem.url, title: linkItem.title } : null;
+}
+
+
+export async function saveCurrentTime(instanceId, pageId, providedCurrentTime, isStopping = false) {
+    try {
+        const instance = await storage.getPacketInstance(instanceId);
+        if (!instance) return;
+
+        const mediaItem = findMediaItemInInstance(instance, pageId);
+        if (!mediaItem) return;
+
+        let timeToSave = providedCurrentTime;
+        if (typeof timeToSave === 'undefined') {
+            const response = await controlAudioInOffscreen('get_current_time', { pageId });
+            if (response.success) {
+                timeToSave = response.currentTime;
+            }
+        }
+
+        if (typeof timeToSave === 'number') {
+            mediaItem.currentTime = isStopping ? 0 : timeToSave;
+            await storage.savePacketInstance(instance);
+            logger.log('Background:saveCurrentTime', `Saved currentTime ${mediaItem.currentTime} for ${pageId}`);
+        }
+    } catch (error) {
+        logger.error('Background:saveCurrentTime', 'Error saving playback time', error);
+    }
+}
+
+export async function notifyUIsOfStateChange(instanceOverride = null, options = {}) {
+    let instance;
+    if (instanceOverride) {
+        instance = instanceOverride;
+    } else if (activeMediaPlayback.instanceId) {
+        instance = await storage.getPacketInstance(activeMediaPlayback.instanceId);
+    }
+
+    if (!instance) {
+        sidebarHandler.notifySidebar('playback_state_updated', { ...activeMediaPlayback, isPlaying: false, currentTime: 0, duration: 0, mentionedMediaLinks: [], lastMentionedLink: null });
+        const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (activeTab) {
+             try {
+                 await injectOverlayScripts(activeTab.id);
+                 await chrome.tabs.sendMessage(activeTab.id, {
+                    action: 'sync_overlay_state',
+                    data: { isVisible: false }
+                });
+             } catch(e) {}
+        }
+        return;
+    }
+
+    const mediaItem = findMediaItemInInstance(instance, activeMediaPlayback.pageId);
+    const playbackStateForUI = {
+        ...activeMediaPlayback,
+        currentTime: mediaItem?.currentTime || 0,
+        duration: mediaItem?.duration || 0,
+        mentionedMediaLinks: instance.mentionedMediaLinks || [],
+        lastMentionedLink: calculateLastMentionedLink(instance, mediaItem),
+        ...options
+    };
+
+    const { isSidebarOpen } = await storage.getSession({ isSidebarOpen: false });
+    const overlayEnabled = await shouldShowOverlay();
+    playbackStateForUI.isVisible = !!activeMediaPlayback.pageId && !isSidebarOpen && overlayEnabled;
+
+    if (activeMediaPlayback.tabId) {
+        try {
+            await injectOverlayScripts(activeMediaPlayback.tabId);
+            await chrome.tabs.sendMessage(activeMediaPlayback.tabId, {
+                action: 'sync_overlay_state',
+                data: playbackStateForUI
+            });
+        } catch (e) {}
+    }
+    sidebarHandler.notifySidebar('playback_state_updated', playbackStateForUI);
 }
 
 
 export async function setMediaPlaybackState(newState, options = { animate: false, source: 'unknown' }) {
-    // --- THE FIX: Only log state updates that are not high-frequency time updates ---
-    if (options.source !== 'time_update') {
-        logger.log('Background:setMediaPlaybackState', 'State update requested.', {
-            source: options.source,
-            newState: newState,
-            currentMentionedLinks: activeMediaPlayback.mentionedMediaLinks
-        });
-    }
-    // --- END of the fix ---
+    // This function is now a legacy wrapper, the main logic is in notifyUIsOfStateChange
+    // It's kept for compatibility with a few call sites that use it.
+    const oldLink = calculateLastMentionedLink(await storage.getPacketInstance(activeMediaPlayback.instanceId), findMediaItemInInstance(await storage.getPacketInstance(activeMediaPlayback.instanceId), activeMediaPlayback.pageId));
+    
+    activeMediaPlayback = { ...activeMediaPlayback, ...newState };
 
-    const oldLink = activeMediaPlayback.lastMentionedLink;
-    const { lastMentionedLink, ...restOfNewState } = newState;
-    const previousTabId = activeMediaPlayback.tabId;
+    const instance = await storage.getPacketInstance(activeMediaPlayback.instanceId);
+    if (!instance) return;
 
-    activeMediaPlayback = { ...activeMediaPlayback, ...restOfNewState };
-
-    let aNewLinkWasMentioned = false;
-    if (activeMediaPlayback.isPlaying && activeMediaPlayback.instanceId && activeMediaPlayback.pageId && typeof activeMediaPlayback.currentTime === 'number') {
-        try {
-            const instance = await storage.getPacketInstance(activeMediaPlayback.instanceId);
-            let mediaItem = null;
-            if (instance && instance.contents) {
-                for (const item of instance.contents) {
-                    if (item.pageId === activeMediaPlayback.pageId) { mediaItem = item; break; }
-                    if (item.type === 'alternative' && item.alternatives) {
-                        const found = item.alternatives.find(alt => alt.pageId === activeMediaPlayback.pageId);
-                        if (found) { mediaItem = found; break; }
-                    }
-                }
-            }
-
-            if (mediaItem && mediaItem.timestamps && instance) {
-                const mentionedUrls = new Set(instance.mentionedMediaLinks || []);
-                let lastMentionedTimestamp = null;
-
-                mediaItem.timestamps.forEach(ts => {
-                    if (activeMediaPlayback.currentTime >= ts.startTime) {
-                        mentionedUrls.add(ts.url);
-                        if (!lastMentionedTimestamp || ts.startTime > lastMentionedTimestamp.startTime) {
-                            lastMentionedTimestamp = ts;
-                        }
-                    }
-                });
-                
-                const linkItem = lastMentionedTimestamp ? instance.contents.find(i => i.url === lastMentionedTimestamp.url) : null;
-                const newLink = linkItem ? { url: linkItem.url, title: linkItem.title } : null;
-
-                if (newLink && (!oldLink || newLink.url !== oldLink.url)) {
-                    activeMediaPlayback.lastMentionedLink = newLink;
-                    aNewLinkWasMentioned = true;
-                } else if (!newLink && oldLink) {
-                    activeMediaPlayback.lastMentionedLink = null;
-                }
-
-                if (mentionedUrls.size > (instance.mentionedMediaLinks || []).length) {
-                    instance.mentionedMediaLinks = Array.from(mentionedUrls);
-                    await storage.savePacketInstance(instance);
-                }
-                activeMediaPlayback.mentionedMediaLinks = instance.mentionedMediaLinks;
-            }
-        } catch (error) {
-            logger.error('Background:setMediaPlaybackState', 'Error calculating/saving mentioned links', error);
-        }
-    }
+    const mediaItem = findMediaItemInInstance(instance, activeMediaPlayback.pageId);
+    const newLink = calculateLastMentionedLink(instance, mediaItem);
+    
+    const aNewLinkWasMentioned = newLink && (!oldLink || newLink.url !== oldLink.url);
 
     const isPlaying = activeMediaPlayback.isPlaying;
     const hasActiveTrack = !!activeMediaPlayback.pageId;
@@ -311,60 +362,21 @@ export async function setMediaPlaybackState(newState, options = { animate: false
     }
 
     if (hasActiveTrack) {
-        await storage.setSession({ [ACTIVE_MEDIA_KEY]: activeMediaPlayback });
+        await storage.setSession({ [CONFIG.STORAGE_KEYS.ACTIVE_MEDIA_KEY]: activeMediaPlayback });
     } else {
-        await storage.removeSession(ACTIVE_MEDIA_KEY);
+        await storage.removeSession(CONFIG.STORAGE_KEYS.ACTIVE_MEDIA_KEY);
     }
-
-    const { isSidebarOpen } = await storage.getSession({ isSidebarOpen: false });
-    const overlayEnabled = await shouldShowOverlay();
-    const isVisible = hasActiveTrack && !isSidebarOpen && overlayEnabled;
-
-    const finalState = {
-        ...activeMediaPlayback,
-        isVisible,
-        animate: options.animate,
+    
+    await notifyUIsOfStateChange(instance, {
+        ...options,
         animateLinkMention: aNewLinkWasMentioned && options.source === 'time_update',
-        showVisitedAnimation: options.showVisitedAnimation || false
-    };
-    
-    let targetTabId = activeMediaPlayback.tabId;
-    if (!targetTabId) {
-        try {
-            const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-            if (activeTab) {
-                targetTabId = activeTab.id;
-            }
-        } catch (e) {}
-    }
-    
-    if (previousTabId && previousTabId !== targetTabId) {
-         try {
-             await injectOverlayScripts(previousTabId);
-             await chrome.tabs.sendMessage(previousTabId, {
-                action: 'sync_overlay_state',
-                data: { isVisible: false }
-            });
-         } catch(e) {}
-    }
-    
-    if (targetTabId) {
-        try {
-            await injectOverlayScripts(targetTabId);
-            await chrome.tabs.sendMessage(targetTabId, {
-                action: 'sync_overlay_state',
-                data: finalState
-            });
-        } catch(e) {}
-    }
-    
-    sidebarHandler.notifySidebar('playback_state_updated', activeMediaPlayback);
+    });
 }
 
 async function restoreMediaStateOnStartup() {
-    const data = await storage.getSession(ACTIVE_MEDIA_KEY);
-    if (data && data[ACTIVE_MEDIA_KEY]) {
-        activeMediaPlayback = data[ACTIVE_MEDIA_KEY];
+    const data = await storage.getSession(CONFIG.STORAGE_KEYS.ACTIVE_MEDIA_KEY);
+    if (data && data[CONFIG.STORAGE_KEYS.ACTIVE_MEDIA_KEY]) {
+        activeMediaPlayback = data[CONFIG.STORAGE_KEYS.ACTIVE_MEDIA_KEY];
     }
 }
 
@@ -501,7 +513,8 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
     // --- End of new code ---
 
     if (activeMediaPlayback.pageId) {
-        await setMediaPlaybackState({ tabId: tabId }, { animate: false, source: 'tab_switch' });
+        activeMediaPlayback.tabId = tabId;
+        await notifyUIsOfStateChange();
     }
     await sidebarHandler.updateActionForTab(tabId);
     const context = await getPacketContext(tabId);
@@ -587,12 +600,12 @@ chrome.runtime.onConnect.addListener(async (port) => {
   if (port.name === 'sidebar') {
     await storage.setSession({ isSidebarOpen: true });
     // FIX: Replaced the incorrect function call with the correct one.
-    await setMediaPlaybackState({}, { animate: false, source: 'sidebar_connect' });
+    await notifyUIsOfStateChange();
 
     port.onDisconnect.addListener(async () => {
       await storage.setSession({ isSidebarOpen: false });
       // FIX: Replaced the incorrect function call with the correct one.
-      await setMediaPlaybackState({}, { animate: true, source: 'sidebar_disconnect' });
+      await notifyUIsOfStateChange(null, { animate: true });
     });
   }
 });
