@@ -192,7 +192,7 @@ CRITICAL REQUIREMENTS:
 1.  **Output ONLY HTML BODY Content:** Your entire response MUST be only the HTML content that would go INSIDE the \`<body>\` tags. Do NOT include \`<!DOCTYPE html>\`, \`<html>\`, \`<head>\`, or \`<body>\` tags themselves.
 2.  **Pure Narrative Flow:** Write in a conversational and engaging tone. Instead of using headers (like <h2> or <h3>) to create sections, weave the content into a single, flowing narrative. Use paragraphs (<p>) to structure the text.
 3.  **Synthesize, Don't Just List:** Your narrative should connect the ideas from the different articles, showing how they relate to each other to build a complete picture of the topic.
-4.  **Timestampable Links:** For each link you create, you MUST add the attribute \`data-timestampable="true"\`. This is critical for the extension to process the links.
+4.  **Timestampable Links:** For each link you create, you MUST add the attribute \`data-timestampable="true"\`. This is critical for the extension to process the links. The user will listen to this summary while Browse the links. Space links out at a steady pace to provide a smooth listening experience. Avoid clustering multiple links together.
 5.  **Link to All Content:** You MUST naturally link to every article provided in the user prompt.
 6.  **Conclude with the Source Article:** The final paragraph of your narrative must provide a transition to the original source article, framing it as the culmination of the context you've provided.`;
 
