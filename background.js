@@ -501,6 +501,12 @@ async function reorderGroupFromChangeEvent(groupId) {
     if (!groupId || !(await shouldUseTabGroups())) return;
     try {
         const group = await chrome.tabGroups.get(groupId);
+
+        if (group.title === tabGroupHandler.DRAFT_GROUP_TITLE) {
+            await tabGroupHandler.orderDraftTabsInGroup(groupId);
+            return;
+        }
+
         const instanceId = getInstanceIdFromGroupTitle(group.title);
         if (instanceId) {
             const instance = await storage.getPacketInstance(instanceId);

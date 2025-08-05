@@ -16,7 +16,7 @@ import {
 
 const TAB_REORDER_INTERVAL = 5 * 60 * 1000; // 5 minutes
 let tabReorderIntervalId = null;
-const DRAFT_GROUP_TITLE = "Packet Builder";
+export const DRAFT_GROUP_TITLE = "Packet Builder";
 
 // --- Helper Functions (Internal - create/update/get group) ---
 function createTabGroupHelper(tabId, instance) {
@@ -120,41 +120,61 @@ export async function ejectTabFromGroup(tabId, instanceId) {
     }
 }
 
-export async function orderTabsInGroup(groupId, instance) {
+export async function orderDraftTabsInGroup(groupId, attempt = 1) {
     if (!(await shouldUseTabGroups())) return false;
-    if (!groupId || !instance || !Array.isArray(instance.contents)) return false;
+    if (!groupId) return false;
 
     try {
+        const sessionData = await storage.getSession('draftPacketForPreview');
+        const draftPacket = sessionData?.draftPacketForPreview;
+
+        if (!draftPacket || !Array.isArray(draftPacket.sourceContent)) {
+            logger.warn('TabGroupHandler:orderDraftTabsInGroup', 'Draft packet not found in session storage. Cannot order tabs.');
+            return false;
+        }
+
         const tabsInGroup = await chrome.tabs.query({ groupId });
         if (tabsInGroup.length <= 1) return true;
 
-        // *** FIX: Flatten the contents array to correctly find items within 'alternative' blocks. ***
-        const flatContents = instance.contents.flatMap(c => c.type === 'alternative' ? c.alternatives : c);
-
-        const contextPromises = tabsInGroup.map(tab => getPacketContext(tab.id).then(context => ({ tab, context })));
-        const tabsWithContext = await Promise.all(contextPromises);
+        const draftContentUrls = draftPacket.sourceContent.flatMap(item => {
+            if (item.type === 'alternative') {
+                return item.alternatives.map(alt => {
+                    if (alt.type === 'generated' && alt.pageId) {
+                        return chrome.runtime.getURL(`preview.html?pageId=${alt.pageId}`);
+                    }
+                    return alt.url;
+                });
+            }
+            if (item.type === 'generated' && item.pageId) {
+                return chrome.runtime.getURL(`preview.html?pageId=${item.pageId}`);
+            }
+            return item.url;
+        }).filter(Boolean);
 
         const tabPositions = [];
-        for (const { tab, context } of tabsWithContext) {
-            if (context && context.instanceId === instance.instanceId && context.canonicalPacketUrl) {
-                const contentIndex = flatContents.findIndex(c => c.url === context.canonicalPacketUrl);
-                tabPositions.push({ tabId: tab.id, index: contentIndex !== -1 ? contentIndex : Infinity });
-            }
+        for (const tab of tabsInGroup) {
+            const urlIndex = draftContentUrls.findIndex(url => url === tab.url);
+            tabPositions.push({ tabId: tab.id, index: urlIndex !== -1 ? urlIndex : Infinity });
         }
-        
-        if (tabPositions.length <= 1) return true;
 
+        if (tabPositions.length <= 1) return true;
+        
         tabPositions.sort((a, b) => a.index - b.index);
         const orderedTabIds = tabPositions.map(p => p.tabId);
         
         const minIndex = tabsInGroup.reduce((min, tab) => Math.min(min, tab.index), Infinity);
 
         if (orderedTabIds.length > 0 && minIndex !== Infinity) {
-             await chrome.tabs.move(orderedTabIds, { index: minIndex });
+            await chrome.tabs.move(orderedTabIds, { index: minIndex });
         }
         return true;
     } catch (error) {
-        logger.error('TabGroupHandler:orderTabsInGroup', `Error ordering tabs in group ${groupId}`, error);
+        if (error.message.includes('cannot be edited right now') && attempt < 3) {
+            logger.warn('TabGroupHandler:orderDraftTabsInGroup', `Retry attempt ${attempt}: Tabs locked, retrying in 500ms.`);
+            setTimeout(() => orderDraftTabsInGroup(groupId, attempt + 1), 500);
+            return true;
+        }
+        logger.error('TabGroupHandler:orderDraftTabsInGroup', `Error ordering draft tabs in group ${groupId}`, error);
         return false;
     }
 }
@@ -183,7 +203,6 @@ export async function handleRemoveTabGroups(data, sendResponse) {
 
                 const willCloseWindow = tabsInWindow.length === tabsInGroup.length;
                 
-                // --- THE FIX: Create the new tab *before* removing the old ones ---
                 if (willCloseWindow) {
                     await chrome.tabs.create({ windowId });
                 }
@@ -241,6 +260,50 @@ export function startTabReorderingChecks() {
      }, TAB_REORDER_INTERVAL);
 }
 
+export async function orderTabsInGroup(groupId, instance, attempt = 1) {
+    if (!(await shouldUseTabGroups())) return false;
+    if (!groupId || !instance || !Array.isArray(instance.contents)) return false;
+
+    try {
+        const tabsInGroup = await chrome.tabs.query({ groupId });
+        if (tabsInGroup.length <= 1) return true;
+
+        const flatContents = instance.contents.flatMap(c => c.type === 'alternative' ? c.alternatives : c);
+
+        const contextPromises = tabsInGroup.map(tab => getPacketContext(tab.id).then(context => ({ tab, context })));
+        const tabsWithContext = await Promise.all(contextPromises);
+
+        const tabPositions = [];
+        for (const { tab, context } of tabsWithContext) {
+            if (context && context.instanceId === instance.instanceId && context.canonicalPacketUrl) {
+                const contentIndex = flatContents.findIndex(c => c.url === context.canonicalPacketUrl);
+                tabPositions.push({ tabId: tab.id, index: contentIndex !== -1 ? contentIndex : Infinity });
+            }
+        }
+        
+        if (tabPositions.length <= 1) return true;
+
+        tabPositions.sort((a, b) => a.index - b.index);
+        const orderedTabIds = tabPositions.map(p => p.tabId);
+        
+        const minIndex = tabsInGroup.reduce((min, tab) => Math.min(min, tab.index), Infinity);
+
+        if (orderedTabIds.length > 0 && minIndex !== Infinity) {
+             await chrome.tabs.move(orderedTabIds, { index: minIndex });
+        }
+        return true;
+    } catch (error) {
+        if (error.message.includes('cannot be edited right now') && attempt < 3) {
+            logger.warn('TabGroupHandler:orderTabsInGroup', `Retry attempt ${attempt}: Tabs locked, retrying in 500ms.`);
+            setTimeout(() => orderTabsInGroup(groupId, instance, attempt + 1), 500);
+            return true;
+        }
+        logger.error('TabGroupHandler:orderTabsInGroup', `Error ordering tabs in group ${groupId}`, error);
+        return false;
+    }
+}
+
+
 export function stopTabReorderingChecks() {
      if (tabReorderIntervalId) {
          clearInterval(tabReorderIntervalId);
@@ -255,21 +318,17 @@ async function findOrCreateDraftGroup() {
         return existingGroup;
     }
 
-    // --- START OF THE FIX ---
-    // This is a more robust way to create an empty group in the user's current window.
     const window = await chrome.windows.getLastFocused({ populate: false, windowTypes: ['normal'] });
     if (!window) {
         throw new Error("Could not find a suitable window to create the draft tab group.");
     }
 
-    // Create a temporary tab, group it, name the group, then remove the temp tab.
     const tempTab = await chrome.tabs.create({ windowId: window.id, active: false });
     const groupId = await chrome.tabs.group({ tabIds: [tempTab.id] });
     await chrome.tabGroups.update(groupId, { title: DRAFT_GROUP_TITLE });
     await chrome.tabs.remove(tempTab.id);
     
     return await chrome.tabGroups.get(groupId);
-    // --- END OF THE FIX ---
 }
 
 export async function syncDraftGroup(desiredUrls) {
@@ -277,20 +336,30 @@ export async function syncDraftGroup(desiredUrls) {
         return { success: true, groupId: null };
     }
     try {
-        const draftGroup = await findOrCreateDraftGroup();
+        const [draftGroup] = await chrome.tabGroups.query({ title: DRAFT_GROUP_TITLE });
+        if (!draftGroup) {
+            return { success: true, groupId: null };
+        }
+
         const tabsInGroup = await chrome.tabs.query({ groupId: draftGroup.id });
-        const currentUrls = tabsInGroup.map(t => t.url);
+        const currentUrls = new Set(tabsInGroup.map(t => t.url));
 
-        const urlsToOpen = desiredUrls.filter(url => !currentUrls.includes(url));
         const tabsToClose = tabsInGroup.filter(tab => !desiredUrls.includes(tab.url));
-
         if (tabsToClose.length > 0) {
             await chrome.tabs.remove(tabsToClose.map(t => t.id));
         }
 
+        const urlsToOpen = desiredUrls.filter(url => !currentUrls.has(url));
         for (const url of urlsToOpen) {
-            await chrome.tabs.create({ url, groupId: draftGroup.id, active: false });
+            const newTab = await chrome.tabs.create({ url, active: false });
+            if (newTab?.id) {
+                await chrome.tabs.group({ tabIds: [newTab.id], groupId: draftGroup.id });
+            }
         }
+        
+        // --- START OF THE FIX ---
+        await orderDraftTabsInGroup(draftGroup.id);
+        // --- END OF THE FIX ---
         
         return { success: true, groupId: draftGroup.id };
 
@@ -303,12 +372,12 @@ export async function syncDraftGroup(desiredUrls) {
     }
 }
 
-
 export async function focusOrCreateDraftTab(url) {
     if (!(await shouldUseTabGroups())) {
         chrome.tabs.create({ url, active: true });
         return;
     }
+
     const [existingTab] = await chrome.tabs.query({ url });
     if (existingTab) {
         chrome.tabs.update(existingTab.id, { active: true });
@@ -318,8 +387,28 @@ export async function focusOrCreateDraftTab(url) {
         return;
     }
     
-    const draftGroup = await findOrCreateDraftGroup();
-    await chrome.tabs.create({ url, groupId: draftGroup.id, active: true });
+    let newTab;
+    let [draftGroup] = await chrome.tabGroups.query({ title: DRAFT_GROUP_TITLE });
+
+    newTab = await chrome.tabs.create({ url, active: true });
+
+    if (draftGroup) {
+        try {
+            await chrome.tabs.group({ tabIds: [newTab.id], groupId: draftGroup.id });
+        } catch (e) {
+            logger.warn('TabGroupHandler:focusOrCreateDraftTab', 'Could not add new tab to group. It may have been closed.', e);
+        }
+    } else {
+        const groupId = await chrome.tabs.group({ tabIds: [newTab.id] });
+        await chrome.tabGroups.update(groupId, { title: DRAFT_GROUP_TITLE });
+        draftGroup = await chrome.tabGroups.get(groupId);
+    }
+    
+    // --- START OF THE FIX ---
+    if (draftGroup) {
+        await orderDraftTabsInGroup(draftGroup.id);
+    }
+    // --- END OF THE FIX ---
 }
 
 export async function cleanupDraftGroup() {
