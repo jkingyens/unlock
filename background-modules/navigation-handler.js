@@ -17,22 +17,13 @@ import {
 import * as sidebarHandler from './sidebar-handler.js';
 import * as tabGroupHandler from './tab-group-handler.js';
 
-// --- FIX START ---
-// We change pendingVisitTimers from a Map to an Object to store more state.
-// It will now hold not just the timer, but the original intended URL.
 const pendingVisits = {};
-// --- FIX END ---
-
 const pendingNavigationActionTimers = new Map();
 
 export function clearPendingVisitTimer(tabId) {
-    // --- FIX START ---
-    // Update the logic to work with the new pendingVisits object.
     if (pendingVisits[tabId]?.timerId) {
         clearTimeout(pendingVisits[tabId].timerId);
-        // We leave the entry in place so a subsequent navigation can read its `intendedUrl`.
     }
-    // --- FIX END ---
 }
 
 function clearPendingNavigationActionTimer(tabId) {
@@ -68,34 +59,20 @@ export async function onHistoryStateUpdated(details) {
 }
 
 export async function checkAndPromptForCompletion(logPrefix, visitResult, instanceId) {
-    // Only proceed if the visit resulted in the packet being completed for the *first* time.
     if (visitResult?.success && visitResult?.justCompleted) {
-        // Get the most up-to-date instance data to check our flag.
         const instanceData = visitResult.instance || await storage.getPacketInstance(instanceId);
-
-        // If we have already shown the completion prompt for this packet, do nothing.
         if (!instanceData || instanceData.completionAcknowledged) {
             if(instanceData) logger.log('NavigationHandler', 'Completion already acknowledged for instance:', instanceId);
             return;
         }
-
         logger.log('NavigationHandler', 'Packet just completed. Acknowledging and showing prompt.', instanceId);
-
-        
         instanceData.completionAcknowledged = true;
         await storage.savePacketInstance(instanceData);
-        // Let the rest of the system know about this important state change.
         sidebarHandler.notifySidebar('packet_instance_updated', { instance: instanceData, source: 'completion_ack' });
-
-
-        // Now, proceed with the original logic of showing prompts.
         if (activeMediaPlayback.instanceId === instanceId) {
-            logger.log('NavigationHandler', 'Completed packet was the active media packet. Resetting player state.');
             await resetActiveMediaPlayback();
         }
-
         if (sidebarHandler.isSidePanelAvailable()) {
-            
             sidebarHandler.notifySidebar('show_confetti', { topic: instanceData.topic || '', instanceId: instanceId });
             if (await shouldUseTabGroups()) {
                 const browserState = await storage.getPacketBrowserState(instanceId);
@@ -113,17 +90,11 @@ export async function checkAndPromptForCompletion(logPrefix, visitResult, instan
 
 async function processNavigationEvent(tabId, finalUrl, details) {
     const logPrefix = `[NavigationHandler Tab ${tabId}]`;
-    
     let sessionData;
     
-    logger.log(logPrefix, '>>> NAVIGATION EVENT START <<<', {
-        url: finalUrl,
-        transition: `${details.transitionType} | ${details.transitionQualifiers.join(', ')}`,
-        details: details
-    });
-
+    logger.log(logPrefix, '>>> NAVIGATION EVENT START <<<', { url: finalUrl, transition: `${details.transitionType} | ${details.transitionQualifiers.join(', ')}` });
     await injectOverlayScripts(tabId);
-    clearPendingVisitTimer(tabId); // This will now just clear the timer, not the pending state.
+    clearPendingVisitTimer(tabId);
 
     const trustedIntentKey = `trusted_intent_${tabId}`;
     sessionData = await storage.getSession(trustedIntentKey);
@@ -142,7 +113,7 @@ async function processNavigationEvent(tabId, finalUrl, details) {
 
     if (currentContext) {
         const gracePeriodKey = `grace_period_${tabId}`;
-        sessionData = await storage.getSession(gracePeriodKey); 
+        sessionData = await storage.getSession(gracePeriodKey);
         if (sessionData[gracePeriodKey]) {
             const age = Date.now() - sessionData[gracePeriodKey];
             logger.log(logPrefix, `DECISION: Grace period is active (${age}ms old). Preserving original context and updating URL.`);
@@ -161,7 +132,7 @@ async function processNavigationEvent(tabId, finalUrl, details) {
                     for (const tab of allTabs) {
                         if (tab.id !== tabId) {
                             const otherContext = await getPacketContext(tab.id);
-                            if (otherContext && otherContext.instanceId === currentContext.instanceId && otherContext.canonicalPacketUrl === newItemInPacket.url) {
+                            if (otherContext?.instanceId === currentContext.instanceId && otherContext?.canonicalPacketUrl === newItemInPacket.url) {
                                 duplicateTab = tab;
                                 break;
                             }
@@ -169,13 +140,16 @@ async function processNavigationEvent(tabId, finalUrl, details) {
                     }
 
                     if (duplicateTab) {
-                        logger.log(logPrefix, `DECISION: User navigated to an item that is already open in tab ${duplicateTab.id}. Closing the pre-existing tab.`);
+                        logger.log(logPrefix, `DECISION: Found duplicate tab ${duplicateTab.id}. Closing it.`);
                         await chrome.tabs.remove(duplicateTab.id);
-                        await setPacketContext(tabId, currentContext.instanceId, newItemInPacket.url, finalUrl);
-                    } else {
-                         logger.log(logPrefix, 'DECISION: User navigated to another item within the same packet. Re-stamping tab.');
-                        await setPacketContext(tabId, currentContext.instanceId, newItemInPacket.url, finalUrl);
                     }
+                    
+                    // --- START OF THE FIX ---
+                    logger.log(logPrefix, 'DECISION: Re-stamping tab context for in-packet navigation and starting grace period.');
+                    await setPacketContext(tabId, currentContext.instanceId, newItemInPacket.url, finalUrl);
+                    await storage.setSession({ [`grace_period_${tabId}`]: Date.now() });
+                    setTimeout(() => storage.removeSession(`grace_period_${tabId}`), 250);
+                    // --- END OF THE FIX ---
 
                 } else if (!newItemInPacket) {
                     logger.log(logPrefix, 'DECISION: User navigated to a URL outside the packet. Demoting tab.');
@@ -196,21 +170,13 @@ async function processNavigationEvent(tabId, finalUrl, details) {
 
     if (finalInstance) {
         await reconcileBrowserState(tabId, finalInstance.instanceId, finalInstance, finalUrl);
-        
-        // --- FIX START ---
-        // Determine the "true" intended URL for the visit timer.
-        // If a visit was already pending, we preserve its URL. This handles the redirect.
         const originalIntendedUrl = pendingVisits[tabId]?.intendedUrl;
         const canonicalUrlForVisit = originalIntendedUrl || finalContext.canonicalPacketUrl;
-
-        const itemForVisitTimer = finalInstance.contents
-            .find(i => i.url === canonicalUrlForVisit);
+        const itemForVisitTimer = finalInstance.contents.find(i => i.url === canonicalUrlForVisit);
 
         if (itemForVisitTimer && !itemForVisitTimer.interactionBasedCompletion) {
-            // Pass the true intended URL to the timer function.
             startVisitTimer(tabId, finalInstance.instanceId, itemForVisitTimer.url, logPrefix);
         }
-        // --- FIX END ---
     }
 
     if (sidebarHandler.isSidePanelAvailable()) {
@@ -260,15 +226,11 @@ export async function startVisitTimer(tabId, instanceId, canonicalPacketUrl, log
     const settings = await storage.getSettings();
     const visitThresholdMs = (settings.visitThresholdSeconds ?? 5) * 1000;
 
-    // --- FIX START ---
-    // The commit logic is now self-contained within this function's closure.
     const visitTimer = setTimeout(async () => {
-        // Since the timer fired, the pending action is no longer needed.
         delete pendingVisits[tabId]; 
         try {
             const tab = await chrome.tabs.get(tabId);
             if (tab && tab.active) {
-                // We use the 'canonicalPacketUrl' passed to this function, which is the "true" intended URL.
                 const visitResult = await packetUtils.markUrlAsVisited(instanceId, canonicalPacketUrl);
                 if (visitResult.success && visitResult.modified) {
                     const updatedInstance = visitResult.instance || await storage.getPacketInstance(instanceId);
@@ -285,10 +247,8 @@ export async function startVisitTimer(tabId, instanceId, canonicalPacketUrl, log
         }
     }, visitThresholdMs);
 
-    // Store both the timer and the intended URL. This is the crucial state.
     pendingVisits[tabId] = {
         timerId: visitTimer,
         intendedUrl: canonicalPacketUrl
     };
-     // --- FIX END ---
 }
