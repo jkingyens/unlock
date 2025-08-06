@@ -91,6 +91,19 @@ export async function checkAndPromptForCompletion(logPrefix, visitResult, instan
 async function processNavigationEvent(tabId, finalUrl, details) {
     const logPrefix = `[NavigationHandler Tab ${tabId}]`;
     let sessionData;
+
+    try {
+        const tab = await chrome.tabs.get(tabId);
+        if (tab.groupId && tab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE) {
+            const group = await chrome.tabGroups.get(tab.groupId);
+            if (group.title === tabGroupHandler.DRAFT_GROUP_TITLE) {
+                logger.log('[Draft Debug]', 'Navigation event IGNORED for tab in Draft Packet group.', { tabId, url: finalUrl });
+                return;
+            }
+        }
+    } catch (e) {
+        // This can error if the tab/group disappears during the check. It's safe to ignore.
+    }
     
     logger.log(logPrefix, '>>> NAVIGATION EVENT START <<<', { url: finalUrl, transition: `${details.transitionType} | ${details.transitionQualifiers.join(', ')}` });
     await injectOverlayScripts(tabId);
