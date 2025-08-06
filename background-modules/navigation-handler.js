@@ -133,7 +133,7 @@ async function processNavigationEvent(tabId, finalUrl, details) {
         logger.log(logPrefix, 'DECISION: Found trusted intent token. Stamping tab context and setting grace period.');
         await setPacketContext(tabId, trustedContext.instanceId, trustedContext.canonicalPacketUrl, finalUrl);
         await storage.setSession({ [`grace_period_${tabId}`]: Date.now() });
-        setTimeout(() => storage.removeSession(`grace_period_${tabId}`), 1500);
+        setTimeout(() => storage.removeSession(`grace_period_${tabId}`), 250);
         await storage.removeSession(trustedIntentKey);
     }
 
