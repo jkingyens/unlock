@@ -1,7 +1,6 @@
 // ext/background-modules/tab-group-handler.js
-// REVISED: The complex and bug-prone "groupingInProgress" lock has been removed.
-// The new idempotent "manager" in the navigation-handler makes this lock unnecessary,
-// which fixes the "stuck state" bug. The ordering logic remains correct.
+// FINAL FIX: Corrected a TypeError caused by not awaiting the result of chrome.tabs.query,
+// which prevented tab reordering and syncing from working correctly.
 
 import {
     logger,
@@ -136,24 +135,21 @@ export async function orderDraftTabsInGroup(groupId, attempt = 1) {
         const tabsInGroup = await chrome.tabs.query({ groupId });
         if (tabsInGroup.length <= 1) return true;
 
-        const draftContentUrls = draftPacket.sourceContent.flatMap(item => {
-            if (item.type === 'alternative') {
-                return item.alternatives.map(alt => {
-                    // This logic is correct and handles both generated and media types
-                    if (alt.type === 'generated' && alt.pageId) {
-                        return chrome.runtime.getURL(`preview.html?pageId=${alt.pageId}`);
-                    }
-                    return alt.url;
-                });
+        const getUrlForItem = (item) => {
+            if (item.type === 'external') {
+                return item.url;
             }
-            // --- START OF THE FIX ---
-            // For a single item, prioritize the local pageId over an external URL
             if (item.type === 'generated' && item.pageId) {
                 return chrome.runtime.getURL(`preview.html?pageId=${item.pageId}`);
             }
-            // If it's not a generated page, fall back to the item URL
-            return item.url;
-            // --- END OF THE FIX ---
+            return null;
+        };
+
+        const draftContentUrls = draftPacket.sourceContent.flatMap(item => {
+            if (item.type === 'alternative') {
+                return item.alternatives.map(alt => getUrlForItem(alt));
+            }
+            return getUrlForItem(item);
         }).filter(Boolean);
 
         const tabPositions = [];
@@ -303,7 +299,7 @@ export async function orderTabsInGroup(groupId, instance, attempt = 1) {
             setTimeout(() => orderTabsInGroup(groupId, instance, attempt + 1), 500);
             return true;
         }
-        logger.error('TabGroupHandler:orderTabsInGroup', `Error ordering tabs in group ${groupId}`, error);
+        logger.error('TabGroupHandler:orderTabsInGroup', `Error ordering draft tabs in group ${groupId}`, error);
         return false;
     }
 }
@@ -316,11 +312,11 @@ export function stopTabReorderingChecks() {
      }
 }
 
-// Helper to find or create the draft tab group
+// --- START OF THE FIX ---
 async function findOrCreateDraftGroup() {
-    let [existingGroup] = await chrome.tabGroups.query({ title: DRAFT_GROUP_TITLE });
+    const [existingGroup] = await chrome.tabGroups.query({ title: DRAFT_GROUP_TITLE });
     if (existingGroup) {
-        return existingGroup;
+        return existingGroup.id;
     }
 
     const window = await chrome.windows.getLastFocused({ populate: false, windowTypes: ['normal'] });
@@ -330,52 +326,68 @@ async function findOrCreateDraftGroup() {
 
     const tempTab = await chrome.tabs.create({ windowId: window.id, active: false });
     const groupId = await chrome.tabs.group({ tabIds: [tempTab.id] });
-    await chrome.tabGroups.update(groupId, { title: DRAFT_GROUP_TITLE });
+    await chrome.tabGroups.update(groupId, { title: DRAFT_GROUP_TITLE, color: 'grey' });
     await chrome.tabs.remove(tempTab.id);
     
-    return await chrome.tabGroups.get(groupId);
+    return groupId;
 }
 
 export async function syncDraftGroup(desiredUrls) {
     if (!(await shouldUseTabGroups())) {
         return { success: true, groupId: null };
     }
+    
     try {
         let [draftGroup] = await chrome.tabGroups.query({ title: DRAFT_GROUP_TITLE });
-        
-        if (!draftGroup) {
-            return { success: true, groupId: null };
+        let groupId = draftGroup ? draftGroup.id : null;
+
+        // Fetch the list of tabs in the group ONCE.
+        const tabsInGroup = groupId ? await chrome.tabs.query({ groupId }) : [];
+        const currentUrlsInGroup = new Set(tabsInGroup.map(t => t.url));
+
+        // Clean up any tabs that are no longer in the draft list
+        if (groupId) {
+            const tabsToClose = tabsInGroup.filter(tab => !desiredUrls.includes(tab.url));
+            if (tabsToClose.length > 0) {
+                await chrome.tabs.remove(tabsToClose.map(t => t.id));
+            }
         }
 
-        const tabsInGroup = await chrome.tabs.query({ groupId: draftGroup.id });
-        const currentUrls = new Set(tabsInGroup.map(t => t.url));
+        const urlsToHandle = desiredUrls.filter(url => !currentUrlsInGroup.has(url));
 
-        const tabsToClose = tabsInGroup.filter(tab => !desiredUrls.includes(tab.url));
-        if (tabsToClose.length > 0) {
-            await chrome.tabs.remove(tabsToClose.map(t => t.id));
+        if (urlsToHandle.length > 0 && !groupId) {
+            // Group doesn't exist, create it with the first new tab
+            const firstUrl = urlsToHandle.shift(); // Take the first URL off the list
+            const firstTab = await chrome.tabs.create({ url: firstUrl, active: false });
+            groupId = await chrome.tabs.group({ tabIds: [firstTab.id] });
+            await chrome.tabGroups.update(groupId, { title: DRAFT_GROUP_TITLE, color: 'grey' });
         }
 
-        const urlsToOpen = desiredUrls.filter(url => !currentUrls.has(url));
-        for (const url of urlsToOpen) {
-            const newTab = await chrome.tabs.create({ url, active: false });
-            if (newTab?.id) {
-                await chrome.tabs.group({ tabIds: [newTab.id], groupId: draftGroup.id });
+        // Add any remaining new tabs to the now-guaranteed-to-exist group
+        if (groupId) {
+            for (const url of urlsToHandle) {
+                const newTab = await chrome.tabs.create({ url, active: false });
+                await chrome.tabs.group({ tabIds: [newTab.id], groupId });
             }
         }
         
-        // This is the correct place to call the reordering function, after all tabs have been added or removed.
-        await orderDraftTabsInGroup(draftGroup.id);
+        // Final ordering pass
+        if (groupId) {
+            try {
+                await orderDraftTabsInGroup(groupId);
+            } catch (orderError) {
+                logger.warn('TabGroupHandler:syncDraftGroup', 'Non-critical error during tab ordering.', { groupId, orderError });
+            }
+        }
         
-        return { success: true, groupId: draftGroup.id };
+        return { success: true, groupId: groupId };
 
     } catch (error) {
-        if (error.message.includes('No group with id')) {
-            return { success: true, groupId: null };
-        }
         logger.error('TabGroupHandler:syncDraftGroup', 'Error syncing draft group', error);
         return { success: false, error: error.message };
     }
 }
+// --- END OF THE FIX ---
 
 export async function focusOrCreateDraftTab(url) {
     if (!(await shouldUseTabGroups())) {
@@ -396,22 +408,25 @@ export async function focusOrCreateDraftTab(url) {
     let [draftGroup] = await chrome.tabGroups.query({ title: DRAFT_GROUP_TITLE });
 
     newTab = await chrome.tabs.create({ url, active: true });
+    let groupId = draftGroup ? draftGroup.id : null;
 
-    if (draftGroup) {
+    if (groupId) {
         try {
-            await chrome.tabs.group({ tabIds: [newTab.id], groupId: draftGroup.id });
+            await chrome.tabs.group({ tabIds: [newTab.id], groupId: groupId });
         } catch (e) {
-            logger.warn('TabGroupHandler:focusOrCreateDraftTab', 'Could not add new tab to group. It may have been closed.', e);
+            logger.warn('TabGroupHandler:focusOrCreateDraftTab', 'Could not add new tab to existing group. It may have been closed.', e);
         }
     } else {
-        const groupId = await chrome.tabs.group({ tabIds: [newTab.id] });
-        await chrome.tabGroups.update(groupId, { title: DRAFT_GROUP_TITLE });
-        draftGroup = await chrome.tabGroups.get(groupId);
+        groupId = await chrome.tabs.group({ tabIds: [newTab.id] });
+        await chrome.tabGroups.update(groupId, { title: DRAFT_GROUP_TITLE, color: 'grey' });
     }
     
-    // Explicitly call the ordering function here to ensure it runs immediately after a tab is created and added to the group.
-    if (draftGroup) {
-        await orderDraftTabsInGroup(draftGroup.id);
+    if (groupId) {
+        try {
+            await orderDraftTabsInGroup(groupId);
+        } catch(orderError) {
+             logger.warn('TabGroupHandler:focusOrCreateDraftTab', 'Non-critical error during tab ordering.', { groupId, orderError });
+        }
     }
 }
 

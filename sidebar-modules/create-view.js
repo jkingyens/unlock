@@ -109,6 +109,7 @@ export async function prepareCreateView(imageToEdit = null) {
     
     initialDraftState = JSON.stringify(draftPacket.sourceContent);
     renderDraftContentList();
+    logger.log('[Draft Debug]', 'prepareCreateView completed. Calling syncDraftGroup.');
     syncDraftGroup();
 }
 
@@ -127,7 +128,9 @@ function getUrlForItem(item, index) {
 // --- Tab Group Management for Drafts ---
 
 async function syncDraftGroup() {
+    logger.log('[Draft Debug]', 'Initiating syncDraftGroup from create-view.');
     if (!(await shouldUseTabGroups()) || isTabGroupSyncing) {
+        logger.log('[Draft Debug]', 'syncDraftGroup skipped.', { tabGroups: await shouldUseTabGroups(), syncing: isTabGroupSyncing });
         return;
     }
     isTabGroupSyncing = true;
@@ -141,12 +144,15 @@ async function syncDraftGroup() {
             })
             .filter(Boolean);
 
+        logger.log('[Draft Debug]', 'Sending sync_draft_group message to background.', { desiredUrls });
+
         const response = await sendMessageToBackground({
             action: 'sync_draft_group',
             data: { desiredUrls }
         });
         if (response.success) {
             draftTabGroupId = response.groupId;
+            logger.log('[Draft Debug]', 'sync_draft_group message successful.', { returnedGroupId: draftTabGroupId });
         }
     } catch (error) {
         logger.error('CreateView', 'Error syncing draft group', error);
