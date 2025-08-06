@@ -139,16 +139,21 @@ export async function orderDraftTabsInGroup(groupId, attempt = 1) {
         const draftContentUrls = draftPacket.sourceContent.flatMap(item => {
             if (item.type === 'alternative') {
                 return item.alternatives.map(alt => {
+                    // This logic is correct and handles both generated and media types
                     if (alt.type === 'generated' && alt.pageId) {
                         return chrome.runtime.getURL(`preview.html?pageId=${alt.pageId}`);
                     }
                     return alt.url;
                 });
             }
+            // --- START OF THE FIX ---
+            // For a single item, prioritize the local pageId over an external URL
             if (item.type === 'generated' && item.pageId) {
                 return chrome.runtime.getURL(`preview.html?pageId=${item.pageId}`);
             }
+            // If it's not a generated page, fall back to the item URL
             return item.url;
+            // --- END OF THE FIX ---
         }).filter(Boolean);
 
         const tabPositions = [];
@@ -336,7 +341,8 @@ export async function syncDraftGroup(desiredUrls) {
         return { success: true, groupId: null };
     }
     try {
-        const [draftGroup] = await chrome.tabGroups.query({ title: DRAFT_GROUP_TITLE });
+        let [draftGroup] = await chrome.tabGroups.query({ title: DRAFT_GROUP_TITLE });
+        
         if (!draftGroup) {
             return { success: true, groupId: null };
         }
@@ -357,9 +363,8 @@ export async function syncDraftGroup(desiredUrls) {
             }
         }
         
-        // --- START OF THE FIX ---
+        // This is the correct place to call the reordering function, after all tabs have been added or removed.
         await orderDraftTabsInGroup(draftGroup.id);
-        // --- END OF THE FIX ---
         
         return { success: true, groupId: draftGroup.id };
 
@@ -404,11 +409,10 @@ export async function focusOrCreateDraftTab(url) {
         draftGroup = await chrome.tabGroups.get(groupId);
     }
     
-    // --- START OF THE FIX ---
+    // Explicitly call the ordering function here to ensure it runs immediately after a tab is created and added to the group.
     if (draftGroup) {
         await orderDraftTabsInGroup(draftGroup.id);
     }
-    // --- END OF THE FIX ---
 }
 
 export async function cleanupDraftGroup() {
