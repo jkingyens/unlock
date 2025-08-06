@@ -482,33 +482,59 @@ const packetUtils = {
         return options.returnItem ? null : false;
     }
 
+    // --- Start of FIX ---
+    let decodedLoadedUrl;
+    try {
+        decodedLoadedUrl = decodeURIComponent(loadedUrl);
+    } catch (e) {
+        // If the URL is malformed, it's unlikely to match anything.
+        // We can log this eventuality for debugging purposes.
+        logger.warn('isUrlInPacket', 'Could not decode loadedUrl', { loadedUrl, error: e });
+        decodedLoadedUrl = loadedUrl; // Fallback to the original URL if decoding fails
+    }
+    // --- End of FIX ---
+
     for (const item of instance.contents) {
         if (item.type === 'alternative') {
             for (const alt of item.alternatives) {
-                const result = this.isUrlInPacket(loadedUrl, { contents: [alt] }, options);
+                // Pass the already-decoded URL down to avoid redundant decoding
+                const result = this.isUrlInPacket(decodedLoadedUrl, { contents: [alt] }, options);
                 if (result) return result;
             }
         } else {
-            if (item.type === 'external' && item.url === loadedUrl) {
-                return options.returnItem ? item : true;
+             // --- Start of FIX ---
+            let decodedItemUrl;
+            if (item.url) {
+                try {
+                    decodedItemUrl = decodeURIComponent(item.url);
+                } catch (e) {
+                    logger.warn('isUrlInPacket', 'Could not decode item.url', { itemUrl: item.url, error: e });
+                    decodedItemUrl = item.url; // Fallback to the original URL
+                }
             }
             
+            if (item.type === 'external' && decodedItemUrl && decodedItemUrl === decodedLoadedUrl) {
+                 return options.returnItem ? item : true;
+            }
+            // --- End of FIX ---
+
             if ((item.type === 'generated' || item.type === 'media') && item.url) {
                 // *** THE FIX: Check for direct match first, for when called with canonical URL. ***
-                if (item.url === loadedUrl) {
+                if (decodedItemUrl === decodedLoadedUrl) {
                     return options.returnItem ? item : true;
                 }
                 
                 // Then, check for pre-signed URL match, for when called with browser URL.
                 if (item.publishContext) {
                     try {
-                        const loadedUrlObj = new URL(loadedUrl);
+                        const loadedUrlObj = new URL(loadedUrl); // Use original loadedUrl for URL object
                         const { publishContext } = item;
                         let expectedPathname = (publishContext.provider === 'google')
                             ? `/${publishContext.bucket}/${item.url}`
                             : `/${item.url}`;
                         
-                        if (decodeURIComponent(loadedUrlObj.pathname) === expectedPathname) {
+                        // Compare decoded pathnames
+                        if (decodeURIComponent(loadedUrlObj.pathname) === decodeURIComponent(expectedPathname)) {
                             return options.returnItem ? item : true;
                         }
                     } catch (e) { /* loadedUrl might not be a valid URL. */ }
