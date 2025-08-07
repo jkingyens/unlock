@@ -317,11 +317,6 @@ async function handleBackgroundMessage(message) {
                 rootView.removeImageRow(data.imageId);
             }
             break;
-        case 'packet_creation_failed':
-            dialogHandler.hideImportDialog();
-            rootView.removeInProgressStencil(data.imageId);
-            showRootViewStatus(`Creation failed: ${data?.error || 'Unknown'}`, 'error');
-            break;
         case 'packet_instance_created':
             showRootViewStatus(`Started packet '${data.instance.topic}'.`, 'success');
             if (currentView !== 'create') {
@@ -338,24 +333,26 @@ async function handleBackgroundMessage(message) {
             }
             break;
         case 'packet_instance_deleted':
+            // --- START OF THE FIX ---
+            const wasViewingDeletedPacket = data?.packetId === currentInstanceId;
+
             if (currentView === 'root') {
                 rootView.removeInstanceRow(data.packetId);
             }
 
-            if (data?.packetId === currentInstanceId) {
+            if (wasViewingDeletedPacket) {
                 currentInstanceId = null;
                 currentInstanceData = null;
+                // If the user deleted the packet they were actively looking at,
+                // navigate them safely back to the root view.
+                if (currentView === 'packet-detail') {
+                    navigateTo('root');
+                }
             }
 
             // Always clear the detail view's internal state to prevent zombie saves.
             detailView.clearCurrentDetailView();
             detailView.stopAudioIfPacketDeleted(data.packetId);
-            
-            // If the user somehow deleted the packet they were actively looking at,
-            // navigate them safely back to the root view.
-            if (data?.packetId === currentInstanceId && currentView === 'packet-detail') {
-                navigateTo('root');
-            }
             // --- END OF THE FIX ---
             break;
         case 'packet_deletion_complete':
