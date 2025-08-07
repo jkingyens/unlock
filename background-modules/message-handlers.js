@@ -1,6 +1,6 @@
 // ext/background-modules/message-handlers.js
-// FINAL FIX: Corrected the payload sent to the request_playback_action handler
-// from within the audio_time_update handler, which was causing an 'undefined intent' error.
+// REVISED: The audio_time_update handler now checks if the sidebar is open
+// before automatically pausing playback on a link mention.
 
 import {
     logger,
@@ -460,9 +460,10 @@ const actionHandlers = {
         
         // --- START OF THE FIX ---
         if (animateLinkMention) {
-            // The 'data' parameter for the handler is the first argument.
-            // It expects an object with an 'intent' property.
-            await actionHandlers.request_playback_action({ intent: 'pause' }, {}, () => {});
+            const { isSidebarOpen } = await storage.getSession({ isSidebarOpen: false });
+            if (!isSidebarOpen) {
+                await actionHandlers.request_playback_action({ intent: 'pause' }, {}, () => {});
+            }
         }
         // --- END OF THE FIX ---
     },
