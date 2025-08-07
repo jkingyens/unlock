@@ -1,4 +1,7 @@
 // ext/background-modules/navigation-handler.js
+// FINAL FIX: Moved the clearPendingVisitTimer call to the absolute beginning of the
+// navigation event processing to definitively fix a race condition where a slow timer
+// could mark the wrong page as visited during rapid navigation.
 
 import {
     logger,
@@ -23,6 +26,7 @@ const pendingNavigationActionTimers = new Map();
 export function clearPendingVisitTimer(tabId) {
     if (pendingVisits[tabId]?.timerId) {
         clearTimeout(pendingVisits[tabId].timerId);
+        delete pendingVisits[tabId];
     }
 }
 
@@ -50,11 +54,13 @@ async function injectOverlayScripts(tabId) {
 
 export async function onCommitted(details) {
     if (details.frameId !== 0 || !details.url?.startsWith('http')) return;
+    logger.log(`[NavigationHandler Tab ${details.tabId}]`, `onCommitted event fired for URL: ${details.url}`);
     await processNavigationEvent(details.tabId, details.url, details);
 }
 
 export async function onHistoryStateUpdated(details) {
     if (details.frameId !== 0 || !details.url?.startsWith('http')) return;
+    logger.log(`[NavigationHandler Tab ${details.tabId}]`, `onHistoryStateUpdated event fired for URL: ${details.url}`);
     await processNavigationEvent(details.tabId, details.url, details);
 }
 
@@ -90,27 +96,18 @@ export async function checkAndPromptForCompletion(logPrefix, visitResult, instan
 
 async function processNavigationEvent(tabId, finalUrl, details) {
     const logPrefix = `[NavigationHandler Tab ${tabId}]`;
-    let sessionData;
-
-    try {
-        const tab = await chrome.tabs.get(tabId);
-        if (tab.groupId && tab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE) {
-            const group = await chrome.tabGroups.get(tab.groupId);
-            if (group.title === tabGroupHandler.DRAFT_GROUP_TITLE) {
-                logger.log('[Draft Debug]', 'Navigation event IGNORED for tab in Draft Packet group.', { tabId, url: finalUrl });
-                return;
-            }
-        }
-    } catch (e) {
-        // This can error if the tab/group disappears during the check. It's safe to ignore.
-    }
     
+    // --- START OF THE FIX ---
+    // Clear any pending visit timer for this tab at the very beginning of the event.
+    clearPendingVisitTimer(tabId);
+    logger.log(logPrefix, 'Cleared any pending visit timers for this tab.');
+    // --- END OF THE FIX ---
+
     logger.log(logPrefix, '>>> NAVIGATION EVENT START <<<', { url: finalUrl, transition: `${details.transitionType} | ${details.transitionQualifiers.join(', ')}` });
     await injectOverlayScripts(tabId);
-    clearPendingVisitTimer(tabId);
 
     const trustedIntentKey = `trusted_intent_${tabId}`;
-    sessionData = await storage.getSession(trustedIntentKey);
+    const sessionData = await storage.getSession(trustedIntentKey);
     const trustedContext = sessionData[trustedIntentKey];
 
     if (trustedContext) {
@@ -126,9 +123,9 @@ async function processNavigationEvent(tabId, finalUrl, details) {
 
     if (currentContext) {
         const gracePeriodKey = `grace_period_${tabId}`;
-        sessionData = await storage.getSession(gracePeriodKey);
-        if (sessionData[gracePeriodKey]) {
-            const age = Date.now() - sessionData[gracePeriodKey];
+        const graceData = await storage.getSession(gracePeriodKey);
+        if (graceData[gracePeriodKey]) {
+            const age = Date.now() - graceData[gracePeriodKey];
             logger.log(logPrefix, `DECISION: Grace period is active (${age}ms old). Preserving original context and updating URL.`);
             await setPacketContext(tabId, currentContext.instanceId, currentContext.canonicalPacketUrl, finalUrl);
         } else {
@@ -157,12 +154,10 @@ async function processNavigationEvent(tabId, finalUrl, details) {
                         await chrome.tabs.remove(duplicateTab.id);
                     }
                     
-                    // --- START OF THE FIX ---
                     logger.log(logPrefix, 'DECISION: Re-stamping tab context for in-packet navigation and starting grace period.');
                     await setPacketContext(tabId, currentContext.instanceId, newItemInPacket.url, finalUrl);
                     await storage.setSession({ [`grace_period_${tabId}`]: Date.now() });
                     setTimeout(() => storage.removeSession(`grace_period_${tabId}`), 250);
-                    // --- END OF THE FIX ---
 
                 } else if (!newItemInPacket) {
                     logger.log(logPrefix, 'DECISION: User navigated to a URL outside the packet. Demoting tab.');
@@ -183,8 +178,7 @@ async function processNavigationEvent(tabId, finalUrl, details) {
 
     if (finalInstance) {
         await reconcileBrowserState(tabId, finalInstance.instanceId, finalInstance, finalUrl);
-        const originalIntendedUrl = pendingVisits[tabId]?.intendedUrl;
-        const canonicalUrlForVisit = originalIntendedUrl || finalContext.canonicalPacketUrl;
+        const canonicalUrlForVisit = finalContext.canonicalPacketUrl;
         const itemForVisitTimer = finalInstance.contents.find(i => i.url === canonicalUrlForVisit);
 
         if (itemForVisitTimer && !itemForVisitTimer.interactionBasedCompletion) {
@@ -239,11 +233,14 @@ export async function startVisitTimer(tabId, instanceId, canonicalPacketUrl, log
     const settings = await storage.getSettings();
     const visitThresholdMs = (settings.visitThresholdSeconds ?? 5) * 1000;
 
+    logger.log(logPrefix, `Starting visit timer for ${visitThresholdMs}ms.`, { canonicalPacketUrl });
+
     const visitTimer = setTimeout(async () => {
         delete pendingVisits[tabId]; 
         try {
             const tab = await chrome.tabs.get(tabId);
             if (tab && tab.active) {
+                logger.log(logPrefix, 'Visit timer fired for active tab. Marking as visited.');
                 const visitResult = await packetUtils.markUrlAsVisited(instanceId, canonicalPacketUrl);
                 if (visitResult.success && visitResult.modified) {
                     const updatedInstance = visitResult.instance || await storage.getPacketInstance(instanceId);
@@ -252,6 +249,8 @@ export async function startVisitTimer(tabId, instanceId, canonicalPacketUrl, log
                     await setMediaPlaybackState({ instanceId: instanceId, tabId: tabId, topic: updatedInstance.topic }, { showVisitedAnimation: true, source: 'dwell_visit' });
                     await checkAndPromptForCompletion(logPrefix, visitResult, instanceId);
                 }
+            } else {
+                 logger.log(logPrefix, 'Visit timer fired, but tab was not active. Visit not marked.');
             }
         } catch (error) {
             if (!error.message.toLowerCase().includes('no tab with id')) {
