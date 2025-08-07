@@ -1,6 +1,6 @@
 // ext/background-modules/message-handlers.js
-// REVISED: The audio_time_update handler now checks if the sidebar is open
-// before automatically pausing playback on a link mention.
+// REVISED: The delete_packets handler now clears any pending debounced save timers
+// to prevent a race condition where a deleted packet could be "resurrected" by a stale save operation.
 
 import {
     logger,
@@ -458,14 +458,12 @@ const actionHandlers = {
 
         await notifyUIsOfStateChange(instance, { animateLinkMention });
         
-        // --- START OF THE FIX ---
         if (animateLinkMention) {
             const { isSidebarOpen } = await storage.getSession({ isSidebarOpen: false });
             if (!isSidebarOpen) {
                 await actionHandlers.request_playback_action({ intent: 'pause' }, {}, () => {});
             }
         }
-        // --- END OF THE FIX ---
     },
     'overlay_setting_updated': async (data, sender, sendResponse) => {
         await notifyUIsOfStateChange();
@@ -517,7 +515,12 @@ const actionHandlers = {
         }
         sendResponse(result);
     },
+    // --- START OF THE FIX ---
     'delete_packets': async (data, sender, sendResponse) => {
+        // Clear any pending background saves before deleting.
+        clearTimeout(saveInstanceDebounceTimer);
+        saveInstanceDebounceTimer = null;
+
         if (data?.packetIds && activeMediaPlayback.instanceId) {
             if (data.packetIds.includes(activeMediaPlayback.instanceId)) {
                 await resetActiveMediaPlayback();
@@ -526,6 +529,7 @@ const actionHandlers = {
         const result = await processDeletePacketsRequest(data);
         sendResponse(result);
     },
+    // --- END OF THE FIX ---
     'mark_url_visited': handleMarkUrlVisited,
     'media_playback_complete': async (data, sender, sendResponse) => {
         await saveCurrentTime(data.instanceId, data.pageId, 0, true);

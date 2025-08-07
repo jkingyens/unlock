@@ -1,8 +1,6 @@
 // ext/background.js - Main service worker entry point (Global Side Panel Mode)
-// FINAL REVISION: This version adds listeners for chrome.tabs.onCreated and
-// chrome.tabs.onAttached. These listeners make the tab ordering system reactive,
-// ensuring that a packet's tab group is re-ordered correctly whenever a new tab
-// is added or moved into it, thus solving the ordering race condition.
+// FINAL REVISION: The resetActiveMediaPlayback function now sends an explicit 'stop'
+// command to the offscreen document to ensure audio is halted immediately.
 
 import {
     logger,
@@ -123,8 +121,13 @@ export let activeMediaPlayback = {
 
 // This is the single, authoritative function for clearing the in-memory state.
 export async function resetActiveMediaPlayback() {
+    // --- START OF THE FIX ---
+    // Explicitly send a stop command to the offscreen audio player.
+    await controlAudioInOffscreen('stop', {});
+    // --- END OF THE FIX ---
+
     if (activeMediaPlayback.isPlaying && activeMediaPlayback.instanceId && activeMediaPlayback.pageId) {
-        await saveCurrentTime(activeMediaPlayback.instanceId, activeMediaPlayback.pageId);
+        await saveCurrentTime(activeMediaPlayback.instanceId, activeMediaPlayback.pageId, 0, true);
     }
     logger.log('Background', 'CRITICAL LOG: Resetting global activeMediaPlayback state.');
     
@@ -134,11 +137,9 @@ export async function resetActiveMediaPlayback() {
         pageId: null,
         isPlaying: false,
         topic: '',
-        // --- START OF THE FIX: Ensure reset includes new properties ---
         currentTime: 0,
         duration: 0,
         lastMentionedLink: null
-        // --- END OF THE FIX ---
     };
 
     activeMediaPlayback = { ...initialMediaPlaybackState };
@@ -146,6 +147,7 @@ export async function resetActiveMediaPlayback() {
     await storage.removeSession(CONFIG.STORAGE_KEYS.ACTIVE_MEDIA_KEY);
     await notifyUIsOfStateChange();
 }
+
 
 // Rule refresh alarm name
 const RULE_REFRESH_ALARM_NAME = 'refreshRedirectRules';
@@ -210,14 +212,10 @@ export async function controlAudioInOffscreen(command, data) {
 // --- Universal Script Injection ---
 async function injectOverlayScripts(tabId) {
     try {
-        // --- START OF THE FIX ---
-        // Check if the tab exists and has a valid URL before trying to inject.
-        // This prevents errors when tabs are closed during other operations.
         const tab = await chrome.tabs.get(tabId);
         if (!tab || !tab.url || !tab.url.startsWith('http')) {
             return;
         }
-        // --- END OF THE FIX ---
 
         await chrome.scripting.executeScript({
             target: { tabId: tabId },
@@ -234,7 +232,7 @@ async function injectOverlayScripts(tabId) {
             "The tab was closed.",
             "No tab with id",
             "Cannot access contents of the page",
-            "Frame with ID 0 was removed." // Explicitly ignore this error now
+            "Frame with ID 0 was removed."
         ];
         if (!expectedErrors.some(msg => e.message.includes(msg))) {
             logger.error('Background:injectOverlayScripts', `Failed to inject scripts into tab ${tabId}`, e);
@@ -322,7 +320,6 @@ export async function notifyUIsOfStateChange(instanceOverride = null, options = 
 
     const mediaItem = findMediaItemInInstance(instance, activeMediaPlayback.pageId);
     
-    // --- START OF THE FIX: Prioritize the real-time global state for playback data ---
     const playbackStateForUI = {
         ...activeMediaPlayback,
         currentTime: activeMediaPlayback.currentTime || 0,
@@ -331,7 +328,6 @@ export async function notifyUIsOfStateChange(instanceOverride = null, options = 
         lastMentionedLink: calculateLastMentionedLink(instance, { ...mediaItem, currentTime: activeMediaPlayback.currentTime }),
         ...options
     };
-    // --- END OF THE FIX ---
 
     const { isSidebarOpen } = await storage.getSession({ isSidebarOpen: false });
     const overlayEnabled = await shouldShowOverlay();
@@ -351,8 +347,6 @@ export async function notifyUIsOfStateChange(instanceOverride = null, options = 
 
 
 export async function setMediaPlaybackState(newState, options = { animate: false, source: 'unknown' }) {
-    // This function is now a legacy wrapper, the main logic is in notifyUIsOfStateChange
-    // It's kept for compatibility with a few call sites that use it.
     const oldLink = calculateLastMentionedLink(await storage.getPacketInstance(activeMediaPlayback.instanceId), findMediaItemInInstance(await storage.getPacketInstance(activeMediaPlayback.instanceId), activeMediaPlayback.pageId));
     
     activeMediaPlayback = { ...activeMediaPlayback, ...newState };
@@ -395,7 +389,6 @@ async function restoreMediaStateOnStartup() {
 
 // --- Event Listeners ---
 chrome.runtime.onInstalled.addListener(async (details) => {
-    // Wrap the entire installation process in a try...finally block
     try {
         logger.log('Background:onInstalled', `Extension ${details.reason}`);
         await initializeStorageAndSettings();
@@ -425,7 +418,6 @@ chrome.runtime.onInstalled.addListener(async (details) => {
         });
         await chrome.storage.session.set({ isBrowserStartupComplete: true });
     } finally {
-        // This will now run regardless of whether the try block succeeded or failed
         isRestoring = false;
         logger.log('Background:onInstalled', 'Installation complete. Navigation processing is now enabled.');
         resolveInitialization();
@@ -433,7 +425,6 @@ chrome.runtime.onInstalled.addListener(async (details) => {
 });
 
 chrome.runtime.onStartup.addListener(async () => {
-    // Wrap the entire startup process in a try...finally block
     try {
         logger.log('Background:onStartup', 'Browser startup detected. Navigation processing is paused.');
         await initializeStorageAndSettings();
@@ -448,13 +439,11 @@ chrome.runtime.onStartup.addListener(async () => {
         const tabs = await chrome.tabs.query({ url: ["http://*/*", "https://*/*"] });
         for (const tab of tabs) {
             if (tab.id) {
-                // Use a 'fire and forget' approach to avoid blocking startup
                 injectOverlayScripts(tab.id).catch(e => logger.warn('Background:onStartup', `Failed to inject script into tab ${tab.id}`, e));
             }
         }
         
     } finally {
-        // This guarantees the extension becomes active even if an init step fails
         isRestoring = false;
         logger.log('Background:onStartup', 'Startup process complete. Navigation processing is now enabled.');
         resolveInitialization();
@@ -520,8 +509,7 @@ async function reorderGroupFromChangeEvent(groupId) {
 
 chrome.tabs.onActivated.addListener(async (activeInfo) => {
     const tabId = activeInfo.tabId;
-
-    // --- Start of new code ---
+    
     try {
         const tab = await chrome.tabs.get(tabId);
         if (tab.groupId && groupsNeedingReorder.has(tab.groupId)) {
@@ -529,7 +517,6 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
             groupsNeedingReorder.delete(tab.groupId); // Clear the flag
         }
     } catch (e) { /* ignore error if tab is closed quickly */ }
-    // --- End of new code ---
 
     if (activeMediaPlayback.pageId) {
         activeMediaPlayback.tabId = tabId;
@@ -548,7 +535,6 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
         });
     }
 
-    // --- THE FIX: Start visit timer on tab activation ---
     if (instance && context?.canonicalPacketUrl) {
         const itemForVisitTimer = instance.contents.find(i => i.url === context.canonicalPacketUrl);
         if (itemForVisitTimer && !itemForVisitTimer.interactionBasedCompletion) {
@@ -578,17 +564,11 @@ chrome.tabs.onReplaced.addListener(async (addedTabId, removedTabId) => {
     }
 });
 
-// Do the same for the other navigation listener
-
-
-// ext/background.js
-
 function attachNavigationListeners() {
     if (!chrome.webNavigation) { return; }
 
-    // This is the wrapper you already have, we just add the await line.
-    const onCommittedWrapper = async (details) => { // Make it async
-        await initializationPromise; // This line pauses execution until the state is confirmed
+    const onCommittedWrapper = async (details) => {
+        await initializationPromise;
         if (isRestoring) {
             logger.log('Background:onCommitted', 'Ignoring navigation event during restore.', { url: details.url });
             return;
@@ -596,8 +576,8 @@ function attachNavigationListeners() {
         onCommitted(details);
     };
 
-    const onHistoryStateUpdatedWrapper = async (details) => { // Make it async
-        await initializationPromise; // This line pauses execution until the state is confirmed
+    const onHistoryStateUpdatedWrapper = async (details) => {
+        await initializationPromise;
         if (isRestoring) {
             logger.log('Background:onHistoryStateUpdated', 'Ignoring navigation event during restore.', { url: details.url });
             return;
@@ -618,31 +598,21 @@ function attachNavigationListeners() {
 chrome.runtime.onConnect.addListener(async (port) => {
   if (port.name === 'sidebar') {
     await storage.setSession({ isSidebarOpen: true });
-    // This correctly notifies UIs when the sidebar opens (e.g., to hide the overlay)
     await notifyUIsOfStateChange();
 
     port.onDisconnect.addListener(async () => {
       await storage.setSession({ isSidebarOpen: false });
       
-      // --- START OF THE FIX ---
-      // When the sidebar closes, we need to ensure the overlay appears on the
-      // currently active tab, not a potentially stale one from when playback started.
-      if (activeMediaPlayback.pageId) { // Only run this logic if media is active
+      if (activeMediaPlayback.pageId) {
           try {
-              // Query for the tab that is active in the last focused window.
               const [activeTab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
               if (activeTab && activeTab.id) {
-                  // Update the global state to point to this correct, current tab.
                   activeMediaPlayback.tabId = activeTab.id;
               }
           } catch (e) {
               logger.warn('Background:onDisconnect', 'Could not get active tab when sidebar closed.', e);
           }
       }
-      // --- END OF THE FIX ---
-
-      // Now, notify UIs of the state change. This will use the fresh tabId
-      // to correctly inject and show the overlay on the active tab.
       await notifyUIsOfStateChange(null, { animate: true });
     });
   }
