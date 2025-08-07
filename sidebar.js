@@ -1,8 +1,7 @@
 // ext/sidebar.js (Global Side Panel - Orchestrator)
-// REVISED: The sidebar's navigation logic has been made more robust to prevent UI flicker.
-// The `updateSidebarContext` function is now less aggressive about navigating to the root view
-// when it receives a transient null context, creating a smoother user experience when
-// clicking between packet items.
+// REVISED: The packet_instance_deleted message handler is now more robust,
+// ensuring it correctly clears internal state and navigates to the root view
+// if the currently active packet is the one being deleted.
 
 import { logger, storage, packetUtils, applyThemeMode, CONFIG } from './utils.js';
 import { domRefs, cacheDomReferences } from './sidebar-modules/dom-references.js';
@@ -20,7 +19,7 @@ let currentPacketUrl = null; // The canonical packet URL from the packet definit
 let isNavigating = false;
 let nextNavigationRequest = null;
 const PENDING_VIEW_KEY = 'pendingSidebarView';
-let isOpeningPacketItem = false; // --- THE FIX: Navigation lock flag ---
+let isOpeningPacketItem = false; 
 
 
 function resetSidebarState() {
@@ -37,7 +36,6 @@ function resetSidebarState() {
 // --- Initialization ---
 
 async function initialize() {
-    // --- THE FIX: Call the reset function at the very beginning of initialization. ---
     resetSidebarState();
     
     await applyThemeMode();
@@ -108,7 +106,6 @@ export async function navigateTo(viewName, instanceId = null, data = null) {
         settingsView.triggerPendingSave();
     }
     
-    // Do not hide the view container if we are just switching between detail views
     if (currentView !== 'packet-detail' || viewName !== 'packet-detail') {
         [domRefs.rootView, domRefs.createView, domRefs.packetDetailView, domRefs.settingsView].forEach(v => v?.classList.add('hidden'));
     }
@@ -121,7 +118,6 @@ export async function navigateTo(viewName, instanceId = null, data = null) {
     try {
         switch(viewName) {
             case 'packet-detail':
-                // --- THE FIX: Fetch instance and browser state together to avoid race conditions ---
                 const [instanceData, browserState] = await Promise.all([
                     storage.getPacketInstance(instanceId),
                     storage.getPacketBrowserState(instanceId)
@@ -135,7 +131,6 @@ export async function navigateTo(viewName, instanceId = null, data = null) {
                 newSidebarTitle = instanceData.topic || 'Packet Details';
                 domRefs.packetDetailView.classList.remove('hidden');
                 
-                // --- THE FIX: Pass both the instance and its browser state to the renderer ---
                 await detailView.displayPacketContent(instanceData, browserState, currentPacketUrl);
                 break;
             case 'create':
@@ -183,16 +178,12 @@ async function updateSidebarContext(contextData) {
     const newPacketUrl = contextData?.packetUrl ?? null;
     let newInstanceData = contextData?.instance ?? null;
 
-    // --- THE FIX: Check the navigation lock ---
     if (isOpeningPacketItem && newInstanceId === null) {
         logger.log('Sidebar:updateSidebarContext', 'Ignoring transient null context due to navigation lock.');
         return;
     }
     
-    // Only navigate away from the detail view if we receive a definitive new context
-    // that is different, or if the view is not the detail view.
     if (newInstanceId !== currentInstanceId) {
-        // The instance ID has changed. Navigate to the new packet or the root.
         currentInstanceId = newInstanceId;
         currentInstanceData = newInstanceData;
         currentPacketUrl = newPacketUrl;
@@ -202,22 +193,15 @@ async function updateSidebarContext(contextData) {
             navigateTo('root');
         }
     } else if (currentView === 'packet-detail' && newInstanceId !== null) {
-        // --- START OF THE FIX ---
-        // If we receive an update for the current instance but the instance data is null,
-        // it means the packet was likely deleted. We should navigate away gracefully.
         if (!newInstanceData) {
             logger.warn('Sidebar:updateSidebarContext', `Received null instance data for current instance ID ${newInstanceId}. Navigating to root.`);
             navigateTo('root');
-            return; // Stop further processing
+            return; 
         }
-        // --- END OF THE FIX ---
 
-        // The instance is the same, but the active URL might have changed.
-        // Just update the content without a full navigation.
         currentInstanceData = newInstanceData;
         currentPacketUrl = newPacketUrl;
         
-        // --- THE FIX: Fetch the browser state along with the instance to ensure it's up-to-date ---
         const browserState = await storage.getPacketBrowserState(currentInstanceId);
         await detailView.displayPacketContent(currentInstanceData, browserState, currentPacketUrl);
     }
@@ -232,9 +216,8 @@ async function openUrl(url, instanceId) {
         return;
     }
 
-    // --- THE FIX: Set the navigation lock ---
     isOpeningPacketItem = true;
-    setTimeout(() => { isOpeningPacketItem = false; }, 1500); // Release lock after 1.5s
+    setTimeout(() => { isOpeningPacketItem = false; }, 1500);
 
     await detailView.triggerImmediateSave();
 
@@ -243,7 +226,7 @@ async function openUrl(url, instanceId) {
         data: { instance: instanceToOpen, url: url }
     }).catch(err => {
         logger.error("Sidebar", `Error opening link: ${err.message}`);
-        isOpeningPacketItem = false; // Release lock on error
+        isOpeningPacketItem = false;
     });
 }
 
@@ -274,14 +257,12 @@ async function handleBackgroundMessage(message) {
     switch (action) {
         case 'draft_packet_created':
             if (data.draft) {
-                // --- THE FIX: Hide the progress dialog before navigating ---
                 dialogHandler.hideCreateSourceDialog();
                 navigateTo('create', null, data.draft);
             }
             break;
 
         case 'packet_creation_failed':
-            // --- THE FIX: Hide the progress dialog before showing the error ---
             dialogHandler.hideCreateSourceDialog();
             dialogHandler.hideImportDialog();
             rootView.removeInProgressStencil(data.imageId);
@@ -327,34 +308,31 @@ async function handleBackgroundMessage(message) {
             if (currentView === 'root') {
                 rootView.updateInstanceRowUI(data.instance);
             } else if (currentView === 'packet-detail' && currentInstanceId === data.instance.instanceId) {
-                // When an instance is updated, we need its browser state too
                 const browserState = await storage.getPacketBrowserState(data.instance.instanceId);
                 await detailView.displayPacketContent(data.instance, browserState, currentPacketUrl);
             }
             break;
+        // --- START OF THE FIX ---
         case 'packet_instance_deleted':
-            // --- START OF THE FIX ---
             const wasViewingDeletedPacket = data?.packetId === currentInstanceId;
 
             if (currentView === 'root') {
                 rootView.removeInstanceRow(data.packetId);
             }
 
+            // Always clear the detail view's internal state to prevent zombie saves.
+            detailView.clearCurrentDetailView();
+            detailView.stopAudioIfPacketDeleted(data.packetId);
+            
             if (wasViewingDeletedPacket) {
                 currentInstanceId = null;
                 currentInstanceData = null;
-                // If the user deleted the packet they were actively looking at,
-                // navigate them safely back to the root view.
                 if (currentView === 'packet-detail') {
                     navigateTo('root');
                 }
             }
-
-            // Always clear the detail view's internal state to prevent zombie saves.
-            detailView.clearCurrentDetailView();
-            detailView.stopAudioIfPacketDeleted(data.packetId);
-            // --- END OF THE FIX ---
             break;
+        // --- END OF THE FIX ---
         case 'packet_deletion_complete':
             showRootViewStatus(data.message || 'Deletion complete.', data.errors?.length > 0 ? 'error' : 'success');
             if (currentView === 'root') await rootView.displayRootNavigation();

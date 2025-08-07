@@ -1,6 +1,6 @@
 // ext/background-modules/message-handlers.js
-// REVISED: The handleOpenContent function now uses a locking mechanism
-// to prevent race conditions from rapid clicks opening multiple tabs.
+// FINAL FIX: Corrected the payload sent to the request_playback_action handler
+// from within the audio_time_update handler, which was causing an 'undefined intent' error.
 
 import {
     logger,
@@ -47,9 +47,7 @@ import {
 import { checkAndPromptForCompletion } from './navigation-handler.js';
 
 const PENDING_VIEW_KEY = 'pendingSidebarView';
-// --- START OF THE FIX ---
 const openingContent = new Set(); // Lock to prevent opening multiple tabs for the same URL
-// --- END OF THE FIX ---
 
 let saveInstanceDebounceTimer = null;
 function debouncedSaveInstance(instance) {
@@ -152,7 +150,6 @@ async function handleGetPageDetailsFromDOM(sender, sendResponse) {
     }
 }
 
-// --- START OF THE FIX ---
 async function handleOpenContent(data, sender, sendResponse) {
     const { instance, url: clickedUrl } = data;
     const instanceId = instance?.instanceId;
@@ -163,7 +160,6 @@ async function handleOpenContent(data, sender, sendResponse) {
         return;
     }
     
-    // The Lock: If we are already in the process of opening this URL, just focus and exit.
     if (openingContent.has(targetCanonicalUrl)) {
         logger.log('MessageHandler:handleOpenContent', `Lock active for ${targetCanonicalUrl}. Focusing existing tab if possible.`);
         try {
@@ -232,7 +228,6 @@ async function handleOpenContent(data, sender, sendResponse) {
         openingContent.delete(targetCanonicalUrl); // Release lock
     }
 }
-// --- END OF THE FIX ---
 
 async function handleMarkUrlVisited(data, sendResponse) {
      const { packetId: instanceId, url } = data;
@@ -336,9 +331,7 @@ async function handlePlaybackActionRequest(data, sender, sendResponse) {
                 activeMediaPlayback.tabId = activeTab ? activeTab.id : null;
                 activeMediaPlayback.currentTime = startTime; 
                 activeMediaPlayback.lastMentionedLink = null;
-                // --- START OF THE FIX ---
                 activeMediaPlayback.duration = mediaItem.duration || 0;
-                // --- END OF THE FIX ---
                 await storage.setSession({ [CONFIG.STORAGE_KEYS.ACTIVE_MEDIA_KEY]: activeMediaPlayback });
                 await notifyUIsOfStateChange(instance);
                 break;
@@ -378,24 +371,18 @@ const actionHandlers = {
             if (!tab || !tab.url || !tab.url.startsWith('http')) {
                 return sendResponse({ success: true, isPacketizable: false, reason: 'Invalid tab or URL.' });
             }
-            // In the future, you could add more checks here, e.g., if it's already in a packet.
             sendResponse({ success: true, isPacketizable: true });
         } catch (error) {
             sendResponse({ success: false, error: error.message });
         }
     },
     'create_draft_from_tab': (data, sender, sendResponse) => {
-        // --- THE FIX: Acknowledge the message immediately and do not await the long process. ---
         sendResponse({ success: true, message: "Draft creation initiated." });
-
-        // Run the generation process in the background.
         (async () => {
             try {
                 const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
                 if (!tab) throw new Error("No active tab found.");
-
                 const result = await generateDraftPacketFromTab(tab.id);
-                
                 if (result.success) {
                     sidebarHandler.notifySidebar('draft_packet_created', { draft: result.draft });
                 } else {
@@ -405,9 +392,6 @@ const actionHandlers = {
                 sidebarHandler.notifySidebar('packet_creation_failed', { error: error.message });
             }
         })();
-
-        // Return true to indicate that this is an async operation,
-        // even though we've already sent the initial response.
         return true;
     },
     'request_playback_action': handlePlaybackActionRequest,
@@ -451,16 +435,12 @@ const actionHandlers = {
         const mediaItem = findMediaItemInInstance(instance, data.pageId);
         if (!mediaItem) return;
 
-        // --- START OF THE FIX ---
         const tempMediaItemForCalc = { ...mediaItem, currentTime: data.currentTime };
         const newMentionedLink = calculateLastMentionedLink(instance, tempMediaItemForCalc);
 
-        // Compare the newly calculated link with the link from the PREVIOUS state, stored in our global object.
         const animateLinkMention = newMentionedLink && (!activeMediaPlayback.lastMentionedLink || newMentionedLink.url !== activeMediaPlayback.lastMentionedLink.url);
 
-        // Update the global state for the next tick.
         activeMediaPlayback.lastMentionedLink = newMentionedLink;
-        // --- END OF THE FIX ---
         
         const mentionedUrls = new Set(instance.mentionedMediaLinks || []);
         if (mediaItem.timestamps) {
@@ -477,6 +457,14 @@ const actionHandlers = {
         debouncedSaveInstance(instance);
 
         await notifyUIsOfStateChange(instance, { animateLinkMention });
+        
+        // --- START OF THE FIX ---
+        if (animateLinkMention) {
+            // The 'data' parameter for the handler is the first argument.
+            // It expects an object with an 'intent' property.
+            await actionHandlers.request_playback_action({ intent: 'pause' }, {}, () => {});
+        }
+        // --- END OF THE FIX ---
     },
     'overlay_setting_updated': async (data, sender, sendResponse) => {
         await notifyUIsOfStateChange();
@@ -600,7 +588,6 @@ export function handleMessage(message, sender, sendResponse) {
         Promise.resolve(handler(message.data, sender, sendResponse))
             .catch(err => {
                 logger.error("MessageHandler", `Error in action ${message.action}:`, err);
-                // Check if a response has already been sent to avoid errors.
                 try {
                     sendResponse({ success: false, error: err.message });
                 } catch (e) {
