@@ -1,8 +1,7 @@
 // ext/sidebar-modules/detail-view.js
 // Manages the packet detail view, including rendering content cards and progress.
-// REVISED: This module is now driven by the canonical packet URL provided by the main sidebar
-// controller. This ensures that the correct card is highlighted as 'active' based on the
-// tab's official context, rather than its transient browser URL.
+// REVISED: The card click handler now immediately adds an 'opening' class to prevent
+// rapid clicks from creating duplicate tabs, fixing a critical race condition.
 
 import { domRefs } from './dom-references.js';
 import { logger, storage, packetUtils, indexedDbStorage } from '../utils.js';
@@ -523,11 +522,21 @@ async function createContentCard(contentItem, visitedUrlsSet, visitedGeneratedId
         if (type === 'media') {
             playMediaInCard(card, contentItem, instance);
         } else {
+            // --- START OF THE FIX ---
             card.addEventListener('click', (e) => {
+                // Prevent rapid clicks from opening multiple tabs
+                if (card.classList.contains('opening')) {
+                    return;
+                }
+                card.classList.add('opening');
+                // Re-enable the card after 2 seconds to prevent it getting stuck.
+                setTimeout(() => card.classList.remove('opening'), 2000);
+
                 if (typeof openUrl === 'function') {
                     openUrl(urlToOpen, instance.instanceId);
                 }
             });
+            // --- END OF THE FIX ---
         }
     }
 

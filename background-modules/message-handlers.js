@@ -1,7 +1,6 @@
 // ext/background-modules/message-handlers.js
-// REVISED: The handleOpenContent function now uses chrome.storage.session to create a
-// "trusted intent" token for newly created tabs. This is the first step in eliminating
-// the race condition between tab creation and the first navigation event.
+// REVISED: The handleOpenContent function now uses a locking mechanism
+// to prevent race conditions from rapid clicks opening multiple tabs.
 
 import {
     logger,
@@ -48,6 +47,9 @@ import {
 import { checkAndPromptForCompletion } from './navigation-handler.js';
 
 const PENDING_VIEW_KEY = 'pendingSidebarView';
+// --- START OF THE FIX ---
+const openingContent = new Set(); // Lock to prevent opening multiple tabs for the same URL
+// --- END OF THE FIX ---
 
 let saveInstanceDebounceTimer = null;
 function debouncedSaveInstance(instance) {
@@ -150,22 +152,38 @@ async function handleGetPageDetailsFromDOM(sender, sendResponse) {
     }
 }
 
+// --- START OF THE FIX ---
 async function handleOpenContent(data, sender, sendResponse) {
     const { instance, url: clickedUrl } = data;
     const instanceId = instance?.instanceId;
     const targetCanonicalUrl = clickedUrl;
 
-    // --- NEW LOG ---
-    logger.log(`MessageHandler:handleOpenContent`, `Received request to open content.`, { instanceId, targetCanonicalUrl });
-
     if (!instance || !instanceId || !targetCanonicalUrl) {
         sendResponse({ success: false, error: 'Missing instance data or targetCanonicalUrl' });
         return;
     }
+    
+    // The Lock: If we are already in the process of opening this URL, just focus and exit.
+    if (openingContent.has(targetCanonicalUrl)) {
+        logger.log('MessageHandler:handleOpenContent', `Lock active for ${targetCanonicalUrl}. Focusing existing tab if possible.`);
+        try {
+            const allTabs = await chrome.tabs.query({});
+            for (const tab of allTabs) {
+                const context = await getPacketContext(tab.id);
+                if (context && context.instanceId === instanceId && context.canonicalPacketUrl === targetCanonicalUrl) {
+                    await chrome.tabs.update(tab.id, { active: true });
+                    if (tab.windowId) await chrome.windows.update(tab.windowId, { focused: true });
+                    break;
+                }
+            }
+        } catch (e) { /* Ignore errors during focus attempt */ }
+        sendResponse({ success: true, message: 'Open already in progress.' });
+        return;
+    }
+
+    openingContent.add(targetCanonicalUrl); // Acquire lock
 
     try {
-        if (!instance) throw new Error(`Packet instance ${instanceId} not found`);
-
         let targetTab = null;
         const allTabs = await chrome.tabs.query({});
         for (const tab of allTabs) {
@@ -196,16 +214,12 @@ async function handleOpenContent(data, sender, sendResponse) {
         };
 
         if (targetTab) {
-            // --- NEW LOG ---
-            logger.log(`MessageHandler:handleOpenContent`, `Found existing tab. Setting trusted intent for tabId: ${targetTab.id}.`);
             await storage.setSession({ [`trusted_intent_${targetTab.id}`]: trustedIntent });
             await chrome.tabs.update(targetTab.id, { url: finalUrlToOpen, active: true });
             if (targetTab.windowId) await chrome.windows.update(targetTab.windowId, { focused: true });
         } else {
             const newTab = await chrome.tabs.create({ url: finalUrlToOpen, active: false });
             if (!newTab || typeof newTab.id !== 'number') throw new Error('Tab creation failed.');
-            // --- NEW LOG ---
-            logger.log(`MessageHandler:handleOpenContent`, `Created new tab. Setting trusted intent for tabId: ${newTab.id}.`);
             await storage.setSession({ [`trusted_intent_${newTab.id}`]: trustedIntent });
             await chrome.tabs.update(newTab.id, { active: true });
         }
@@ -214,8 +228,11 @@ async function handleOpenContent(data, sender, sendResponse) {
     } catch (error) {
         logger.error('MessageHandler:handleOpenContent', 'Error opening content', {instanceId, targetCanonicalUrl, error});
         sendResponse({ success: false, error: error.message || 'Unknown error' });
+    } finally {
+        openingContent.delete(targetCanonicalUrl); // Release lock
     }
 }
+// --- END OF THE FIX ---
 
 async function handleMarkUrlVisited(data, sendResponse) {
      const { packetId: instanceId, url } = data;
