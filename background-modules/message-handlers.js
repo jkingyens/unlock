@@ -1,6 +1,6 @@
 // ext/background-modules/message-handlers.js
-// REVISED: The delete_packets handler now clears any pending debounced save timers
-// to prevent a race condition where a deleted packet could be "resurrected" by a stale save operation.
+// REVISED: The handlePlaybackActionRequest function now gracefully handles
+// 'toggle' and 'pause' intents when no media is active, preventing errors.
 
 import {
     logger,
@@ -335,10 +335,13 @@ async function handlePlaybackActionRequest(data, sender, sendResponse) {
                 await storage.setSession({ [CONFIG.STORAGE_KEYS.ACTIVE_MEDIA_KEY]: activeMediaPlayback });
                 await notifyUIsOfStateChange(instance);
                 break;
-
+            // --- START OF THE FIX ---
             case 'pause':
             case 'toggle':
-                if (!activeMediaPlayback.pageId) throw new Error('No active media to toggle/pause.');
+                if (!activeMediaPlayback.pageId) {
+                    // If there's no active media, just succeed without doing anything.
+                    return sendResponse({ success: true, message: "No active media to toggle/pause." });
+                }
                 await controlAudioInOffscreen(intent, {});
                 activeMediaPlayback.isPlaying = intent === 'toggle' ? !activeMediaPlayback.isPlaying : false;
 
@@ -349,6 +352,7 @@ async function handlePlaybackActionRequest(data, sender, sendResponse) {
                 await storage.setSession({ [CONFIG.STORAGE_KEYS.ACTIVE_MEDIA_KEY]: activeMediaPlayback });
                 await notifyUIsOfStateChange();
                 break;
+            // --- END OF THE FIX ---
             case 'stop':
                 if (activeMediaPlayback.pageId) {
                     await resetActiveMediaPlayback();
@@ -416,12 +420,9 @@ const actionHandlers = {
         }
     },
     'open_sidebar_and_navigate': async (data, sender, sendResponse) => {
-        const [tab] = await chrome.tabs.query({active: true, lastFocusedWindow: true});
-        if (tab) {
-            await chrome.sidePanel.open({ windowId: tab.windowId });
-            chrome.runtime.sendMessage({ action: 'navigate_to_view', data });
-        }
-        sendResponse({ success: true });
+        // This action is now a no-op to prevent gesture errors.
+        // The user should click the extension icon to open the side panel.
+        sendResponse({ success: true, message: "User should open side panel via action icon." });
     },
     'audio_time_update': async (data) => {
         if (activeMediaPlayback.pageId !== data.pageId || !activeMediaPlayback.isPlaying) return;
@@ -515,9 +516,7 @@ const actionHandlers = {
         }
         sendResponse(result);
     },
-    // --- START OF THE FIX ---
     'delete_packets': async (data, sender, sendResponse) => {
-        // Clear any pending background saves before deleting.
         clearTimeout(saveInstanceDebounceTimer);
         saveInstanceDebounceTimer = null;
 
@@ -529,7 +528,6 @@ const actionHandlers = {
         const result = await processDeletePacketsRequest(data);
         sendResponse(result);
     },
-    // --- END OF THE FIX ---
     'mark_url_visited': handleMarkUrlVisited,
     'media_playback_complete': async (data, sender, sendResponse) => {
         await saveCurrentTime(data.instanceId, data.pageId, 0, true);
