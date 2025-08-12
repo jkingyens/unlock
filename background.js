@@ -434,6 +434,8 @@ chrome.runtime.onStartup.addListener(async () => {
         await ruleManager.refreshAllRules();
         await getDb();
         await garbageCollectTabContexts();
+        // FIX: Added cleanup for the draft tab group on startup
+        await tabGroupHandler.cleanupDraftGroup();
 
         logger.log('Background:onStartup', 'Injecting overlay scripts into existing tabs.');
         const tabs = await chrome.tabs.query({ url: ["http://*/*", "https://*/*"] });

@@ -55,9 +55,14 @@ if (!window.unlockOverlayInitialized) {
             chrome.runtime.sendMessage({ action: 'request_playback_action', data: { intent: 'toggle' } });
         });
 
+        // --- START OF THE FIX ---
+        // The main body of the overlay no longer attempts to open the sidebar,
+        // as this was causing the user gesture error. The user must click the
+        // extension action icon to open the sidebar.
         overlay.addEventListener('click', () => {
-            chrome.runtime.sendMessage({ action: 'open_sidebar_and_navigate', data: {} });
+            // This is now a no-op, but the listener is kept for potential future use.
         });
+        // --- END OF THE FIX ---
 
         linkMention.addEventListener('click', (e) => {
             e.stopPropagation(); // Prevents the main overlay click (which opens the sidebar)
