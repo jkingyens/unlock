@@ -282,21 +282,34 @@ function hideConfirmDialog(confirmedResult = false) {
     confirmDialogResolve = null;
 }
 
-export function showTitlePromptDialog(defaultValue = '') {
+export function showTitlePromptDialog(defaultValuePromise) {
     return new Promise((resolve) => {
         titlePromptResolve = resolve;
         const dialog = domRefs.titlePromptDialog;
-        if (!dialog) {
-            logger.error("DialogHandler", "Title prompt dialog element not found!");
-            return resolve(null); // Resolve with null if dialog doesn't exist
+        const statusEl = document.getElementById('title-prompt-status');
+        if (!dialog || !statusEl) {
+            logger.error("DialogHandler", "Title prompt dialog elements not found!");
+            return resolve(null);
         }
 
-        domRefs.titlePromptInput.value = defaultValue;
+        // Initially disable save and show generating message
+        domRefs.titlePromptInput.value = '';
+        domRefs.confirmTitlePromptBtn.disabled = true;
+        showDialogStatus(statusEl, 'Generating suggested title...', 'info', false);
+        
+        defaultValuePromise.then(defaultValue => {
+            domRefs.titlePromptInput.value = defaultValue;
+            domRefs.confirmTitlePromptBtn.disabled = false;
+            clearDialogStatus(statusEl);
+        }).catch(() => {
+            domRefs.confirmTitlePromptBtn.disabled = false;
+            clearDialogStatus(statusEl);
+        });
         
         titlePromptConfirmListener = () => hideTitlePromptDialog(domRefs.titlePromptInput.value.trim());
         titlePromptCancelListener = () => hideTitlePromptDialog(null);
         titlePromptKeyListener = (e) => {
-            if (e.key === 'Enter') {
+            if (e.key === 'Enter' && !domRefs.confirmTitlePromptBtn.disabled) {
                 e.preventDefault();
                 hideTitlePromptDialog(domRefs.titlePromptInput.value.trim());
             }
@@ -306,17 +319,15 @@ export function showTitlePromptDialog(defaultValue = '') {
         domRefs.cancelTitlePromptBtn.addEventListener('click', titlePromptCancelListener);
         domRefs.titlePromptInput.addEventListener('keypress', titlePromptKeyListener);
 
-        // Show dialog
         dialog.style.display = 'flex';
         
         requestAnimationFrame(() => {
             dialog.classList.add('visible');
             requestAnimationFrame(() => {
                 domRefs.titlePromptInput.focus();
-                domRefs.titlePromptInput.select(); // Select the text for easy editing
+                domRefs.titlePromptInput.select();
             });
         });
-
     });
 }
 

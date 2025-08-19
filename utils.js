@@ -78,14 +78,6 @@ const CONFIG = {
         apiKey: '',
         modelName: 'grok-3-mini-fast-latest',
         apiEndpoint: 'https://api.x.ai/v1/chat/completions'
-      },
-      {
-        id: 'default_chrome_ai_nano',
-        name: 'Chrome AI (Gemini Nano On-Device)',
-        providerType: 'chrome-ai-gemini-nano',
-        apiKey: null,
-        modelName: 'gemini-nano',
-        apiEndpoint: null
       }
     ],
     activeStorageId: null,
