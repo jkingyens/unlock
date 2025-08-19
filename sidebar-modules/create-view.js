@@ -3,7 +3,7 @@
 // by adding the current page or generating new pages from prompts.
 
 import { domRefs } from './dom-references.js';
-import { logger, storage, base64Decode, shouldUseTabGroups, indexedDbStorage } from '../utils.js';
+import { logger, storage, base64Decode, shouldUseTabGroups, indexedDbStorage, isChromeAiAvailable } from '../utils.js';
 import { showConfirmDialog, showTitlePromptDialog } from './dialog-handler.js';
 
 // --- Module-specific State & Dependencies ---
@@ -469,27 +469,22 @@ async function handleSaveDraftPacket() {
     if (packetToSave.id.startsWith('draft_')) {
         const originalDraftId = packetToSave.id;
         
-        // --- START OF THE FIX ---
-        // 1. Prompt for the title FIRST, before making any permanent changes.
-        const topic = await showTitlePromptDialog(packetToSave.topic || '');
+        // Prioritize the pre-generated topic, fall back to the first item's title.
+        const defaultTitle = packetToSave.topic || draftPacket?.sourceContent?.[0]?.title || 'Untitled Packet';
+        const topic = await showTitlePromptDialog(Promise.resolve(defaultTitle));
 
         if (!topic) {
-            // If the user cancels, do nothing. The draft remains untouched and valid.
             showRootViewStatus("Save cancelled.", "info");
             return; 
         }
 
-        // 2. Only after confirming the title, generate the new ID and update the packet.
         packetToSave.topic = topic;
         packetToSave.id = `img_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
         packetToSave.created = new Date().toISOString();
         
-        // 3. Now, perform the database transfer with the original and new IDs.
         await indexedDbStorage.transferDraftContent(originalDraftId, packetToSave.id);
-        // --- END OF THE FIX ---
     }
     
-    // Cleanup and final save operation remain the same.
     await cleanupDraftGroup();
 
     try {

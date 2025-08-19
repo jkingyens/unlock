@@ -9,7 +9,6 @@ import { logger, storage, applyThemeMode, isTabGroupsAvailable, isChromeAiAvaila
 let currentLlmModelsSetting = [];
 let currentSelectedModelIdSetting = null;
 let editingLlmModelId = null;
-let chromeAiAvailable = false;
 
 let currentStorageConfigsSetting = [];
 let currentActiveStorageIdSetting = null;
@@ -130,12 +129,6 @@ export function setupSettingsListeners() {
  * Prepares the settings view by loading current settings and checking for feature availability.
  */
 export async function prepareSettingsView() {
-    chromeAiAvailable = await isChromeAiAvailable();
-    const nanoOption = domRefs.llmEditProviderTypeSelect?.querySelector('option[value="chrome-ai-gemini-nano"]');
-    if (nanoOption) {
-        nanoOption.hidden = !chromeAiAvailable;
-        nanoOption.disabled = !chromeAiAvailable;
-    }
     await loadSettings();
 }
 
@@ -148,13 +141,6 @@ async function loadSettings() {
         
         currentLlmModelsSetting = loadedSettings.llmModels || [];
         currentSelectedModelIdSetting = loadedSettings.selectedModelId;
-        if (!chromeAiAvailable) {
-            const selectedModel = currentLlmModelsSetting.find(m => m.id === currentSelectedModelIdSetting);
-            if (selectedModel?.providerType === 'chrome-ai-gemini-nano') {
-                const firstAvailable = currentLlmModelsSetting.find(m => m.providerType !== 'chrome-ai-gemini-nano');
-                currentSelectedModelIdSetting = firstAvailable ? firstAvailable.id : null;
-            }
-        }
         renderLlmModelsList();
         hideLlmEditForm();
         
@@ -195,7 +181,7 @@ function renderLlmModelsList() {
     if (!listElement) return;
     listElement.innerHTML = '';
 
-    const modelsToRender = chromeAiAvailable ? currentLlmModelsSetting : currentLlmModelsSetting.filter(m => m.providerType !== 'chrome-ai-gemini-nano');
+    const modelsToRender = currentLlmModelsSetting;
 
     if (modelsToRender.length === 0) {
         listElement.innerHTML = '<p class="empty-state">No LLM configurations found.</p>';
@@ -330,7 +316,7 @@ function hideLlmEditForm() {
 
 function updateLlmEditFormVisibility() {
     const provider = domRefs.llmEditProviderTypeSelect.value;
-    const needsApi = !['chrome-ai-gemini-nano'].includes(provider);
+    const needsApi = true;
     domRefs.llmEditApiKeyGroup.style.display = needsApi ? 'block' : 'none';
     domRefs.llmEditApiEndpointGroup.style.display = needsApi ? 'block' : 'none';
 }
@@ -345,10 +331,6 @@ function saveLlmModelFromForm() {
         modelName: s.llmEditModelNameInput.value.trim(),
         apiEndpoint: s.llmEditApiEndpointInput.value.trim(),
     };
-    if (modelData.providerType === 'chrome-ai-gemini-nano') {
-        modelData.apiKey = null;
-        modelData.apiEndpoint = null;
-    }
 
     const index = currentLlmModelsSetting.findIndex(m => m.id === modelData.id);
     if (index > -1) {

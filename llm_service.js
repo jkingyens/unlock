@@ -332,6 +332,17 @@ ${htmlContent.substring(0, 15000)}
     return { systemPrompt, userPrompt };
 }
 
+function getPacketTitlePromptText(context) {
+    const contentSummary = context.packetContent
+        .map(item => `Title: ${item.title}\nContent: ${String(item.content || '').substring(0, 500)}...`)
+        .join('\n\n---\n\n');
+
+    const systemPrompt = `You are an expert at summarizing and creating concise, engaging titles. Based on the provided content from a collection of web pages and documents, generate a single, descriptive title for the entire collection. The title should be no more than 8 words.`;
+    const userPrompt = `Generate a short, descriptive title for a collection containing the following items:\n\n${contentSummary}`;
+    
+    return { systemPrompt, userPrompt };
+}
+
 const llmService = {
     prepareOpenAIPayload(promptType, context, activeModelConfig) {
         let systemPrompt, userPrompt;
@@ -408,6 +419,8 @@ const llmService = {
              ({ systemPrompt, userPrompt } = getCustomPagePromptText(context.prompt, context.context));
         } else if (promptType === 'modify_html_for_completion') {
             ({ systemPrompt, userPrompt } = getModificationPromptText(context.htmlContent));
+        } else if (promptType === 'generate_packet_title') {
+            ({ systemPrompt, userPrompt } = getPacketTitlePromptText(context));
         }
         else { throw new Error(`Invalid promptType for Gemini: ${promptType}`); }
         
@@ -436,6 +449,7 @@ const llmService = {
         }
         if (promptType === 'article_suggestions' || promptType === 'extract_topic_from_html' || promptType === 'extract_media') return _parseJsonArticleResponse(contentStr, `Gemini (${responseData.model || ''})`);
         else if (promptType === 'summary_page' || promptType === 'quiz_page') return _cleanHtmlOutput(contentStr);
+        else if (promptType === 'generate_packet_title') return contentStr.trim().replace(/["']/g, '');
         else throw new Error(`Invalid promptType for Gemini parsing: ${promptType}`);
     },
     prepareChromeAiPayload(promptType, context, activeModelConfig) {
@@ -457,6 +471,8 @@ const llmService = {
              ({ systemPrompt, userPrompt } = getCustomPagePromptText(context.prompt, context.context));
         } else if (promptType === 'modify_html_for_completion') {
             ({ systemPrompt, userPrompt } = getModificationPromptText(context.htmlContent));
+        } else if (promptType === 'generate_packet_title') {
+            ({ systemPrompt, userPrompt } = getPacketTitlePromptText(context));
         }
         else { throw new Error(`Invalid promptType for Chrome AI: ${promptType}`); }
         fullPrompt = `${systemPrompt}\n\n${userPrompt}`;
@@ -468,6 +484,10 @@ const llmService = {
         }
         if (promptType === 'article_suggestions' || promptType === 'extract_topic_from_html' || promptType === 'extract_media') return _parseJsonArticleResponse(responseString, 'ChromeAI-Nano');
         else if (promptType === 'summary_page' || promptType === 'quiz_page') return _cleanHtmlOutput(responseString);
+        else if (promptType === 'generate_packet_title') {
+            // The response for a title is a simple string, clean it up.
+            return responseString.trim().replace(/["']/g, ''); // Remove quotes
+        }
         else throw new Error(`Invalid promptType for Chrome AI parsing: ${promptType}`);
     },
     preparePerplexityPayload(promptType, context, activeModelConfig) {
@@ -629,8 +649,8 @@ const llmService = {
       }
     },
 
-    async callLLM(promptType, context) {
-        const activeModelConfig = await storage.getActiveModelConfig();
+    async callLLM(promptType, context, overrideModelConfig = null) {
+        const activeModelConfig = overrideModelConfig || await storage.getActiveModelConfig();
         if (!activeModelConfig) {
             return { success: false, error: 'No active LLM model configured. Please check settings.' };
         }

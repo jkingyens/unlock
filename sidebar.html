@@ -229,7 +229,6 @@
           <select id="llm-edit-provider-type">
             <option value="openai">OpenAI</option>
             <option value="gemini">Google Gemini</option>
-            <option value="chrome-ai-gemini-nano">Chrome AI (Gemini Nano)</option>
             <option value="anthropic">Anthropic Claude</option>
             <option value="grok">Grok (xAI)</option>
             <option value="perplexity">Perplexity</option>
@@ -446,6 +445,7 @@
     <div class="confirm-dialog">
       <p id="title-prompt-message">Enter a title for your packet:</p>
       <input type="text" id="title-prompt-input" placeholder="Packet title..." style="width: 100%; padding: 8px 10px; box-sizing: border-box; background-color: var(--input-bg); color: var(--text-primary); border: 1px solid var(--border-primary); border-radius: 4px;">
+      <div id="title-prompt-status" class="dialog-status-message" style="text-align: center; margin-top: 10px;"></div>
       <div class="dialog-buttons">
         <button id="cancel-title-prompt-btn" class="cancel-btn">Cancel</button>
         <button id="confirm-title-prompt-btn" class="confirm-btn">Save</button>

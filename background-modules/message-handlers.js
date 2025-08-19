@@ -19,6 +19,7 @@ import {
 import * as tabGroupHandler from './tab-group-handler.js';
 import * as sidebarHandler from './sidebar-handler.js';
 import cloudStorage from '../cloud-storage.js';
+import llmService from '../llm_service.js';
 
 import {
     processCreatePacketRequest,
@@ -472,6 +473,25 @@ const actionHandlers = {
     },
     'improve_draft_audio': (data, sender, sendResponse) => processImproveDraftAudio(data).then(sendResponse),
     'generate_timestamps_for_packet_items': (data, sender, sendResponse) => processGenerateTimestampsRequest(data).then(sendResponse),
+    'generate_packet_title': (data, sender, sendResponse) => {
+        (async () => {
+            try {
+                const nanoConfig = {
+                    providerType: 'chrome-ai-gemini-nano',
+                    modelName: 'gemini-nano'
+                };
+                const result = await llmService.callLLM('generate_packet_title', data, nanoConfig);
+                if (result.success) {
+                    sendResponse({ success: true, title: result.data });
+                } else {
+                    sendResponse({ success: false, error: result.error });
+                }
+            } catch (error) {
+                sendResponse({ success: false, error: error.message });
+            }
+        })();
+        return true; // Indicate that the response will be sent asynchronously
+    },
     'get_draft_item_for_preview': async (data, sender, sendResponse) => {
         const { pageId } = data;
         const sessionData = await storage.getSession('draftPacketForPreview');
