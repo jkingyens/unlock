@@ -361,6 +361,14 @@ export function showCreateSourceDialog() {
         createSourceDialogResolve = resolve;
         const dialog = document.getElementById('create-source-dialog');
         if (dialog) {
+            // --- START OF THE FIX ---
+            // Reset the dialog to its initial state before showing it.
+            const buttonDiv = document.getElementById('create-source-dialog-buttons');
+            const progressDiv = document.getElementById('create-source-dialog-progress');
+            if (buttonDiv) buttonDiv.classList.remove('hidden');
+            if (progressDiv) progressDiv.classList.add('hidden');
+            // --- END OF THE FIX ---
+
             dialog.querySelector('#create-from-blank-btn').onclick = () => {
                 if (createSourceDialogResolve) createSourceDialogResolve('blank');
             };
@@ -398,11 +406,18 @@ export function showCreateSourceDialogProgress(message) {
 export function hideCreateSourceDialog(reason) {
     const dialog = document.getElementById('create-source-dialog');
     if (dialog) {
-        // ... (cleanup listeners) ...
+        // --- START OF THE FIX ---
+        // Explicitly clear the onclick handlers to prevent stale closures.
+        dialog.querySelector('#create-from-blank-btn').onclick = null;
+        dialog.querySelector('#create-from-tab-btn').onclick = null;
+        dialog.querySelector('#cancel-create-source-btn').onclick = null;
+        dialog.onclick = null;
+        // --- END OF THE FIX ---
+
         dialog.classList.remove('visible');
         setTimeout(() => { if (dialog) dialog.style.display = 'none'; }, 300);
     }
-    // If the dialog is being hidden due to cancellation, resolve the promise with null.
+
     if (reason === 'cancel' && createSourceDialogResolve) {
         createSourceDialogResolve(null);
     }

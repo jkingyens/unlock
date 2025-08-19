@@ -35,12 +35,12 @@ const ttsService = {
 
     if (!response.ok) {
       const errorData = await response.json();
-      logger.error('ttsService:generateAudioAndTimestamps', 'API error', errorData);
+      logger.error('ttsService:generateAudioAndTimestamps', 'API error', JSON.stringify(errorData, null, 2));
       return { success: false, error: errorData.detail?.message || 'Unknown API error' };
     }
 
     const responseData = await response.json();
-    const audioBase64 = responseData.audio_base64;
+    const audioBase64 = responseData.audio_base_64;
     const wordTimestamps = responseData.alignment?.word_timestamps;
     
     if (!audioBase64) {
