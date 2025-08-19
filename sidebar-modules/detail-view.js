@@ -51,6 +51,10 @@ export function updatePlaybackUI(state) {
 
     currentPlayingPageId = state.isPlaying ? state.pageId : null;
 
+    if (state.mentionedMediaLinks) {
+        currentDetailInstance.mentionedMediaLinks = state.mentionedMediaLinks;
+    }
+
     // Update play/pause icon on all media cards
     const allMediaCards = domRefs.packetDetailView.querySelectorAll('.card.media');
     allMediaCards.forEach(card => {
@@ -158,16 +162,21 @@ async function drawWaveform(canvas, audioSamples, options) {
 }
 
 function drawLinkMarkers(markerContainer, options) {
-    const { timestamps, audioDuration, visitedUrlsSet } = options;
+    const { timestamps, audioDuration, visitedUrlsSet, linkMarkersEnabled, mentionedLinksSet } = options;
     markerContainer.innerHTML = ''; // Clear existing markers
 
-    if (!options.linkMarkersEnabled || !timestamps || timestamps.length === 0) {
+    if (!timestamps || timestamps.length === 0) {
         return;
     }
 
     const containerWidth = markerContainer.clientWidth;
 
     timestamps.forEach(ts => {
+        const isMentioned = mentionedLinksSet && mentionedLinksSet.has(ts.url);
+
+        if (!linkMarkersEnabled && !isMentioned) {
+            return;
+        }
         const marker = document.createElement('div');
         marker.className = 'waveform-link-marker';
         
@@ -195,7 +204,8 @@ async function redrawAllVisibleWaveforms(playbackState = {}) {
         accentColor: getComputedStyle(domRefs.packetDetailView).getPropertyValue('--packet-color-accent').trim(),
         playedColor: getComputedStyle(domRefs.packetDetailView).getPropertyValue('--packet-color-progress-fill').trim(),
         linkMarkersEnabled: settings.waveformLinkMarkersEnabled,
-        visitedUrlsSet: new Set(currentDetailInstance.visitedUrls || [])
+        visitedUrlsSet: new Set(currentDetailInstance.visitedUrls || []),
+        mentionedLinksSet: new Set(currentDetailInstance.mentionedMediaLinks || [])
     };
 
     for (const card of mediaCards) {
