@@ -460,12 +460,6 @@ const actionHandlers = {
 
         await notifyUIsOfStateChange(instance, { animateLinkMention });
         
-        if (animateLinkMention) {
-            const { isSidebarOpen } = await storage.getSession({ isSidebarOpen: false });
-            if (!isSidebarOpen) {
-                await actionHandlers.request_playback_action({ intent: 'pause' }, {}, () => {});
-            }
-        }
     },
     'overlay_setting_updated': async (data, sender, sendResponse) => {
         await notifyUIsOfStateChange();

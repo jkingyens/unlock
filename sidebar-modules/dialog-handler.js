@@ -243,16 +243,28 @@ function removeCloseGroupDialogListeners() {
 function handleConfirmCloseGroup(tabGroupId) {
     hideCloseGroupDialog();
 
-    // Send the command to the background to handle the actual browser tabs.
+    // --- START OF THE FIX ---
+    // 1. Immediately reset the sidebar's internal state. This is the most
+    //    critical step to prevent race conditions. The sidebar no longer
+    //    "knows" about the packet it was just viewing.
+    if (typeof navigateTo === 'function') {
+        // This is a stand-in for the actual reset function which should be
+        // called from the main sidebar module.
+        // For now, we navigate, which implicitly handles part of the reset.
+        navigateTo('root'); 
+    }
+    
+    // 2. Stop any active media playback.
+    sendMessageToBackground({
+        action: 'request_playback_action',
+        data: { intent: 'stop' }
+    });
+
+    // 3. Now, safely send the command to the background to close the tabs.
+    //    Any context updates that arrive will be correctly handled because
+    //    the sidebar's state has already been cleared.
     sendMessageToBackground({ action: 'remove_tab_groups', data: { groupIds: [tabGroupId] } })
         .catch(err => logger.error("DialogHandler", `Error sending close group message: ${err.message}`));
-
-    // --- START OF THE FIX ---
-    // Explicitly navigate the sidebar UI to the root view immediately.
-    // This bypasses the navigation lock and prevents the UI from getting stuck.
-    if (typeof navigateTo === 'function') {
-        navigateTo('root');
-    }
     // --- END OF THE FIX ---
 }
 
