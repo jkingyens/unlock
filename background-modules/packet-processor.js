@@ -403,6 +403,29 @@ export async function instantiatePacket(imageId, preGeneratedInstanceId, initiat
                     : sourceItem.alternatives.find(a => a.type === 'generated');
                 
                 if (chosenItem) {
+                    // --- START OF THE FIX: Push a deep copy, not a reference ---
+                    packetInstance.contents.push(JSON.parse(JSON.stringify(chosenItem)));
+                    // --- END OF THE FIX ---
+                }
+
+            } else {
+                // --- START OF THE FIX: Push a deep copy, not a reference ---
+                packetInstance.contents.push(JSON.parse(JSON.stringify(sourceItem)));
+                // --- END OF THE FIX ---
+            }
+        }
+
+        // Populate the new instance's contents from the pristine, deep-copied template
+        for (const sourceItem of deepCopiedSourceContent) {
+            if (sourceItem.type === 'alternative') {
+                const settings = await storage.getSettings();
+                const preferAudio = settings.preferAudio && sourceItem.alternatives.some(a => a.type === 'media');
+
+                const chosenItem = preferAudio
+                    ? sourceItem.alternatives.find(a => a.type === 'media')
+                    : sourceItem.alternatives.find(a => a.type === 'generated');
+                
+                if (chosenItem) {
                     packetInstance.contents.push(chosenItem);
                 }
 

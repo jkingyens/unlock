@@ -86,6 +86,12 @@ function setupGlobalListeners() {
         if (currentView === 'create') {
             createView.handleDiscardDraftPacket();
         } else {
+            // --- START OF THE FIX ---
+            // When going back from detail view, ensure its state is cleared.
+            if (currentView === 'packet-detail') {
+                detailView.clearCurrentDetailView();
+            }
+            // --- END OF THE FIX ---
             navigateTo('root');
         }
     });
@@ -96,6 +102,12 @@ function setupGlobalListeners() {
 // --- Navigation & View Management ---
 
 export async function navigateTo(viewName, instanceId = null, data = null) {
+
+
+    if (viewName === 'root') {
+        resetSidebarState();
+    }
+
     if (isNavigating && (currentView !== viewName || currentInstanceId !== instanceId)) {
         nextNavigationRequest = { viewName, instanceId, data };
         return;
@@ -319,17 +331,14 @@ async function handleBackgroundMessage(message) {
             if (currentView === 'root') {
                 rootView.removeInstanceRow(data.packetId);
             }
-
-            // Always clear the detail view's internal state to prevent zombie saves.
-            detailView.clearCurrentDetailView();
-            detailView.stopAudioIfPacketDeleted(data.packetId);
             
             if (wasViewingDeletedPacket) {
-                currentInstanceId = null;
-                currentInstanceData = null;
-                if (currentView === 'packet-detail') {
-                    navigateTo('root');
-                }
+                // This is the most critical part. Reset the sidebar's internal
+                // state immediately before starting the navigation. This prevents
+                // any lingering context from causing issues.
+                resetSidebarState();
+                detailView.stopAudioIfPacketDeleted(data.packetId);
+                navigateTo('root');
             }
             break;
         // --- END OF THE FIX ---

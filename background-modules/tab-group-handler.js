@@ -193,6 +193,8 @@ export async function handleRemoveTabGroups(data, sendResponse) {
         return sendResponse({ success: false, error: 'Invalid group ID array.' });
     }
 
+    await storage.setSession({ 'isClosingGroup': true });
+
     const errors = [];
     for (const groupId of groupIds) {
         try {
@@ -223,6 +225,10 @@ export async function handleRemoveTabGroups(data, sendResponse) {
             }
         }
     }
+
+    setTimeout(() => {
+        storage.removeSession('isClosingGroup');
+    }, 500); // 500ms is a safe buffer
 
     const response = { success: errors.length === 0, errors };
     logger.log('TabGroupHandler:handleRemove', 'Sending response', response);

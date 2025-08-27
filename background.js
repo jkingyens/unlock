@@ -510,6 +510,17 @@ async function reorderGroupFromChangeEvent(groupId) {
 }
 
 chrome.tabs.onActivated.addListener(async (activeInfo) => {
+
+
+    // Check for a lock file in session storage. If it exists, it means we are in the
+    // middle of a tab-closing operation and should not process tab activation events
+    // to prevent race conditions that could re-open the sidebar view.
+    const closingState = await storage.getSession('isClosingGroup');
+    if (closingState && closingState.isClosingGroup) {
+        logger.log('Background:onActivated', 'Ignoring tab activation event due to tab group closure in progress.');
+        return; // Exit immediately
+    }
+
     const tabId = activeInfo.tabId;
     
     try {

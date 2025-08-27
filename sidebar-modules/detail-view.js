@@ -576,20 +576,32 @@ export function updateActiveCardHighlight(canonicalPacketUrl) {
 // --- Action Handlers ---
 
 function handleCloseTabGroup(tabGroupId) {
+    // --- START OF THE FIX ---
+    // 1. Stop any active media playback first.
+    sendMessageToBackground({
+        action: 'request_playback_action',
+        data: { intent: 'stop' }
+    });
+
+    // 2. Clear this view's specific state (like pending saves).
+    clearCurrentDetailView();
+
+    // 3. Navigate the main sidebar UI to the root view. This function
+    //    should also be responsible for resetting the global currentInstanceId.
+    if (typeof navigateTo === 'function') {
+        navigateTo('root');
+    }
+
+    // 4. Finally, send the message to the background to perform the tab actions.
     sendMessageToBackground({
         action: 'remove_tab_groups',
         data: { groupIds: [tabGroupId] }
     }).catch(err => {
         logger.error("DetailView", `Error sending close group message: ${err.message}`);
     });
-
-    // --- START OF THE FIX ---
-    // Explicitly navigate the sidebar UI to the root view immediately.
-    if (typeof navigateTo === 'function') {
-        navigateTo('root');
-    }
     // --- END OF THE FIX ---
 }
+
 export async function stopAndClearActiveAudio() {
     sendMessageToBackground({
         action: 'request_playback_action',
