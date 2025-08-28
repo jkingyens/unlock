@@ -1,9 +1,5 @@
 // ext/offscreen.js
 
-// --- FIX: Idempotency Check & Initialization ---
-// This check prevents the script from running more than once, and the new
-// initialize function waits for the Chrome runtime to be ready before
-// attaching listeners, preventing the TypeError.
 if (typeof window.unlockOffscreenInitialized === 'undefined') {
     window.unlockOffscreenInitialized = true;
 
@@ -26,7 +22,7 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
         audio.onplay = () => {
             if (timeUpdateInterval) clearInterval(timeUpdateInterval);
             timeUpdateInterval = setInterval(() => {
-                if (!audio.paused) {
+                if (!audio.paused && chrome.runtime?.id) { // Check context before sending
                     chrome.runtime.sendMessage({
                         action: 'audio_time_update',
                         data: {
@@ -45,13 +41,15 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
         audio.onended = () => {
             if (timeUpdateInterval) clearInterval(timeUpdateInterval);
             timeUpdateInterval = null;
-            chrome.runtime.sendMessage({
-                action: 'media_playback_complete',
-                data: {
-                    instanceId: audio.dataset.instanceId,
-                    pageId: audio.dataset.pageId
-                }
-            });
+            if (chrome.runtime?.id) { // Check context before sending
+                chrome.runtime.sendMessage({
+                    action: 'media_playback_complete',
+                    data: {
+                        instanceId: audio.dataset.instanceId,
+                        pageId: audio.dataset.pageId
+                    }
+                });
+            }
         };
     }
 
@@ -177,6 +175,13 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
     };
 
     function handleMessages(request, sender, sendResponse) {
+        // --- START OF THE FIX: Check if context is still valid before processing ---
+        if (!chrome.runtime?.id) {
+            console.warn("Offscreen document context invalidated. Ignoring message.", request.type);
+            return; // Context is gone, do nothing.
+        }
+        // --- END OF THE FIX ---
+
         if (request.target !== 'offscreen') return false;
         switch (request.type) {
             case 'control-audio':
@@ -220,15 +225,11 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
         return false;
     }
     
-    // This function will wait until the runtime is available before attaching the listener.
-    function initialize() {
-        if (chrome && chrome.runtime && chrome.runtime.onMessage) {
-            chrome.runtime.onMessage.addListener(handleMessages);
-        } else {
-            setTimeout(initialize, 100);
-        }
+    // --- START OF THE FIX: More robust listener attachment ---
+    if (chrome.runtime && chrome.runtime.onMessage) {
+        chrome.runtime.onMessage.addListener(handleMessages);
+    } else {
+        console.error("Offscreen document loaded without chrome.runtime.onMessage. This should not happen.");
     }
-
-    initialize();
-
-} // --- END OF THE FIX: Idempotency Check Block ---
+    // --- END OF THE FIX ---
+}

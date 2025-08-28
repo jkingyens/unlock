@@ -55,17 +55,12 @@ if (!window.unlockOverlayInitialized) {
             chrome.runtime.sendMessage({ action: 'request_playback_action', data: { intent: 'toggle' } });
         });
 
-        // --- START OF THE FIX ---
-        // The main body of the overlay no longer attempts to open the sidebar,
-        // as this was causing the user gesture error. The user must click the
-        // extension action icon to open the sidebar.
         overlay.addEventListener('click', () => {
             // This is now a no-op, but the listener is kept for potential future use.
         });
-        // --- END OF THE FIX ---
-
+        
         linkMention.addEventListener('click', (e) => {
-            e.stopPropagation(); // Prevents the main overlay click (which opens the sidebar)
+            e.stopPropagation(); // Prevents the main overlay click
             const urlToOpen = linkMention.dataset.url;
             if (urlToOpen) {
                 chrome.runtime.sendMessage({
@@ -117,22 +112,22 @@ if (!window.unlockOverlayInitialized) {
         // --- Text Content ---
         overlayText.textContent = state.topic || 'Unlock Media';
 
-        // --- Link Mention ---
-        const hasLink = state.lastMentionedLink && state.lastMentionedLink.url;
+        // --- Moment Mention ---
+        const hasMoment = state.lastTrippedMoment;
 
-        if (hasLink) {
-            // Always update the content if a link is present
-            linkMention.querySelector('.link-text').textContent = state.lastMentionedLink.title;
-            linkMention.dataset.url = state.lastMentionedLink.url;
+        if (hasMoment) {
+            // Always update the content if a moment is present
+            linkMention.querySelector('.link-text').textContent = state.lastTrippedMoment.title;
+            linkMention.dataset.url = state.lastTrippedMoment.url;
             linkMention.style.display = 'flex';
 
             // Only add the animation class if explicitly told to
-            if (state.animateLinkMention) {
+            if (state.animateMomentMention) {
                 linkMention.classList.add('animate');
                 setTimeout(() => linkMention.classList.remove('animate'), 500);
             }
         } else {
-            // Hide the link mention if no link is present
+            // Hide the link mention if no moment is present
             linkMention.style.display = 'none';
             delete linkMention.dataset.url;
         }

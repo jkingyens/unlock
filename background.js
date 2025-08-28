@@ -112,26 +112,22 @@ export let activeMediaPlayback = {
     pageId: null,
     isPlaying: false,
     topic: '',
-    // --- START OF THE FIX: Add authoritative real-time state here ---
     currentTime: 0,
     duration: 0,
-    lastMentionedLink: null
-    // --- END OF THE FIX ---
+    instance: null, // Holds the live instance object during playback
+    lastTrippedMoment: null, // Holds info about the last moment for the overlay
 };
 
 // This is the single, authoritative function for clearing the in-memory state.
 export async function resetActiveMediaPlayback() {
-    // --- START OF THE FIX ---
-    // Explicitly send a stop command to the offscreen audio player.
     await controlAudioInOffscreen('stop', {});
-    // --- END OF THE FIX ---
 
-    if (activeMediaPlayback.isPlaying && activeMediaPlayback.instanceId && activeMediaPlayback.pageId) {
+    if (activeMediaPlayback.isPlaying && activeMediaPlayback.instance) {
         await saveCurrentTime(activeMediaPlayback.instanceId, activeMediaPlayback.pageId, 0, true);
     }
     logger.log('Background', 'CRITICAL LOG: Resetting global activeMediaPlayback state.');
     
-    const initialMediaPlaybackState = {
+    activeMediaPlayback = {
         tabId: null,
         instanceId: null,
         pageId: null,
@@ -139,10 +135,9 @@ export async function resetActiveMediaPlayback() {
         topic: '',
         currentTime: 0,
         duration: 0,
-        lastMentionedLink: null
+        instance: null,
+        lastTrippedMoment: null,
     };
-
-    activeMediaPlayback = { ...initialMediaPlaybackState };
     
     await storage.removeSession(CONFIG.STORAGE_KEYS.ACTIVE_MEDIA_KEY);
     await notifyUIsOfStateChange();
@@ -242,32 +237,8 @@ async function injectOverlayScripts(tabId) {
 
 function findMediaItemInInstance(instance, pageId) {
     if (!instance || !instance.contents || !pageId) return null;
-    for (const item of instance.contents) {
-        if (item.pageId === pageId) return item;
-        if (item.type === 'alternative' && item.alternatives) {
-            const found = item.alternatives.find(alt => alt.pageId === pageId);
-            if (found) return found;
-        }
-    }
-    return null;
+    return instance.contents.find(item => item.pageId === pageId && item.type === 'media');
 }
-
-function calculateLastMentionedLink(instance, mediaItem) {
-    if (!instance || !mediaItem || !mediaItem.timestamps || typeof mediaItem.currentTime !== 'number') {
-        return null;
-    }
-    let lastMentionedTimestamp = null;
-    mediaItem.timestamps.forEach(ts => {
-        if (mediaItem.currentTime >= ts.startTime) {
-            if (!lastMentionedTimestamp || ts.startTime > lastMentionedTimestamp.startTime) {
-                lastMentionedTimestamp = ts;
-            }
-        }
-    });
-    const linkItem = lastMentionedTimestamp ? instance.contents.find(i => i.url === lastMentionedTimestamp.url) : null;
-    return linkItem ? { url: linkItem.url, title: linkItem.title } : null;
-}
-
 
 export async function saveCurrentTime(instanceId, pageId, providedCurrentTime, isStopping = false) {
     try {
@@ -295,16 +266,19 @@ export async function saveCurrentTime(instanceId, pageId, providedCurrentTime, i
     }
 }
 
-export async function notifyUIsOfStateChange(instanceOverride = null, options = {}) {
-    let instance;
-    if (instanceOverride) {
-        instance = instanceOverride;
-    } else if (activeMediaPlayback.instanceId) {
-        instance = await storage.getPacketInstance(activeMediaPlayback.instanceId);
-    }
+export async function notifyUIsOfStateChange(options = {}) {
+    let instance = activeMediaPlayback.instance;
 
     if (!instance) {
-        sidebarHandler.notifySidebar('playback_state_updated', { ...activeMediaPlayback, isPlaying: false, currentTime: 0, duration: 0, mentionedMediaLinks: [], lastMentionedLink: null });
+        const emptyState = { 
+            ...activeMediaPlayback, 
+            isPlaying: false, 
+            currentTime: 0, 
+            duration: 0, 
+            momentsTripped: [],
+            lastTrippedMoment: null
+        };
+        sidebarHandler.notifySidebar('playback_state_updated', emptyState);
         const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
         if (activeTab) {
              try {
@@ -317,15 +291,10 @@ export async function notifyUIsOfStateChange(instanceOverride = null, options = 
         }
         return;
     }
-
-    const mediaItem = findMediaItemInInstance(instance, activeMediaPlayback.pageId);
     
     const playbackStateForUI = {
         ...activeMediaPlayback,
-        currentTime: activeMediaPlayback.currentTime || 0,
-        duration: activeMediaPlayback.duration || 0,
-        mentionedMediaLinks: instance.mentionedMediaLinks || [],
-        lastMentionedLink: calculateLastMentionedLink(instance, { ...mediaItem, currentTime: activeMediaPlayback.currentTime }),
+        momentsTripped: instance.momentsTripped || [],
         ...options
     };
 
@@ -347,18 +316,26 @@ export async function notifyUIsOfStateChange(instanceOverride = null, options = 
 
 
 export async function setMediaPlaybackState(newState, options = { animate: false, source: 'unknown' }) {
-    const oldLink = calculateLastMentionedLink(await storage.getPacketInstance(activeMediaPlayback.instanceId), findMediaItemInInstance(await storage.getPacketInstance(activeMediaPlayback.instanceId), activeMediaPlayback.pageId));
-    
+    // --- START OF THE FIX ---
+    const oldInstanceId = activeMediaPlayback.instanceId;
+    const newInstanceId = newState.instanceId || oldInstanceId;
+
     activeMediaPlayback = { ...activeMediaPlayback, ...newState };
 
-    const instance = await storage.getPacketInstance(activeMediaPlayback.instanceId);
-    if (!instance) return;
-
-    const mediaItem = findMediaItemInInstance(instance, activeMediaPlayback.pageId);
-    const newLink = calculateLastMentionedLink(instance, mediaItem);
+    // If the instanceId has changed, or if there's an instanceId but no live instance object,
+    // we need to load or reload it to ensure our live state is always accurate.
+    if (newInstanceId && (newInstanceId !== oldInstanceId || !activeMediaPlayback.instance)) {
+        try {
+            activeMediaPlayback.instance = await storage.getPacketInstance(newInstanceId);
+            logger.log('Background:setMediaPlaybackState', `Loaded/reloaded live instance data for ${newInstanceId} into active media state.`);
+        } catch (error) {
+            logger.error('Background:setMediaPlaybackState', `Failed to load instance ${newInstanceId}`, error);
+            await resetActiveMediaPlayback(); // Reset if we can't load the instance
+            return;
+        }
+    }
+    // --- END OF THE FIX ---
     
-    const aNewLinkWasMentioned = newLink && (!oldLink || newLink.url !== oldLink.url);
-
     const isPlaying = activeMediaPlayback.isPlaying;
     const hasActiveTrack = !!activeMediaPlayback.pageId;
 
@@ -374,16 +351,17 @@ export async function setMediaPlaybackState(newState, options = { animate: false
         await storage.removeSession(CONFIG.STORAGE_KEYS.ACTIVE_MEDIA_KEY);
     }
     
-    await notifyUIsOfStateChange(instance, {
-        ...options,
-        animateLinkMention: aNewLinkWasMentioned && options.source === 'time_update',
-    });
+    await notifyUIsOfStateChange(options);
 }
 
 async function restoreMediaStateOnStartup() {
     const data = await storage.getSession(CONFIG.STORAGE_KEYS.ACTIVE_MEDIA_KEY);
     if (data && data[CONFIG.STORAGE_KEYS.ACTIVE_MEDIA_KEY]) {
         activeMediaPlayback = data[CONFIG.STORAGE_KEYS.ACTIVE_MEDIA_KEY];
+        // Ensure instance is reloaded from persistent storage on startup
+        if (activeMediaPlayback.instanceId) {
+            activeMediaPlayback.instance = await storage.getPacketInstance(activeMediaPlayback.instanceId);
+        }
     }
 }
 
@@ -460,7 +438,7 @@ chrome.runtime.onMessageExternal.addListener(async (message, sender, sendRespons
     if (message.action === 'page_interaction_complete') {
         const context = await getPacketContext(sender.tab.id);
         if (context?.instanceId && context?.canonicalPacketUrl) {
-            const visitResult = await packetUtils.markUrlAsVisited(context.instanceId, context.canonicalPacketUrl);
+            const visitResult = await packetUtils.markUrlAsVisited(context.instanceId, context.canonicalPacketUrl, activeMediaPlayback.instance);
             if (visitResult.success && visitResult.modified) {
                 sidebarHandler.notifySidebar('packet_instance_updated', { instance: visitResult.instance });
                 await checkAndPromptForCompletion('onMessageExternal', visitResult, context.instanceId);
@@ -510,11 +488,6 @@ async function reorderGroupFromChangeEvent(groupId) {
 }
 
 chrome.tabs.onActivated.addListener(async (activeInfo) => {
-
-
-    // Check for a lock file in session storage. If it exists, it means we are in the
-    // middle of a tab-closing operation and should not process tab activation events
-    // to prevent race conditions that could re-open the sidebar view.
     const closingState = await storage.getSession('isClosingGroup');
     if (closingState && closingState.isClosingGroup) {
         logger.log('Background:onActivated', 'Ignoring tab activation event due to tab group closure in progress.');
@@ -537,7 +510,12 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
     }
     await sidebarHandler.updateActionForTab(tabId);
     const context = await getPacketContext(tabId);
-    const instance = context ? await storage.getPacketInstance(context.instanceId) : null;
+    let instance = context ? await storage.getPacketInstance(context.instanceId) : null;
+    
+    if (instance && activeMediaPlayback.instanceId === instance.instanceId) {
+        instance = activeMediaPlayback.instance;
+    }
+
     if (sidebarHandler.isSidePanelAvailable()) {
         sidebarHandler.notifySidebar('update_sidebar_context', {
             tabId,

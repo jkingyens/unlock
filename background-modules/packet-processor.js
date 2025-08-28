@@ -122,12 +122,14 @@ export async function generateDraftPacketFromTab(initiatorTabId) {
         const topic = analysisResult.topic;
 
         const externalContentResponse = await llmService.callLLM('article_suggestions', { topic: topic, contentSummary: analysisResult.contentSummary });
-        const validatedExternalLinks = externalContentResponse.success ? (externalContentResponse.data.contents || [])
+        
+        let validatedExternalLinks = externalContentResponse.success ? (externalContentResponse.data.contents || [])
             .filter(item => item?.url?.startsWith('https://en.wikipedia.org/wiki/') && item.title && item.relevance)
             .map(item => ({ type: 'external', url: decodeURIComponent(item.url), title: item.title, relevance: item.relevance })) : [];
 
         const summaryPageDef = { type: "generated", pageId: "summary-page", title: `${topic} Summary`, contentType: "text/html" };
         let audioMediaItem = null;
+        let moments = [];
 
         const allContentForSummary = [...validatedExternalLinks, sourcePageContentItem];
         const summaryContext = { topic: topic, allPacketContents: allContentForSummary };
@@ -136,9 +138,8 @@ export async function generateDraftPacketFromTab(initiatorTabId) {
         if (!summaryResponse.success || !summaryResponse.data) throw new Error(summaryResponse.error || 'LLM failed to generate summary.');
         
         const summaryHtmlBodyLLM = String(summaryResponse.data).trim();
-        
         const plainTextForTTS = await getAndParseHtml(summaryHtmlBodyLLM, false);
-        const ttsResponse = await ttsService.generateAudioAndTimestamps(plainTextForTTS);
+        const ttsResponse = await ttsService.generateAudio(plainTextForTTS);
         
         const draftId = `draft_${Date.now()}`; 
 
@@ -150,39 +151,51 @@ export async function generateDraftPacketFromTab(initiatorTabId) {
                 pageId: `audio_summary_${Date.now()}`,
                 title: summaryPageDef.title,
                 mimeType: 'audio/wav',
-                timestamps: [],
                 published: false 
             };
             
-            // --- START OF THE FIX: Reverted to the original, more reliable two-call method ---
             const links = await getLinksFromHtml(summaryHtmlBodyLLM);
-            // This second call gets more accurate alignment data for existing audio.
             const alignmentResponse = await ttsService.getAlignmentForExistingAudio(audioBuffer, plainTextForTTS);
             
-            if (alignmentResponse.success && alignmentResponse.wordTimestamps) {
-                if (links.length > 0 && alignmentResponse.wordTimestamps.length > 0) {
-                     const sourceOfTruthText = await getAndParseHtml(summaryHtmlBodyLLM, true);
-                     audioMediaItem.timestamps = runPositionalInterpolation(sourceOfTruthText, alignmentResponse.wordTimestamps, links);
-                }
-            } else {
-                logger.warn("PacketProcessor:generateDraftFromTab", "Forced alignment call failed, timestamps will be empty.", alignmentResponse.error);
+            if (alignmentResponse.success && alignmentResponse.wordTimestamps && links.length > 0) {
+                const sourceOfTruthText = await getAndParseHtml(summaryHtmlBodyLLM, true);
+                const totalAudioDuration = alignmentResponse.wordTimestamps[alignmentResponse.wordTimestamps.length - 1]?.end || 0;
+
+                links.forEach(link => {
+                    const markedLinkText = `*${link.text}*`;
+                    const charIndex = sourceOfTruthText.indexOf(markedLinkText);
+                    const linkedItem = validatedExternalLinks.find(ext => ext.url === link.href);
+
+                    if (charIndex !== -1 && linkedItem) {
+                        const proportionalPosition = charIndex / sourceOfTruthText.length;
+                        const startTime = proportionalPosition * totalAudioDuration;
+                        
+                        const momentIndex = moments.length;
+                        moments.push({
+                            id: `moment_${momentIndex}`,
+                            type: "mediaTimestamp",
+                            sourcePageId: audioMediaItem.pageId,
+                            timestamp: parseFloat(startTime.toFixed(2))
+                        });
+                        linkedItem.revealedByMoment = momentIndex;
+                    }
+                });
             }
-            // --- END OF THE FIX ---
             
             await indexedDbStorage.saveGeneratedContent(draftId, audioMediaItem.pageId, [{ name: 'audio.wav', content: audioBuffer, contentType: 'audio/wav' }]);
         }
 
         summaryPageDef.contentB64 = arrayBufferToBase64(new TextEncoder().encode(enhanceHtml(summaryHtmlBodyLLM, topic, summaryPageDef.title)));
         
-        const summaryContent = { type: 'alternative', alternatives: [summaryPageDef] };
-        if (audioMediaItem) summaryContent.alternatives.push(audioMediaItem);
-        
-        const finalSourceContent = [summaryContent, ...validatedExternalLinks, sourcePageContentItem];
+        const finalSourceContent = [summaryPageDef];
+        if (audioMediaItem) finalSourceContent.push(audioMediaItem);
+        finalSourceContent.push(...validatedExternalLinks, sourcePageContentItem);
         
         const draftPacket = {
             id: draftId,
             topic: topic,
-            sourceContent: finalSourceContent
+            sourceContent: finalSourceContent,
+            moments: moments
         };
 
         return { success: true, draft: draftPacket };
@@ -308,46 +321,68 @@ export function enhanceHtml(bodyHtml, topic, pageTitle) {
 </html>`;
 }
 
-// --- Positional Interpolation Algorithm ---
-function runPositionalInterpolation(sourceOfTruthText, wordTimestamps, links) {
-    const log = (message, data) => logger.log('PositionalInterpolation', message, data);
+// --- START: Legacy Packet Migration ---
+function _migrateLegacyPacketImage(legacyImage) {
+    logger.log('PacketProcessor:Migration', `Starting migration for legacy packet image: ${legacyImage.id}`);
     
-    if (!wordTimestamps || wordTimestamps.length === 0) {
-        log("Cannot run interpolation: No word timestamps provided.");
-        return [];
-    }
-    
-    const totalAudioDuration = wordTimestamps[wordTimestamps.length - 1].end;
-    const totalTextLength = sourceOfTruthText.length;
-    const timestamps = [];
+    const newSourceContent = [];
+    const newMoments = [];
+    const externalLinks = [];
+    let mediaItem = null;
 
-    log("Starting interpolation...", { totalAudioDuration, totalTextLength, linkCount: links.length });
-    
-    links.forEach(link => {
-        const markedLinkText = `*${link.text}*`;
-        const charIndex = sourceOfTruthText.indexOf(markedLinkText);
-
-        if (charIndex !== -1) {
-            const proportionalPosition = charIndex / totalTextLength;
-            const startTime = proportionalPosition * totalAudioDuration;
-            const endTime = startTime + 3; // Fixed 3-second duration
-
-            timestamps.push({
-                url: link.href,
-                text: link.text,
-                startTime: parseFloat(startTime.toFixed(3)),
-                endTime: parseFloat(endTime.toFixed(3))
-            });
-            
-            log(`Found link "${link.text}"`, { charIndex, proportionalPosition, startTime });
+    // First pass: extract all items and find the media item
+    for (const item of legacyImage.sourceContent) {
+        if (item.type === 'alternative') {
+            for (const alt of item.alternatives) {
+                if (alt.type === 'media') {
+                    mediaItem = { ...alt }; // Make a copy
+                    newSourceContent.push(mediaItem);
+                } else {
+                    newSourceContent.push(alt);
+                }
+            }
         } else {
-            log(`Could not find marked link "${link.text}" in source of truth text.`);
+            if (item.type === 'external') {
+                externalLinks.push(item);
+            }
+            newSourceContent.push(item);
         }
-    });
+    }
 
-    log("Interpolation complete.", { finalTimestamps: timestamps });
-    return timestamps;
+    // Second pass: if there was a media item with timestamps, create moments
+    if (mediaItem && Array.isArray(mediaItem.timestamps) && mediaItem.timestamps.length > 0) {
+        mediaItem.timestamps.forEach(ts => {
+            const momentIndex = newMoments.length;
+            newMoments.push({
+                id: `moment_${momentIndex}`,
+                type: 'mediaTimestamp',
+                sourcePageId: mediaItem.pageId,
+                timestamp: ts.startTime
+            });
+
+            // Find the corresponding external link and link it to the new moment
+            const linkedItem = externalLinks.find(link => link.url === ts.url);
+            if (linkedItem) {
+                const itemInNewContent = newSourceContent.find(i => i.url === linkedItem.url);
+                if (itemInNewContent) {
+                    itemInNewContent.revealedByMoment = momentIndex;
+                }
+            }
+        });
+        delete mediaItem.timestamps; // Remove the old timestamps array
+    }
+
+    const migratedImage = {
+        ...legacyImage,
+        sourceContent: newSourceContent,
+        moments: newMoments,
+        migrated: true // Add a flag to show it's been converted
+    };
+    
+    logger.log('PacketProcessor:Migration', `Migration complete for ${legacyImage.id}.`, { newMomentCount: newMoments.length });
+    return migratedImage;
 }
+// --- END: Legacy Packet Migration ---
 
 
 // --- Main Processing Functions ---
@@ -356,10 +391,20 @@ export async function instantiatePacket(imageId, preGeneratedInstanceId, initiat
     logger.log('PacketProcessor:instantiatePacket', 'Starting INSTANCE finalization', { imageId, instanceId });
 
     try {
-        const packetImage = await storage.getPacketImage(imageId);
+        let packetImage = await storage.getPacketImage(imageId);
         if (!packetImage) throw new Error(`Packet Image ${imageId} not found.`);
 
-        const hasGeneratedContent = packetImage.sourceContent.some(item => item.type === 'generated' || item.type === 'media' || (item.type === 'alternative' && item.alternatives.some(alt => alt.type === 'generated' || alt.type === 'media')));
+        // --- START: Legacy Packet Migration Check ---
+        const isLegacy = packetImage.sourceContent.some(item => item.type === 'alternative');
+        if (isLegacy) {
+            logger.warn('PacketProcessor:instantiatePacket', `Legacy packet format detected for image ${imageId}. Migrating...`);
+            packetImage = _migrateLegacyPacketImage(packetImage);
+            await storage.savePacketImage(packetImage);
+            logger.log('PacketProcessor:instantiatePacket', `Legacy packet ${imageId} migrated and saved.`);
+        }
+        // --- END: Legacy Packet Migration Check ---
+
+        const hasGeneratedContent = packetImage.sourceContent.some(item => item.type === 'generated' || item.type === 'media');
         let activeCloudConfig = null;
 
         if (hasGeneratedContent) {
@@ -375,66 +420,18 @@ export async function instantiatePacket(imageId, preGeneratedInstanceId, initiat
             logger.log('PacketProcessor:instantiatePacket', 'Packet contains only external links. Skipping cloud storage checks.');
         }
 
-        // *** THE FIX: Perform a deep copy of the sourceContent. ***
-        // This prevents state (like mentionedMediaLinks or visitedUrls) from leaking 
-        // between instances that are created from the same PacketImage template.
-        const deepCopiedSourceContent = JSON.parse(JSON.stringify(packetImage.sourceContent));
-
         let packetInstance = {
             instanceId: instanceId,
             imageId: imageId,
             topic: packetImage.topic,
             created: packetImage.created,
             instantiated: new Date().toISOString(),
-            contents: [], // This will be populated from the deep-copied source
+            contents: JSON.parse(JSON.stringify(packetImage.sourceContent)),
             visitedUrls: [],
             visitedGeneratedPageIds: [],
-            mentionedMediaLinks: [], 
+            momentsTripped: packetImage.moments ? Array(packetImage.moments.length).fill(0) : [],
         };
 
-        // Populate the new instance's contents from the pristine, deep-copied template
-        for (const sourceItem of deepCopiedSourceContent) {
-            if (sourceItem.type === 'alternative') {
-                const settings = await storage.getSettings();
-                const preferAudio = settings.preferAudio && sourceItem.alternatives.some(a => a.type === 'media');
-
-                const chosenItem = preferAudio
-                    ? sourceItem.alternatives.find(a => a.type === 'media')
-                    : sourceItem.alternatives.find(a => a.type === 'generated');
-                
-                if (chosenItem) {
-                    // --- START OF THE FIX: Push a deep copy, not a reference ---
-                    packetInstance.contents.push(JSON.parse(JSON.stringify(chosenItem)));
-                    // --- END OF THE FIX ---
-                }
-
-            } else {
-                // --- START OF THE FIX: Push a deep copy, not a reference ---
-                packetInstance.contents.push(JSON.parse(JSON.stringify(sourceItem)));
-                // --- END OF THE FIX ---
-            }
-        }
-
-        // Populate the new instance's contents from the pristine, deep-copied template
-        for (const sourceItem of deepCopiedSourceContent) {
-            if (sourceItem.type === 'alternative') {
-                const settings = await storage.getSettings();
-                const preferAudio = settings.preferAudio && sourceItem.alternatives.some(a => a.type === 'media');
-
-                const chosenItem = preferAudio
-                    ? sourceItem.alternatives.find(a => a.type === 'media')
-                    : sourceItem.alternatives.find(a => a.type === 'generated');
-                
-                if (chosenItem) {
-                    packetInstance.contents.push(chosenItem);
-                }
-
-            } else {
-                packetInstance.contents.push(sourceItem);
-            }
-        }
-        
-        // Process and publish content for the new instance
         for (let i = 0; i < packetInstance.contents.length; i++) {
             const item = packetInstance.contents[i];
             if (item.type === 'generated') {
@@ -498,12 +495,6 @@ export async function instantiatePacket(imageId, preGeneratedInstanceId, initiat
                 }
             }
         }
-        
-        logger.log('PacketProcessor:instantiatePacket', 'CRITICAL LOG: Final instance state before saving.', {
-            instanceId: packetInstance.instanceId,
-            mentionedMediaLinks: packetInstance.mentionedMediaLinks,
-            mentionedLinksLength: packetInstance.mentionedMediaLinks?.length || 0
-        });
 
         if (!(await storage.savePacketInstance(packetInstance))) {
             throw new Error("Failed to save final Packet Instance.");
@@ -618,25 +609,16 @@ export async function importImageFromUrl(url) {
         const importedPacketImage = { ...sharedImage, id: imageId, created: new Date().toISOString(), shareUrl: url };
         
         for (const contentItem of importedPacketImage.sourceContent) {
-            let itemsToProcess = [];
-             if (contentItem.type === 'media') {
-                itemsToProcess.push(contentItem);
-            } else if (contentItem.type === 'alternative' && Array.isArray(contentItem.alternatives)) {
-                itemsToProcess.push(...contentItem.alternatives.filter(alt => alt.type === 'media'));
-            }
-
-            for (const mediaItem of itemsToProcess) {
-                if (mediaItem.contentB64) {
-                    const audioBuffer = base64Decode(mediaItem.contentB64);
-                    if (audioBuffer) {
-                        await indexedDbStorage.saveGeneratedContent(imageId, mediaItem.pageId, [{
-                            name: 'audio.wav',
-                            content: audioBuffer,
-                            contentType: mediaItem.mimeType
-                        }]);
-                    }
-                    delete mediaItem.contentB64;
+            if (contentItem.type === 'media' && contentItem.contentB64) {
+                const audioBuffer = base64Decode(contentItem.contentB64);
+                if (audioBuffer) {
+                    await indexedDbStorage.saveGeneratedContent(imageId, contentItem.pageId, [{
+                        name: 'audio.wav',
+                        content: audioBuffer,
+                        contentType: contentItem.mimeType
+                    }]);
                 }
+                delete contentItem.contentB64;
             }
         }
 
@@ -696,11 +678,17 @@ export async function processCreatePacketRequest(data, initiatorTabId) {
         sendStencilProgressNotification(imageId, 'generate_summary', 'completed', 'Summary generated', 60);
 
         const finalSourceContent = [
-            { type: 'alternative', alternatives: [summaryPageDef] },
+            summaryPageDef,
             ...validatedExternalLinks,
         ];
 
-        const packetImage = { id: imageId, topic: topic, created: new Date().toISOString(), sourceContent: finalSourceContent };
+        const packetImage = {
+            id: imageId,
+            topic: topic,
+            created: new Date().toISOString(),
+            sourceContent: finalSourceContent,
+            moments: [] // No moments for text-only packets
+        };
         await storage.savePacketImage(packetImage);
         logger.log('PacketProcessor', 'Packet Image with embedded Base64 content saved successfully', { imageId });
         sendStencilProgressNotification(imageId, 'local_save_final', 'completed', 'Packet ready in Library', 100);
@@ -712,59 +700,6 @@ export async function processCreatePacketRequest(data, initiatorTabId) {
     } catch (error) {
         logger.error('PacketProcessor:processCreatePacketRequest', `Error creating packet image for topic ${topic}`, error);
         sendProgressNotification('packet_creation_failed', { imageId: imageId, error: error.message });
-        return { success: false, error: error.message };
-    }
-}
-
-export async function processGenerateTimestampsRequest(data) {
-    const { draftId, htmlPageId, mediaPageId, htmlContentB64, originalTitle } = data; // <--CAPTURE new variable
-    if (!draftId || !htmlPageId || !mediaPageId || !htmlContentB64) {
-        return { success: false, error: "Missing required data for timestamp generation." };
-    }
-
-    try {
-        const htmlContent = new TextDecoder().decode(base64Decode(htmlContentB64));
-        
-        const [plainTextForTTS, links, sourceOfTruthText] = await Promise.all([
-            getAndParseHtml(htmlContent, false),
-            getLinksFromHtml(htmlContent),
-            getAndParseHtml(htmlContent, true)
-        ]);
-
-        if (!links || links.length === 0) {
-            return { success: true, updatedMediaItem: null, message: "No timestampable links found." };
-        }
-
-        const audioContent = await indexedDbStorage.getGeneratedContent(draftId, mediaPageId);
-        if (!audioContent || audioContent.length === 0) {
-            throw new Error(`Audio content not found in IndexedDB for pageId: ${mediaPageId}`);
-        }
-        const audioBuffer = audioContent[0].content;
-
-        const alignmentResponse = await ttsService.getAlignmentForExistingAudio(audioBuffer, plainTextForTTS);
-        if (!alignmentResponse.success) {
-            throw new Error(alignmentResponse.error || "Forced alignment service failed.");
-        }
-        
-        const { wordTimestamps } = alignmentResponse;
-        let timestamps = [];
-
-        if (wordTimestamps && wordTimestamps.length > 0) {
-            timestamps = runPositionalInterpolation(sourceOfTruthText, wordTimestamps, links);
-        }
-        
-        const updatedMediaItem = {
-            type: 'media',
-            pageId: mediaPageId,
-            title: originalTitle || "Summary Audio",
-            mimeType: 'audio/mpeg',
-            timestamps: timestamps
-        };
-
-        return { success: true, updatedMediaItem };
-
-    } catch (error) {
-        logger.error("PacketProcessor:processGenerateTimestampsRequest", "Error during timestamp generation", error);
         return { success: false, error: error.message };
     }
 }
@@ -816,12 +751,10 @@ export async function processCreatePacketRequestFromTab(initiatorTabId) {
 
         sendStencilProgressNotification(imageId, 'articles', 'active', 'Finding articles...', 25, topic);
         const externalContentResponse = await llmService.callLLM('article_suggestions', { topic: topic, contentSummary: analysisResult.contentSummary });
-        if (!externalContentResponse.success || !externalContentResponse.data?.contents) {
-            throw new Error(externalContentResponse.error || 'LLM failed to return articles.');
-        }
-        const validatedExternalLinks = (externalContentResponse.data.contents || [])
+        
+        let validatedExternalLinks = externalContentResponse.success ? (externalContentResponse.data.contents || [])
             .filter(item => item?.url?.startsWith('https://en.wikipedia.org/wiki/') && item.title && item.relevance)
-            .map(item => ({ type: 'external', url: decodeURIComponent(item.url), title: item.title, relevance: item.relevance }));
+            .map(item => ({ type: 'external', url: decodeURIComponent(item.url), title: item.title, relevance: item.relevance })) : [];
 
         if (validatedExternalLinks.length === 0) {
             logger.warn('PacketProcessor:FromTab', `LLM returned no valid Wikipedia articles for "${topic}". Packet will be created without them.`);
@@ -830,6 +763,7 @@ export async function processCreatePacketRequestFromTab(initiatorTabId) {
 
         const summaryPageDef = { type: "generated", pageId: "summary-page", title: `${topic} Summary`, contentType: "text/html" };
         let audioMediaItem = null;
+        let moments = [];
 
         sendStencilProgressNotification(imageId, 'generate_summary', 'active', 'Generating summary...', 50, topic);
 
@@ -842,7 +776,7 @@ export async function processCreatePacketRequestFromTab(initiatorTabId) {
         const summaryHtmlBodyLLM = String(summaryResponse.data).trim();
         
         const plainTextForTTS = await getAndParseHtml(summaryHtmlBodyLLM, false);
-        const ttsResponse = await ttsService.generateAudioAndTimestamps(plainTextForTTS);
+        const ttsResponse = await ttsService.generateAudio(plainTextForTTS);
 
         if (ttsResponse.success && ttsResponse.audioBlob) {
             const normalizedAudioBlob = await normalizeAudioOffscreen(ttsResponse.audioBlob);
@@ -851,37 +785,57 @@ export async function processCreatePacketRequestFromTab(initiatorTabId) {
                 type: 'media',
                 pageId: `audio_summary_${Date.now()}`,
                 title: summaryPageDef.title,
-                mimeType: 'audio/wav',
-                timestamps: [],
-                published: true
+                mimeType: 'audio/wav'
             };
 
             const links = await getLinksFromHtml(summaryHtmlBodyLLM);
             const alignmentResponse = await ttsService.getAlignmentForExistingAudio(audioBuffer, plainTextForTTS);
             
-            if (alignmentResponse.success && alignmentResponse.wordTimestamps) {
-                if (links.length > 0 && alignmentResponse.wordTimestamps.length > 0) {
-                     const sourceOfTruthText = await getAndParseHtml(summaryHtmlBodyLLM, true);
-                     audioMediaItem.timestamps = runPositionalInterpolation(sourceOfTruthText, alignmentResponse.wordTimestamps, links);
-                }
-            } else {
-                logger.warn("PacketProcessor:FromTab", "Forced alignment call failed, timestamps will be empty.", alignmentResponse.error);
+            if (alignmentResponse.success && alignmentResponse.wordTimestamps && links.length > 0) {
+                const sourceOfTruthText = await getAndParseHtml(summaryHtmlBodyLLM, true);
+                const totalAudioDuration = alignmentResponse.wordTimestamps[alignmentResponse.wordTimestamps.length - 1]?.end || 0;
+
+                links.forEach(link => {
+                    const markedLinkText = `*${link.text}*`;
+                    const charIndex = sourceOfTruthText.indexOf(markedLinkText);
+                    const linkedItem = validatedExternalLinks.find(ext => ext.url === link.href);
+
+                    if (charIndex !== -1 && linkedItem) {
+                        const proportionalPosition = charIndex / sourceOfTruthText.length;
+                        const startTime = proportionalPosition * totalAudioDuration;
+                        
+                        const momentIndex = moments.length;
+                        moments.push({
+                            id: `moment_${momentIndex}`,
+                            type: "mediaTimestamp",
+                            sourcePageId: audioMediaItem.pageId,
+                            timestamp: parseFloat(startTime.toFixed(2))
+                        });
+                        linkedItem.revealedByMoment = momentIndex;
+                    }
+                });
             }
 
             await indexedDbStorage.saveGeneratedContent(imageId, audioMediaItem.pageId, [{ name: 'audio.wav', content: audioBuffer, contentType: 'audio/wav' }]);
             logger.log('PacketProcessor:FromTab', 'Successfully created media item for TTS audio and saved to IndexedDB.');
         } else {
-            logger.warn('PacketProcessor:FromTab', 'Failed to generate audio from ElevenLabs.', ttsResponse?.error);
+            logger.warn('PacketProcessor:FromTab', 'Failed to generate audio from TTS service.', ttsResponse?.error);
         }
 
         summaryPageDef.contentB64 = arrayBufferToBase64(new TextEncoder().encode(enhanceHtml(summaryHtmlBodyLLM, topic, summaryPageDef.title)));
         sendStencilProgressNotification(imageId, 'generate_summary', 'completed', 'Summary generated', 70, topic);
 
-        const summaryContent = { type: 'alternative', alternatives: [summaryPageDef] };
-        if (audioMediaItem) summaryContent.alternatives.push(audioMediaItem);
-
-        const finalSourceContent = [summaryContent, ...validatedExternalLinks, sourcePageContentItem];
-        const packetImage = { id: imageId, topic, created: new Date().toISOString(), sourceContent: finalSourceContent };
+        const finalSourceContent = [summaryPageDef];
+        if (audioMediaItem) finalSourceContent.push(audioMediaItem);
+        finalSourceContent.push(...validatedExternalLinks, sourcePageContentItem);
+        
+        const packetImage = { 
+            id: imageId, 
+            topic, 
+            created: new Date().toISOString(), 
+            sourceContent: finalSourceContent,
+            moments: moments
+        };
         
         await storage.savePacketImage(packetImage);
         logger.log('PacketProcessor:FromTab', 'Packet Image saved successfully', { imageId });
@@ -1091,17 +1045,10 @@ export async function publishImageForSharing(imageId) {
         const imageForExport = JSON.parse(JSON.stringify(packetImage));
 
         for (const contentItem of imageForExport.sourceContent) {
-            let itemsToProcess = [];
             if (contentItem.type === 'media') {
-                itemsToProcess.push(contentItem);
-            } else if (contentItem.type === 'alternative' && Array.isArray(contentItem.alternatives)) {
-                itemsToProcess.push(...contentItem.alternatives.filter(alt => alt.type === 'media'));
-            }
-
-            for (const mediaItem of itemsToProcess) {
-                const mediaContent = await indexedDbStorage.getGeneratedContent(imageId, mediaItem.pageId);
+                const mediaContent = await indexedDbStorage.getGeneratedContent(imageId, contentItem.pageId);
                 if (mediaContent && mediaContent[0] && mediaContent[0].content) {
-                    mediaItem.contentB64 = arrayBufferToBase64(mediaContent[0].content);
+                    contentItem.contentB64 = arrayBufferToBase64(mediaContent[0].content);
                 }
             }
         }
