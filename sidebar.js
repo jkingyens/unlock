@@ -68,8 +68,12 @@ async function initialize() {
             await storage.removeSession(PENDING_VIEW_KEY);
         } else {
             const response = await sendMessageToBackground({ action: 'get_current_tab_context' });
-            if (response?.success && response.instanceId) {
+            if (response?.success) {
+                // --- FIX: Ensure context is fully updated before navigating ---
                 await updateSidebarContext(response);
+                if (!response.instanceId) {
+                    navigateTo('root');
+                }
             } else {
                 navigateTo('root');
             }
@@ -86,12 +90,7 @@ function setupGlobalListeners() {
         if (currentView === 'create') {
             createView.handleDiscardDraftPacket();
         } else {
-            // --- START OF THE FIX ---
-            // When going back from detail view, ensure its state is cleared.
-            if (currentView === 'packet-detail') {
-                detailView.clearCurrentDetailView();
-            }
-            // --- END OF THE FIX ---
+            resetSidebarState(); // Explicitly reset state before navigating
             navigateTo('root');
         }
     });
@@ -102,8 +101,6 @@ function setupGlobalListeners() {
 // --- Navigation & View Management ---
 
 export async function navigateTo(viewName, instanceId = null, data = null) {
-
-
     if (viewName === 'root') {
         resetSidebarState();
     }
@@ -137,13 +134,16 @@ export async function navigateTo(viewName, instanceId = null, data = null) {
 
                 if (!instanceData) throw new Error(`Packet instance ${instanceId} not found.`);
                 
+                const imageData = await storage.getPacketImage(instanceData.imageId);
+                if (!imageData) throw new Error(`Packet image ${instanceData.imageId} for instance ${instanceId} not found.`);
+
                 currentView = 'packet-detail';
                 currentInstanceId = instanceData.instanceId;
                 currentInstanceData = instanceData;
                 newSidebarTitle = instanceData.topic || 'Packet Details';
                 domRefs.packetDetailView.classList.remove('hidden');
                 
-                await detailView.displayPacketContent(instanceData, browserState, currentPacketUrl);
+                await detailView.displayPacketContent(instanceData, imageData, browserState, currentPacketUrl);
                 break;
             case 'create':
                 currentView = 'create';
@@ -159,9 +159,7 @@ export async function navigateTo(viewName, instanceId = null, data = null) {
                 await settingsView.prepareSettingsView();
                 break;
             default: // root
-                currentView = 'root';
-                currentInstanceId = null;
-                currentInstanceData = null;
+                currentView = 'root'; // State is already reset, just update the view name
                 domRefs.rootView.classList.remove('hidden');
                 await rootView.displayRootNavigation();
                 break;
@@ -170,7 +168,7 @@ export async function navigateTo(viewName, instanceId = null, data = null) {
     } catch (error) {
         logger.error('Sidebar:navigateTo', `Error navigating to ${viewName}:`, error);
         showRootViewStatus(`Error loading view: ${error.message}`, 'error');
-        navigateTo('root');
+        navigateTo('root'); // Fallback to root
     } finally {
         isNavigating = false;
         if (nextNavigationRequest) {
@@ -211,11 +209,18 @@ async function updateSidebarContext(contextData) {
             return; 
         }
 
+        const newImageData = await storage.getPacketImage(newInstanceData.imageId);
+        if (!newImageData) {
+            logger.error('Sidebar:updateSidebarContext', `Could not find image for instance ${newInstanceId}.`);
+            navigateTo('root');
+            return;
+        }
+
         currentInstanceData = newInstanceData;
         currentPacketUrl = newPacketUrl;
         
         const browserState = await storage.getPacketBrowserState(currentInstanceId);
-        await detailView.displayPacketContent(currentInstanceData, browserState, currentPacketUrl);
+        await detailView.displayPacketContent(currentInstanceData, newImageData, browserState, currentPacketUrl);
     }
 }
 
@@ -231,7 +236,8 @@ async function openUrl(url, instanceId) {
     isOpeningPacketItem = true;
     setTimeout(() => { isOpeningPacketItem = false; }, 1500);
 
-    await detailView.triggerImmediateSave();
+    // --- REMOVE THIS LINE ---
+    // await detailView.triggerImmediateSave(); 
 
     sendMessageToBackground({
         action: 'open_content',
@@ -241,7 +247,6 @@ async function openUrl(url, instanceId) {
         isOpeningPacketItem = false;
     });
 }
-
 
 // --- Communication ---
 
@@ -281,8 +286,18 @@ async function handleBackgroundMessage(message) {
             showRootViewStatus(`Creation failed: ${data?.error || 'Unknown'}`, 'error');
             break;
         case 'playback_state_updated':
-            if (currentView === 'packet-detail') {
+            if (currentView === 'packet-detail' && currentInstanceId === data.instanceId) {
                 detailView.updatePlaybackUI(data);
+            }
+            break;
+        case 'moment_tripped':
+            if (currentView === 'packet-detail' && currentInstanceId === data.instanceId) {
+                // The full instance data with the updated momentsTripped array is sent.
+                // We can just re-render the dynamic parts of the view.
+                currentInstanceData = data.instance;
+                const image = await storage.getPacketImage(data.instance.imageId);
+                const browserState = await storage.getPacketBrowserState(data.instanceId);
+                await detailView.displayPacketContent(data.instance, image, browserState, currentPacketUrl);
             }
             break;
         case 'navigate_to_view':
@@ -321,10 +336,10 @@ async function handleBackgroundMessage(message) {
                 rootView.updateInstanceRowUI(data.instance);
             } else if (currentView === 'packet-detail' && currentInstanceId === data.instance.instanceId) {
                 const browserState = await storage.getPacketBrowserState(data.instance.instanceId);
-                await detailView.displayPacketContent(data.instance, browserState, currentPacketUrl);
+                const image = await storage.getPacketImage(data.instance.imageId);
+                await detailView.displayPacketContent(data.instance, image, browserState, currentPacketUrl);
             }
             break;
-        // --- START OF THE FIX ---
         case 'packet_instance_deleted':
             const wasViewingDeletedPacket = data?.packetId === currentInstanceId;
 
@@ -333,15 +348,11 @@ async function handleBackgroundMessage(message) {
             }
             
             if (wasViewingDeletedPacket) {
-                // This is the most critical part. Reset the sidebar's internal
-                // state immediately before starting the navigation. This prevents
-                // any lingering context from causing issues.
                 resetSidebarState();
                 detailView.stopAudioIfPacketDeleted(data.packetId);
                 navigateTo('root');
             }
             break;
-        // --- END OF THE FIX ---
         case 'packet_deletion_complete':
             showRootViewStatus(data.message || 'Deletion complete.', data.errors?.length > 0 ? 'error' : 'success');
             if (currentView === 'root') await rootView.displayRootNavigation();

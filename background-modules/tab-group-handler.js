@@ -275,7 +275,8 @@ export async function orderTabsInGroup(groupId, instance, attempt = 1) {
         const tabsInGroup = await chrome.tabs.query({ groupId });
         if (tabsInGroup.length <= 1) return true;
 
-        const flatContents = instance.contents.flatMap(c => c.type === 'alternative' ? c.alternatives : c);
+        // --- THE FIX: The instance.contents are already flat after migration ---
+        const flatContents = instance.contents;
 
         const contextPromises = tabsInGroup.map(tab => getPacketContext(tab.id).then(context => ({ tab, context })));
         const tabsWithContext = await Promise.all(contextPromises);

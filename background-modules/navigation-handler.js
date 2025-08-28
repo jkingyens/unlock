@@ -97,11 +97,8 @@ export async function checkAndPromptForCompletion(logPrefix, visitResult, instan
 async function processNavigationEvent(tabId, finalUrl, details) {
     const logPrefix = `[NavigationHandler Tab ${tabId}]`;
     
-    // --- START OF THE FIX ---
-    // Clear any pending visit timer for this tab at the very beginning of the event.
     clearPendingVisitTimer(tabId);
     logger.log(logPrefix, 'Cleared any pending visit timers for this tab.');
-    // --- END OF THE FIX ---
 
     logger.log(logPrefix, '>>> NAVIGATION EVENT START <<<', { url: finalUrl, transition: `${details.transitionType} | ${details.transitionQualifiers.join(', ')}` });
     await injectOverlayScripts(tabId);
@@ -174,9 +171,30 @@ async function processNavigationEvent(tabId, finalUrl, details) {
 
     const finalContext = await getPacketContext(tabId);
     logger.log(logPrefix, 'Final context after logic:', finalContext);
-    const finalInstance = finalContext ? await storage.getPacketInstance(finalContext.instanceId) : null;
+    let finalInstance = finalContext ? await storage.getPacketInstance(finalContext.instanceId) : null;
+
+    if (finalInstance && activeMediaPlayback.instanceId === finalInstance.instanceId) {
+        finalInstance = activeMediaPlayback.instance;
+    }
 
     if (finalInstance) {
+        // --- START: NEW LOGIC TO TRIP MOMENT ON NAVIGATION ---
+        const loadedItem = finalInstance.contents.find(item => item.url === finalContext.canonicalPacketUrl);
+        if (loadedItem && typeof loadedItem.revealedByMoment === 'number') {
+            const momentIndex = loadedItem.revealedByMoment;
+            if (finalInstance.momentsTripped && finalInstance.momentsTripped[momentIndex] === 0) {
+                logger.log(logPrefix, `DECISION: Navigation to packet item is tripping moment ${momentIndex}.`);
+                finalInstance.momentsTripped[momentIndex] = 1;
+                await storage.savePacketInstance(finalInstance);
+                // Notify the sidebar so the UI can update and reveal the item
+                sidebarHandler.notifySidebar('moment_tripped', {
+                    instanceId: finalInstance.instanceId,
+                    instance: finalInstance,
+                });
+            }
+        }
+        // --- END: NEW LOGIC ---
+
         await reconcileBrowserState(tabId, finalInstance.instanceId, finalInstance, finalUrl);
         const canonicalUrlForVisit = finalContext.canonicalPacketUrl;
         const itemForVisitTimer = finalInstance.contents.find(i => i.url === canonicalUrlForVisit);
@@ -241,12 +259,24 @@ export async function startVisitTimer(tabId, instanceId, canonicalPacketUrl, log
             const tab = await chrome.tabs.get(tabId);
             if (tab && tab.active) {
                 logger.log(logPrefix, 'Visit timer fired for active tab. Marking as visited.');
-                const visitResult = await packetUtils.markUrlAsVisited(instanceId, canonicalPacketUrl);
+                
+                const liveInstance = (activeMediaPlayback.instanceId === instanceId)
+                    ? activeMediaPlayback.instance
+                    : null;
+                
+                const visitResult = await packetUtils.markUrlAsVisited(instanceId, canonicalPacketUrl, liveInstance);
+
                 if (visitResult.success && visitResult.modified) {
-                    const updatedInstance = visitResult.instance || await storage.getPacketInstance(instanceId);
+                    const updatedInstance = visitResult.instance; 
+                    
+                    // --- ADD THIS LINE TO PERSIST THE CHANGE ---
+                    await storage.savePacketInstance(updatedInstance);
+
                     sidebarHandler.notifySidebar('packet_instance_updated', { instance: updatedInstance, source: 'dwell_visit' });
                     
-                    await setMediaPlaybackState({ instanceId: instanceId, tabId: tabId, topic: updatedInstance.topic }, { showVisitedAnimation: true, source: 'dwell_visit' });
+                    if (!liveInstance) {
+                        await setMediaPlaybackState({ instanceId: instanceId, tabId: tabId, topic: updatedInstance.topic }, { showVisitedAnimation: true, source: 'dwell_visit' });
+                    }
                     await checkAndPromptForCompletion(logPrefix, visitResult, instanceId);
                 }
             } else {

@@ -180,16 +180,11 @@ const indexedDbStorage = {
         const store = tx.objectStore(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT);
         const request = store.put(filesArray, key);
         
-        // --- THE FIX: Await the full transaction completion, not just the request. ---
         await new Promise((resolve, reject) => {
-            // The request can fail independently of the transaction.
             request.onerror = () => reject(request.error);
-            
-            // The promise resolves ONLY when the transaction is fully committed.
             tx.oncomplete = () => resolve();
             tx.onerror = () => reject(tx.error);
         });
-        // --- END OF THE FIX ---
         return true;
     } catch (error) {
         logger.error('IndexedDB', 'Error saving generated content', { key, error });
@@ -199,7 +194,6 @@ const indexedDbStorage = {
     const key = `${imageId}::${pageId}`;
     try {
         const db = await getDb();
-        // FIX: Corrected typo from INDEX_DB to INDEXED_DB
         const tx = db.transaction(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT, 'readonly');
         const store = tx.objectStore(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT);
         const request = store.get(key);
@@ -215,7 +209,6 @@ const indexedDbStorage = {
    async deleteGeneratedContentForImage(imageId) {
         try {
             const db = await getDb();
-            // FIX: Corrected typo from INDEX_DB to INDEXED_DB
             const tx = db.transaction(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT, 'readwrite');
             const store = tx.objectStore(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT);
             const request = store.openCursor();
@@ -244,7 +237,6 @@ const indexedDbStorage = {
            const tx = db.transaction(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT, 'readwrite');
            const store = tx.objectStore(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT);
            
-           // --- THE FIX: Await the full transaction completion, not just the cursor. ---
            await new Promise((resolve, reject) => {
                const request = store.openCursor();
 
@@ -257,21 +249,17 @@ const indexedDbStorage = {
                            const newKey = `${finalImageId}::${pageId}`;
                            const value = cursor.value;
                            
-                           // These operations are queued within the transaction
                            store.add(value, newKey);
                            cursor.delete();
                        }
                        cursor.continue();
                    }
-                   // When the cursor is done, we don't resolve. We wait for the transaction to complete.
                };
                
-               // Set up final transaction state handlers for the promise.
                request.onerror = () => reject(request.error);
-               tx.oncomplete = () => resolve(); // The promise resolves ONLY when the transaction is fully committed.
+               tx.oncomplete = () => resolve();
                tx.onerror = () => reject(tx.error);
            });
-           // --- END OF THE FIX ---
 
            logger.log('IndexedDB', `Successfully transferred content from ${originalDraftId} to ${finalImageId}`);
            return true;
@@ -430,36 +418,25 @@ const packetUtils = {
 
         const totalCount = trackableItems.length;
         if (totalCount === 0) {
-            return { visitedCount: 0, totalCount: 0, progressPercentage: 0 };
+            return { visitedCount: 0, totalCount: 0, progressPercentage: 100 };
         }
         
         const visitedUrlsSet = new Set(instance.visitedUrls || []);
         const visitedGeneratedIds = new Set(instance.visitedGeneratedPageIds || []);
-        const mentionedLinksSet = new Set(instance.mentionedMediaLinks || []);
-        let completedCheckpoints = 0;
         
+        let visitedCount = 0;
         trackableItems.forEach(item => {
-            if ((item.type === 'generated' || item.type === 'media') && item.pageId && visitedGeneratedIds.has(item.pageId)) {
-                completedCheckpoints++;
-            } else if (item.type === 'external' && item.url && visitedUrlsSet.has(item.url)) {
-                completedCheckpoints++;
-            } 
-            else if (item.type === 'media' && item.pageId && Array.isArray(item.timestamps) && item.timestamps.length > 0) {
-                const totalLinksInMedia = item.timestamps.length;
-                let mentionedInMedia = 0;
-                item.timestamps.forEach(ts => {
-                    if (mentionedLinksSet.has(ts.url)) {
-                        mentionedInMedia++;
-                    }
-                });
-                completedCheckpoints += (mentionedInMedia / totalLinksInMedia);
+            if (item.type === 'external' && visitedUrlsSet.has(item.url)) {
+                visitedCount++;
+            } else if ((item.type === 'generated' || item.type === 'media') && visitedGeneratedIds.has(item.pageId)) {
+                visitedCount++;
             }
         });
         
         return {
-            visitedCount: completedCheckpoints,
+            visitedCount: visitedCount,
             totalCount,
-            progressPercentage: totalCount > 0 ? Math.round((completedCheckpoints / totalCount) * 100) : 0
+            progressPercentage: Math.round((visitedCount / totalCount) * 100)
         };
     },
 
@@ -474,63 +451,46 @@ const packetUtils = {
         return options.returnItem ? null : false;
     }
 
-    // --- Start of FIX ---
     let decodedLoadedUrl;
     try {
         decodedLoadedUrl = decodeURIComponent(loadedUrl);
     } catch (e) {
-        // If the URL is malformed, it's unlikely to match anything.
-        // We can log this eventuality for debugging purposes.
         logger.warn('isUrlInPacket', 'Could not decode loadedUrl', { loadedUrl, error: e });
-        decodedLoadedUrl = loadedUrl; // Fallback to the original URL if decoding fails
+        decodedLoadedUrl = loadedUrl;
     }
-    // --- End of FIX ---
 
     for (const item of instance.contents) {
-        if (item.type === 'alternative') {
-            for (const alt of item.alternatives) {
-                // Pass the already-decoded URL down to avoid redundant decoding
-                const result = this.isUrlInPacket(decodedLoadedUrl, { contents: [alt] }, options);
-                if (result) return result;
+        let decodedItemUrl;
+        if (item.url) {
+            try {
+                decodedItemUrl = decodeURIComponent(item.url);
+            } catch (e) {
+                logger.warn('isUrlInPacket', 'Could not decode item.url', { itemUrl: item.url, error: e });
+                decodedItemUrl = item.url;
             }
-        } else {
-             // --- Start of FIX ---
-            let decodedItemUrl;
-            if (item.url) {
-                try {
-                    decodedItemUrl = decodeURIComponent(item.url);
-                } catch (e) {
-                    logger.warn('isUrlInPacket', 'Could not decode item.url', { itemUrl: item.url, error: e });
-                    decodedItemUrl = item.url; // Fallback to the original URL
-                }
+        }
+        
+        if (item.type === 'external' && decodedItemUrl && decodedItemUrl === decodedLoadedUrl) {
+             return options.returnItem ? item : true;
+        }
+
+        if ((item.type === 'generated' || item.type === 'media') && item.url) {
+            if (decodedItemUrl === decodedLoadedUrl) {
+                return options.returnItem ? item : true;
             }
             
-            if (item.type === 'external' && decodedItemUrl && decodedItemUrl === decodedLoadedUrl) {
-                 return options.returnItem ? item : true;
-            }
-            // --- End of FIX ---
-
-            if ((item.type === 'generated' || item.type === 'media') && item.url) {
-                // *** THE FIX: Check for direct match first, for when called with canonical URL. ***
-                if (decodedItemUrl === decodedLoadedUrl) {
-                    return options.returnItem ? item : true;
-                }
-                
-                // Then, check for pre-signed URL match, for when called with browser URL.
-                if (item.publishContext) {
-                    try {
-                        const loadedUrlObj = new URL(loadedUrl); // Use original loadedUrl for URL object
-                        const { publishContext } = item;
-                        let expectedPathname = (publishContext.provider === 'google')
-                            ? `/${publishContext.bucket}/${item.url}`
-                            : `/${item.url}`;
-                        
-                        // Compare decoded pathnames
-                        if (decodeURIComponent(loadedUrlObj.pathname) === decodeURIComponent(expectedPathname)) {
-                            return options.returnItem ? item : true;
-                        }
-                    } catch (e) { /* loadedUrl might not be a valid URL. */ }
-                }
+            if (item.publishContext) {
+                try {
+                    const loadedUrlObj = new URL(loadedUrl);
+                    const { publishContext } = item;
+                    let expectedPathname = (publishContext.provider === 'google')
+                        ? `/${publishContext.bucket}/${item.url}`
+                        : `/${item.url}`;
+                    
+                    if (decodeURIComponent(loadedUrlObj.pathname) === decodeURIComponent(expectedPathname)) {
+                        return options.returnItem ? item : true;
+                    }
+                } catch (e) { /* loadedUrl might not be a valid URL. */ }
             }
         }
     }
@@ -547,9 +507,12 @@ const packetUtils = {
     }
     return colors[Math.abs(hash) % colors.length];
   },
-  async markUrlAsVisited(instanceId, url) {
-    logger.log('markUrlAsVisited', 'Attempting to mark URL as visited', { instanceId, url });
-    let instance = await storage.getPacketInstance(instanceId);
+  async markUrlAsVisited(instanceId, url, liveInstance = null) {
+    let instance = liveInstance;
+    if (!instance) {
+        instance = await storage.getPacketInstance(instanceId);
+    }
+    
     if (!instance) {
         logger.warn('markUrlAsVisited', 'Packet instance not found', { instanceId });
         return { success: false, error: 'Packet instance not found' };
@@ -559,11 +522,8 @@ const packetUtils = {
     const foundItem = this.isUrlInPacket(url, instance, { returnItem: true });
 
     if (!foundItem) {
-        logger.log('markUrlAsVisited', 'URL not trackable in this packet', { url });
-        return { success: true, notTrackable: true };
+        return { success: true, notTrackable: true, instance: instance };
     }
-
-    logger.log('markUrlAsVisited', 'Found matching item in packet', { item: foundItem });
 
     const isGenerated = (foundItem.type === 'generated' || foundItem.type === 'media');
     const alreadyVisited = isGenerated
@@ -571,47 +531,52 @@ const packetUtils = {
         : (instance.visitedUrls || []).includes(foundItem.url);
 
     if (alreadyVisited) {
-        logger.log('markUrlAsVisited', 'Item has already been visited', { isGenerated, pageId: foundItem.pageId, url: foundItem.url });
-        return { success: true, alreadyVisited: true };
+        return { success: true, alreadyVisited: true, instance: instance };
     }
     
-    logger.log('markUrlAsVisited', 'Item not visited yet. Updating instance.', { isGenerated, instanceBefore: JSON.parse(JSON.stringify(instance)) });
-
     if (isGenerated) {
         instance.visitedGeneratedPageIds = [...(instance.visitedGeneratedPageIds || []), foundItem.pageId];
     } else {
         instance.visitedUrls = [...(instance.visitedUrls || []), foundItem.url];
     }
 
-    await storage.savePacketInstance(instance);
+    if (!liveInstance) {
+        await storage.savePacketInstance(instance);
+    }
+    
     const justCompleted = !wasCompletedBefore && this.isPacketInstanceCompleted(instance);
     
-    logger.log('markUrlAsVisited', 'Successfully updated instance.', { instanceAfter: instance, justCompleted });
-
     return { success: true, modified: true, instance, justCompleted };
   },
-  async markPageIdAsVisited(instanceId, pageId) {
-    let instance = await storage.getPacketInstance(instanceId);
-    if (!instance) return { success: false, error: 'Packet instance not found' };
+  async markPageIdAsVisited(instanceId, pageId, liveInstance = null) {
+    let instance = liveInstance;
+    if (!instance) {
+        instance = await storage.getPacketInstance(instanceId);
+    }
+    
+    if (!instance) {
+        return { success: false, error: 'Packet instance not found' };
+    }
 
     const wasCompletedBefore = this.isPacketInstanceCompleted(instance);
     instance.visitedGeneratedPageIds = [...new Set([...(instance.visitedGeneratedPageIds || []), pageId])];
     
-    await storage.savePacketInstance(instance);
+    if (!liveInstance) {
+        await storage.savePacketInstance(instance);
+    }
+
     const justCompleted = !wasCompletedBefore && this.isPacketInstanceCompleted(instance);
 
     return { success: true, modified: true, instance, justCompleted };
   },
   getDefaultGeneratedPageUrl(instance) {
-    const page = this.getGeneratedPages(instance)[0];
+    if (!instance?.contents) return null;
+    const page = instance.contents.find(item => item.type === 'generated');
     return page ? page.url : null;
   },
   getGeneratedPages(instance) {
       if (!instance?.contents) return [];
-      return instance.contents.flatMap(item => 
-          item.type === 'generated' ? [item] :
-          (item.type === 'alternative' ? item.alternatives.filter(alt => alt.type === 'generated') : [])
-      );
+      return instance.contents.filter(item => item.type === 'generated');
   }
 };
 
@@ -621,7 +586,6 @@ async function getPacketContext(tabId) {
     const data = await storage.getLocal(key);
     return data[key] || null;
 }
-// REVISED function to store the more explicit context object.
 async function setPacketContext(tabId, instanceId, canonicalPacketUrl, currentBrowserUrl) {
     const context = {
         instanceId,

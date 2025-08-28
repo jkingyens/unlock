@@ -101,7 +101,7 @@ export async function prepareCreateView(imageToEdit = null) {
         isEditing = false;
         // FIX: Assign a temporary ID to new drafts so media can be saved to IndexedDB immediately.
         const draftId = `draft_${Date.now()}`;
-        draftPacket = { id: draftId, topic: '', sourceContent: [] };
+        draftPacket = { id: draftId, topic: '', sourceContent: [], moments: [] };
         domRefs.createViewSaveBtn.textContent = 'Save';
     }
     
@@ -135,13 +135,9 @@ async function syncDraftGroup() {
     }
     isTabGroupSyncing = true;
     try {
+        // --- THE FIX: Draft packets use the new flat structure ---
         const desiredUrls = draftPacket.sourceContent
-            .flatMap(item => {
-                if (item.type === 'alternative') {
-                    return item.alternatives.map(alt => getUrlForItem(alt));
-                }
-                return getUrlForItem(item);
-            })
+            .map(item => getUrlForItem(item))
             .filter(Boolean);
 
         logger.log('[Draft Debug]', 'Sending sync_draft_group message to background.', { desiredUrls });
@@ -179,30 +175,25 @@ function renderDraftContentList() {
     const listEl = domRefs.createViewContentList;
     if (!listEl) return;
 
-    listEl.querySelectorAll('.card, .alternative-group-card').forEach(card => card.remove());
+    listEl.querySelectorAll('.card').forEach(card => card.remove());
 
     const listFragment = document.createDocumentFragment();
 
     if (draftPacket?.sourceContent?.length > 0) {
         draftPacket.sourceContent.forEach((item, index) => {
-            let card;
-            if (item.type === 'alternative') {
-                card = createAlternativeGroupCard(item, index);
-            } else {
-                card = createDraftContentCard(item, index);
-                const removeBtn = document.createElement('button');
-                removeBtn.className = 'delete-draft-item-btn';
-                removeBtn.innerHTML = '&times;';
-                removeBtn.title = 'Remove item';
-                removeBtn.addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    draftPacket.sourceContent.splice(index, 1);
-                    renderDraftContentList();
-                    storage.setSession({ 'draftPacketForPreview': draftPacket });
-                    syncDraftGroup();
-                });
-                card.appendChild(removeBtn);
-            }
+            const card = createDraftContentCard(item, index);
+            const removeBtn = document.createElement('button');
+            removeBtn.className = 'delete-draft-item-btn';
+            removeBtn.innerHTML = '&times;';
+            removeBtn.title = 'Remove item';
+            removeBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                draftPacket.sourceContent.splice(index, 1);
+                renderDraftContentList();
+                storage.setSession({ 'draftPacketForPreview': draftPacket });
+                syncDraftGroup();
+            });
+            card.appendChild(removeBtn);
             
             if (card) {
                 listFragment.appendChild(card);
@@ -213,70 +204,11 @@ function renderDraftContentList() {
     listEl.prepend(listFragment);
 }
 
-function createAlternativeGroupCard(groupItem, groupIndex) {
-    const groupCard = document.createElement('div');
-    groupCard.className = 'alternative-group-card';
-    groupCard.dataset.index = groupIndex;
-
-    const mediaItem = groupItem.alternatives.find(alt => alt.type === 'media');
-    const htmlItem = groupItem.alternatives.find(alt => alt.type === 'generated');
-
-    if (htmlItem) {
-        const innerCard = createDraftContentCard(htmlItem, -1);
-        groupCard.appendChild(innerCard);
-    }
-    if (mediaItem) {
-        const innerCard = createDraftContentCard(mediaItem, -1);
-        groupCard.appendChild(innerCard);
-    }
-
-    if (mediaItem && htmlItem) {
-        const hasTimestamps = mediaItem.timestamps && mediaItem.timestamps.length > 0;
-        const timestampButton = document.createElement('button');
-        timestampButton.textContent = hasTimestamps ? 'Recalculate Timestamps' : 'Add Timestamps';
-        timestampButton.className = 'sidebar-action-button';
-        timestampButton.style.marginTop = '8px';
-        timestampButton.addEventListener('click', (e) => {
-            e.stopPropagation();
-            handleGenerateTimestamps(groupItem, timestampButton);
-        });
-        groupCard.appendChild(timestampButton);
-
-        if (hasTimestamps) {
-            const timestampInfo = document.createElement('p');
-            timestampInfo.textContent = `Timestamps exist for ${mediaItem.timestamps.length} links.`;
-            timestampInfo.style.fontSize = '0.85em';
-            timestampInfo.style.color = 'var(--status-success-color)';
-            timestampInfo.style.margin = '4px 0 0';
-            groupCard.appendChild(timestampInfo);
-        }
-    }
-
-    // --- NEW: Add "Auto-improve Audio" button ---
-    if (mediaItem) {
-        const improveAudioButton = document.createElement('button');
-        improveAudioButton.textContent = 'Auto-improve Audio';
-        improveAudioButton.className = 'sidebar-action-button';
-        improveAudioButton.style.marginTop = '8px';
-        improveAudioButton.addEventListener('click', (e) => {
-            e.stopPropagation();
-            handleImproveAudio(mediaItem, improveAudioButton);
-        });
-        groupCard.appendChild(improveAudioButton);
-    }
-    // --- END NEW SECTION ---
-
-    return groupCard;
-}
-
-
 function createDraftContentCard(contentItem, index) {
     const card = document.createElement('div');
     card.className = 'card clickable';
-    if (index !== -1) {
-        card.setAttribute('draggable', 'true');
-        card.dataset.index = index;
-    }
+    card.setAttribute('draggable', 'true');
+    card.dataset.index = index;
     
     const { title = 'Untitled', type } = contentItem;
     let iconHTML = '?';
@@ -369,7 +301,6 @@ async function toggleDraftAudioPlayback(item, card) {
 
 // --- Action Handlers ---
 
-// --- NEW: Handler for the "Auto-improve Audio" button ---
 async function handleImproveAudio(mediaItem, button) {
     button.disabled = true;
     button.textContent = 'Improving...';
@@ -395,53 +326,6 @@ async function handleImproveAudio(mediaItem, button) {
         button.textContent = 'Auto-improve Audio';
     }
 }
-
-async function handleGenerateTimestamps(groupItem, button) {
-    const mediaItem = groupItem.alternatives.find(alt => alt.type === 'media');
-    const htmlItem = groupItem.alternatives.find(alt => alt.type === 'generated');
-
-    if (!mediaItem || !htmlItem) {
-        showRootViewStatus("Error: Missing audio or summary content.", "error");
-        return;
-    }
-
-    button.disabled = true;
-    button.textContent = 'Generating...';
-
-    try {
-        const response = await sendMessageToBackground({
-            action: 'generate_timestamps_for_packet_items',
-            data: {
-                draftId: draftPacket.id,
-                htmlPageId: htmlItem.pageId,
-                mediaPageId: mediaItem.pageId,
-                htmlContentB64: htmlItem.contentB64,
-                originalTitle: mediaItem.title // <-- ADD THIS LINE
-            }
-        });
-
-        if (response.success && response.updatedMediaItem) {
-            // Find the original media item in the draftPacket and update it
-            const groupIndex = draftPacket.sourceContent.findIndex(item => item === groupItem);
-            if (groupIndex !== -1) {
-                const mediaIndex = draftPacket.sourceContent[groupIndex].alternatives.findIndex(alt => alt.pageId === mediaItem.pageId);
-                if (mediaIndex !== -1) {
-                    draftPacket.sourceContent[groupIndex].alternatives[mediaIndex] = response.updatedMediaItem;
-                    await storage.setSession({ 'draftPacketForPreview': draftPacket });
-                    renderDraftContentList(); // Re-render to show the updated state
-                    showRootViewStatus("Timestamps added successfully!", "success");
-                }
-            }
-        } else {
-            throw new Error(response.error || "Failed to generate timestamps.");
-        }
-    } catch (error) {
-        showRootViewStatus(`Error: ${error.message}`, "error");
-        button.disabled = false;
-        button.textContent = 'Add Timestamps';
-    }
-}
-
 
 export async function handleDiscardDraftPacket() {
     if (isDraftDirty()) {
@@ -469,7 +353,6 @@ async function handleSaveDraftPacket() {
     if (packetToSave.id.startsWith('draft_')) {
         const originalDraftId = packetToSave.id;
         
-        // Prioritize the pre-generated topic, fall back to the first item's title.
         const defaultTitle = packetToSave.topic || draftPacket?.sourceContent?.[0]?.title || 'Untitled Packet';
         const topic = await showTitlePromptDialog(Promise.resolve(defaultTitle));
 
@@ -600,7 +483,7 @@ async function handleConfirmMakePage() {
 // --- Drag and Drop Handlers ---
 
 function handleDragStart(e) {
-    const targetCard = e.target.closest('.card[draggable="true"], .alternative-group-card');
+    const targetCard = e.target.closest('.card[draggable="true"]');
     if (targetCard) {
         draggedItemIndex = parseInt(targetCard.dataset.index, 10);
         e.dataTransfer.effectAllowed = 'move';
@@ -610,7 +493,7 @@ function handleDragStart(e) {
 
 function handleDragOver(e) {
     e.preventDefault();
-    const dropZone = e.target.closest('.card[draggable="true"], .alternative-group-card');
+    const dropZone = e.target.closest('.card[draggable="true"]');
     if (dropZone && !dropZone.classList.contains('dragging')) {
         document.querySelectorAll('.drag-over-indicator').forEach(el => el.classList.remove('drag-over-indicator'));
         dropZone.classList.add('drag-over-indicator');
@@ -618,12 +501,12 @@ function handleDragOver(e) {
 }
 
 function handleDragLeave(e) {
-    e.target.closest('.card, .alternative-group-card')?.classList.remove('drag-over-indicator');
+    e.target.closest('.card')?.classList.remove('drag-over-indicator');
 }
 
 async function handleDrop(e) {
     e.preventDefault();
-    const dropTarget = e.target.closest('.card[draggable="true"], .alternative-group-card');
+    const dropTarget = e.target.closest('.card[draggable="true"]');
     
     if (dropTarget && draggedItemIndex !== null) {
         const droppedOnIndex = parseInt(dropTarget.dataset.index, 10);
@@ -659,10 +542,9 @@ function handleFileDrop(e) {
                     mimeType: file.type,
                 };
                 
-                // Save the ArrayBuffer to IndexedDB immediately using the draft ID
                 const audioBuffer = event.target.result;
                 await indexedDbStorage.saveGeneratedContent(draftPacket.id, newMediaItem.pageId, [{
-                    name: 'audio.mp3', // Generic name, doesn't really matter here
+                    name: 'audio.mp3',
                     content: audioBuffer,
                     contentType: newMediaItem.mimeType
                 }]);
@@ -671,7 +553,6 @@ function handleFileDrop(e) {
                 renderDraftContentList();
                 await storage.setSession({ 'draftPacketForPreview': draftPacket });
             };
-            // Read as an ArrayBuffer to store in IndexedDB
             reader.readAsArrayBuffer(file);
         }
     }

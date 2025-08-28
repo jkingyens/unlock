@@ -32,7 +32,6 @@ import {
     instantiatePacket,
     processDeletePacketImageRequest,
     enhanceHtml,
-    processGenerateTimestampsRequest,
     processImproveDraftAudio,
     generateDraftPacketFromTab
 } from './packet-processor.js';
@@ -215,10 +214,17 @@ async function handleOpenContent(data, sender, sendResponse) {
             await chrome.tabs.update(targetTab.id, { url: finalUrlToOpen, active: true });
             if (targetTab.windowId) await chrome.windows.update(targetTab.windowId, { focused: true });
         } else {
-            const newTab = await chrome.tabs.create({ url: finalUrlToOpen, active: false });
+            // --- START OF THE FIX ---
+            // Create a blank tab first to get a stable tab ID
+            const newTab = await chrome.tabs.create({ url: 'about:blank', active: false });
             if (!newTab || typeof newTab.id !== 'number') throw new Error('Tab creation failed.');
+            
+            // NOW set the token, before any navigation starts
             await storage.setSession({ [`trusted_intent_${newTab.id}`]: trustedIntent });
-            await chrome.tabs.update(newTab.id, { active: true });
+
+            // THEN, update the tab to the final URL, which will trigger navigation
+            await chrome.tabs.update(newTab.id, { url: finalUrlToOpen, active: true });
+            // --- END OF THE FIX ---
         }
         
         sendResponse({ success: true });
@@ -234,7 +240,7 @@ async function handleMarkUrlVisited(data, sendResponse) {
      const { packetId: instanceId, url } = data;
      if (!instanceId || !url) return sendResponse({ success: false, error: 'Missing instanceId or url' });
      try {
-          const result = await packetUtils.markUrlAsVisited(instanceId, url);
+          const result = await packetUtils.markUrlAsVisited(instanceId, url, activeMediaPlayback.instance);
           if (result.success && !result.alreadyVisited && !result.notTrackable) {
                try { chrome.runtime.sendMessage({ action: 'url_visited', data: { packetId: instanceId, url } }); } catch (e) { /* ignore */ }
           }
@@ -271,32 +277,8 @@ async function handleSidebarReady(data, sender, sendResponse) {
 
 function findMediaItemInInstance(instance, pageId) {
     if (!instance || !instance.contents || !pageId) return null;
-    for (const item of instance.contents) {
-        if (item.pageId === pageId) return item;
-        if (item.type === 'alternative' && item.alternatives) {
-            const found = item.alternatives.find(alt => alt.pageId === pageId);
-            if (found) return found;
-        }
-    }
-    return null;
+    return instance.contents.find(item => item.pageId === pageId && item.type === 'media');
 }
-
-function calculateLastMentionedLink(instance, mediaItem) {
-    if (!instance || !mediaItem || !mediaItem.timestamps || typeof mediaItem.currentTime !== 'number') {
-        return null;
-    }
-    let lastMentionedTimestamp = null;
-    mediaItem.timestamps.forEach(ts => {
-        if (mediaItem.currentTime >= ts.startTime) {
-            if (!lastMentionedTimestamp || ts.startTime > lastMentionedTimestamp.startTime) {
-                lastMentionedTimestamp = ts;
-            }
-        }
-    });
-    const linkItem = lastMentionedTimestamp ? instance.contents.find(i => i.url === lastMentionedTimestamp.url) : null;
-    return linkItem ? { url: linkItem.url, title: linkItem.title } : null;
-}
-
 
 async function handlePlaybackActionRequest(data, sender, sendResponse) {
     const { intent, instanceId, pageId } = data;
@@ -325,35 +307,34 @@ async function handlePlaybackActionRequest(data, sender, sendResponse) {
                 await controlAudioInOffscreen('play', { audioB64, mimeType: mediaItem.mimeType, pageId, instanceId, startTime });
 
                 const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-                activeMediaPlayback.isPlaying = true;
-                activeMediaPlayback.pageId = pageId;
-                activeMediaPlayback.instanceId = instanceId;
-                activeMediaPlayback.topic = instance.topic;
-                activeMediaPlayback.tabId = activeTab ? activeTab.id : null;
-                activeMediaPlayback.currentTime = startTime; 
-                activeMediaPlayback.lastMentionedLink = null;
-                activeMediaPlayback.duration = mediaItem.duration || 0;
-                await storage.setSession({ [CONFIG.STORAGE_KEYS.ACTIVE_MEDIA_KEY]: activeMediaPlayback });
-                await notifyUIsOfStateChange(instance);
+                await setMediaPlaybackState({
+                    isPlaying: true,
+                    pageId: pageId,
+                    instanceId: instanceId,
+                    topic: instance.topic,
+                    tabId: activeTab ? activeTab.id : null,
+                    currentTime: startTime,
+                    duration: mediaItem.duration || 0,
+                    instance: instance, // Load the live instance into the state
+                    lastTrippedMoment: null,
+                });
                 break;
-            // --- START OF THE FIX ---
+            
             case 'pause':
             case 'toggle':
-                if (!activeMediaPlayback.pageId) {
-                    // If there's no active media, just succeed without doing anything.
+                if (!activeMediaPlayback.pageId || !activeMediaPlayback.instance) {
                     return sendResponse({ success: true, message: "No active media to toggle/pause." });
                 }
                 await controlAudioInOffscreen(intent, {});
-                activeMediaPlayback.isPlaying = intent === 'toggle' ? !activeMediaPlayback.isPlaying : false;
-
-                if (!activeMediaPlayback.isPlaying) {
-                     await saveCurrentTime(activeMediaPlayback.instanceId, activeMediaPlayback.pageId);
+                const isNowPlaying = intent === 'toggle' ? !activeMediaPlayback.isPlaying : false;
+                
+                if (!isNowPlaying) {
+                    // Use the live currentTime from the state object for saving
+                    await saveCurrentTime(activeMediaPlayback.instanceId, activeMediaPlayback.pageId, activeMediaPlayback.currentTime);
                 }
-
-                await storage.setSession({ [CONFIG.STORAGE_KEYS.ACTIVE_MEDIA_KEY]: activeMediaPlayback });
-                await notifyUIsOfStateChange();
+                await setMediaPlaybackState({ isPlaying: isNowPlaying });
                 break;
-            // --- END OF THE FIX ---
+            
             case 'stop':
                 if (activeMediaPlayback.pageId) {
                     await resetActiveMediaPlayback();
@@ -401,72 +382,78 @@ const actionHandlers = {
     },
     'request_playback_action': handlePlaybackActionRequest,
     'get_playback_state': async (data, sender, sendResponse) => {
-        const instance = activeMediaPlayback.instanceId ? await storage.getPacketInstance(activeMediaPlayback.instanceId) : null;
-        if (instance) {
-            const mediaItem = findMediaItemInInstance(instance, activeMediaPlayback.pageId);
-            const { isSidebarOpen } = await storage.getSession({ isSidebarOpen: false });
-            const overlayEnabled = await shouldShowOverlay();
+        const instance = activeMediaPlayback.instance;
+        const { isSidebarOpen } = await storage.getSession({ isSidebarOpen: false });
+        const overlayEnabled = await shouldShowOverlay();
 
-            sendResponse({
-                ...activeMediaPlayback,
-                currentTime: activeMediaPlayback.currentTime || 0,
-                duration: activeMediaPlayback.duration || 0,
-                mentionedMediaLinks: instance.mentionedMediaLinks || [],
-                lastMentionedLink: calculateLastMentionedLink(instance, { ...mediaItem, currentTime: activeMediaPlayback.currentTime }),
-                isVisible: !!activeMediaPlayback.pageId && !isSidebarOpen && overlayEnabled,
-                animate: false
-            });
-        } else {
-            sendResponse({ ...activeMediaPlayback, isVisible: false, currentTime: 0, duration: 0, mentionedMediaLinks: [], lastMentionedLink: null });
-        }
+        const state = {
+            ...activeMediaPlayback,
+            momentsTripped: instance?.momentsTripped || [],
+            isVisible: !!activeMediaPlayback.pageId && !isSidebarOpen && overlayEnabled,
+            animate: false
+        };
+        sendResponse(state);
     },
     'open_sidebar_and_navigate': async (data, sender, sendResponse) => {
-        // This action is now a no-op to prevent gesture errors.
-        // The user should click the extension icon to open the side panel.
         sendResponse({ success: true, message: "User should open side panel via action icon." });
     },
     'audio_time_update': async (data) => {
-        if (activeMediaPlayback.pageId !== data.pageId || !activeMediaPlayback.isPlaying) return;
+        if (!activeMediaPlayback.instance || activeMediaPlayback.pageId !== data.pageId || !activeMediaPlayback.isPlaying) {
+            return;
+        }
 
         activeMediaPlayback.currentTime = data.currentTime;
         activeMediaPlayback.duration = data.duration;
 
-        const instance = await storage.getPacketInstance(activeMediaPlayback.instanceId);
-        if (!instance) return;
-
-        const mediaItem = findMediaItemInInstance(instance, data.pageId);
-        if (!mediaItem) return;
-
-        const tempMediaItemForCalc = { ...mediaItem, currentTime: data.currentTime };
-        const newMentionedLink = calculateLastMentionedLink(instance, tempMediaItemForCalc);
-
-        const animateLinkMention = newMentionedLink && (!activeMediaPlayback.lastMentionedLink || newMentionedLink.url !== activeMediaPlayback.lastMentionedLink.url);
-
-        activeMediaPlayback.lastMentionedLink = newMentionedLink;
+        const instance = activeMediaPlayback.instance;
+        const image = await storage.getPacketImage(instance.imageId);
+        let animateMomentMention = false;
         
-        const mentionedUrls = new Set(instance.mentionedMediaLinks || []);
-        if (mediaItem.timestamps) {
-            mediaItem.timestamps.forEach(ts => {
-                if (data.currentTime >= ts.startTime) {
-                    mentionedUrls.add(ts.url);
+        if (image && Array.isArray(image.moments)) {
+            let momentTripped = false;
+            image.moments.forEach((moment, index) => {
+                if (moment.type === 'mediaTimestamp' && 
+                    moment.sourcePageId === data.pageId &&
+                    data.currentTime >= moment.timestamp &&
+                    instance.momentsTripped[index] === 0) {
+                    
+                    instance.momentsTripped[index] = 1;
+                    momentTripped = true;
+                    
+                    const revealedItem = instance.contents.find(item => item.revealedByMoment === index);
+                    if (revealedItem) {
+                        activeMediaPlayback.lastTrippedMoment = {
+                            title: revealedItem.title,
+                            url: revealedItem.url
+                        };
+                        animateMomentMention = true;
+                    }
+                    
+                    sidebarHandler.notifySidebar('moment_tripped', { 
+                        instanceId: instance.instanceId, 
+                        instance: instance, 
+                    });
                 }
             });
+            if (momentTripped) {
+                await storage.savePacketInstance(instance);
+            }
         }
-        instance.mentionedMediaLinks = Array.from(mentionedUrls);
-        mediaItem.currentTime = data.currentTime;
-        mediaItem.duration = data.duration;
         
+        const mediaItem = findMediaItemInInstance(instance, data.pageId);
+        if (mediaItem) {
+            mediaItem.currentTime = data.currentTime;
+            mediaItem.duration = data.duration;
+        }
         debouncedSaveInstance(instance);
 
-        await notifyUIsOfStateChange(instance, { animateLinkMention });
-        
+        await notifyUIsOfStateChange({ animateMomentMention });
     },
     'overlay_setting_updated': async (data, sender, sendResponse) => {
         await notifyUIsOfStateChange();
         sendResponse({success: true});
     },
     'improve_draft_audio': (data, sender, sendResponse) => processImproveDraftAudio(data).then(sendResponse),
-    'generate_timestamps_for_packet_items': (data, sender, sendResponse) => processGenerateTimestampsRequest(data).then(sendResponse),
     'generate_packet_title': (data, sender, sendResponse) => {
         (async () => {
             try {
@@ -490,7 +477,7 @@ const actionHandlers = {
         const { pageId } = data;
         const sessionData = await storage.getSession('draftPacketForPreview');
         const draftPacket = sessionData?.draftPacketForPreview;
-        const item = draftPacket?.sourceContent.flatMap(c => c.type === 'alternative' ? c.alternatives : c).find(i => i.pageId === pageId);
+        const item = draftPacket?.sourceContent.find(i => i.pageId === pageId);
         if (item?.contentB64) {
             const htmlContent = new TextDecoder().decode(base64Decode(item.contentB64));
             sendResponse({ success: true, htmlContent, title: item.title });
@@ -531,9 +518,6 @@ const actionHandlers = {
         sendResponse(result);
     },
     'delete_packets': async (data, sender, sendResponse) => {
-        clearTimeout(saveInstanceDebounceTimer);
-        saveInstanceDebounceTimer = null;
-
         if (data?.packetIds && activeMediaPlayback.instanceId) {
             if (data.packetIds.includes(activeMediaPlayback.instanceId)) {
                 await resetActiveMediaPlayback();
@@ -544,11 +528,15 @@ const actionHandlers = {
     },
     'mark_url_visited': handleMarkUrlVisited,
     'media_playback_complete': async (data, sender, sendResponse) => {
+        const liveInstance = activeMediaPlayback.instance;
         await saveCurrentTime(data.instanceId, data.pageId, 0, true);
         activeMediaPlayback.isPlaying = false;
-        const visitResult = await packetUtils.markPageIdAsVisited(data.instanceId, data.pageId);
+        
+        const visitResult = await packetUtils.markPageIdAsVisited(data.instanceId, data.pageId, liveInstance);
+        
         if (visitResult.success && visitResult.modified) {
-            await notifyUIsOfStateChange(visitResult.instance, { showVisitedAnimation: true });
+            await storage.savePacketInstance(visitResult.instance);
+            await notifyUIsOfStateChange({ showVisitedAnimation: true });
             await checkAndPromptForCompletion('MessageHandler', visitResult, data.instanceId);
         }
         sendResponse(visitResult);
@@ -578,8 +566,9 @@ const actionHandlers = {
     'page_interaction_complete': async (data, sender, sendResponse) => {
         const context = await getPacketContext(sender.tab.id);
         if (context?.instanceId && context?.canonicalPacketUrl) {
-            const visitResult = await packetUtils.markUrlAsVisited(context.instanceId, context.canonicalPacketUrl);
+            const visitResult = await packetUtils.markUrlAsVisited(context.instanceId, context.canonicalPacketUrl, activeMediaPlayback.instance);
             if (visitResult.success && visitResult.modified) {
+                await storage.savePacketInstance(visitResult.instance);
                 sidebarHandler.notifySidebar('packet_instance_updated', { instance: visitResult.instance });
                 await checkAndPromptForCompletion('MessageHandler', visitResult, context.instanceId);
             }
