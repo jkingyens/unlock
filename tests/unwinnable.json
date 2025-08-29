@@ -1,0 +1,55 @@
+{
+  "id": "img_test_unwinnable_1662835200000",
+  "topic": "Unwinnable Packet Test (Circular Dependency)",
+  "created": "2025-09-10T18:40:00Z",
+  "sourceContent": [
+    {
+      "type": "external",
+      "url": "https://en.wikipedia.org/wiki/Logic_bomb",
+      "title": "Page A (Visible by Default)",
+      "relevance": "This is the starting point. Visiting it is required for Checkpoint 1."
+    },
+    {
+      "type": "external",
+      "url": "https://en.wikipedia.org/wiki/Deadlock",
+      "title": "Page B (Hidden, Required for Checkpoint 2)",
+      "relevance": "This page is required for Checkpoint 2, but it is hidden until Moment 1 is tripped.",
+      "revealedByMoment": 0
+    },
+    {
+      "type": "generated",
+      "pageId": "page-c",
+      "title": "Page C (Hidden, Triggers Moment 1)",
+      "relevance": "This page must be visited to trip Moment 1, which reveals Page B. However, this page itself is hidden until Moment 2 is tripped.",
+      "revealedByMoment": 1
+    }
+  ],
+  "checkpoints": [
+    {
+      "title": "Checkpoint 1: Visit the Starting Page",
+      "requiredItems": [
+        { "url": "https://en.wikipedia.org/wiki/Logic_bomb" }
+      ]
+    },
+    {
+      "title": "Checkpoint 2: Visit the Deadlocked Page",
+      "requiredItems": [
+        { "url": "https://en.wikipedia.org/wiki/Deadlock" }
+      ]
+    }
+  ],
+  "moments": [
+    {
+      "id": "moment_0",
+      "type": "mediaTimestamp",
+      "sourcePageId": "page-c",
+      "timestamp": 1
+    },
+    {
+      "id": "moment_1",
+      "type": "mediaTimestamp",
+      "sourcePageId": "https://en.wikipedia.org/wiki/Deadlock",
+      "timestamp": 1
+    }
+  ]
+}
