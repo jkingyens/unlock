@@ -406,24 +406,67 @@ const storage = {
 };
 
 const packetUtils = {
-    calculateInstanceProgress(instance) {
-        if (!instance || !Array.isArray(instance.contents)) {
+    _updateCheckpointsOnVisit(instance, image) {
+        if (!image || !Array.isArray(image.checkpoints) || !Array.isArray(instance.checkpointsTripped)) {
+            return false;
+        }
+        let checkpointsModified = false;
+        const visitedUrlsSet = new Set(instance.visitedUrls || []);
+        const visitedGeneratedIds = new Set(instance.visitedGeneratedPageIds || []);
+
+        image.checkpoints.forEach((checkpoint, index) => {
+            if (instance.checkpointsTripped[index] === 1) {
+                return;
+            }
+
+            // --- START OF THE FIX ---
+            // The logic must check if EVERY required item has been visited.
+            const isCompleted = checkpoint.requiredItems.every(requiredItem => {
+                // Directly check if the required URL or pageId is in the visited sets.
+                const urlVisited = requiredItem.url && visitedUrlsSet.has(requiredItem.url);
+                const pageIdVisited = requiredItem.pageId && visitedGeneratedIds.has(requiredItem.pageId);
+                return urlVisited || pageIdVisited;
+            });
+            // --- END OF THE FIX ---
+
+            if (isCompleted) {
+                instance.checkpointsTripped[index] = 1;
+                checkpointsModified = true;
+                logger.log('Utils:_updateCheckpoints', `Checkpoint '${checkpoint.title}' completed for instance ${instance.instanceId}`);
+            }
+        });
+        return checkpointsModified;
+    },
+
+    calculateInstanceProgress(instance, image = null) {
+        if (!instance) {
             return { visitedCount: 0, totalCount: 0, progressPercentage: 0 };
         }
-        
-        const trackableItems = instance.contents.filter(item => 
-            (item.type === 'external' && item.url) || 
+        if (image && Array.isArray(image.checkpoints) && Array.isArray(instance.checkpointsTripped)) {
+            const totalCount = image.checkpoints.length;
+            if (totalCount === 0) {
+                return { visitedCount: 0, totalCount: 0, progressPercentage: 100 };
+            }
+            const visitedCount = instance.checkpointsTripped.filter(c => c === 1).length;
+            return {
+                visitedCount,
+                totalCount,
+                progressPercentage: Math.round((visitedCount / totalCount) * 100)
+            };
+        }
+        if (!Array.isArray(instance.contents)) {
+            return { visitedCount: 0, totalCount: 0, progressPercentage: 0 };
+        }
+        const trackableItems = instance.contents.filter(item =>
+            (item.type === 'external' && item.url) ||
             ((item.type === 'generated' || item.type === 'media') && item.pageId)
         );
-
         const totalCount = trackableItems.length;
         if (totalCount === 0) {
             return { visitedCount: 0, totalCount: 0, progressPercentage: 100 };
         }
-        
         const visitedUrlsSet = new Set(instance.visitedUrls || []);
         const visitedGeneratedIds = new Set(instance.visitedGeneratedPageIds || []);
-        
         let visitedCount = 0;
         trackableItems.forEach(item => {
             if (item.type === 'external' && visitedUrlsSet.has(item.url)) {
@@ -432,7 +475,6 @@ const packetUtils = {
                 visitedCount++;
             }
         });
-        
         return {
             visitedCount: visitedCount,
             totalCount,
@@ -440,9 +482,12 @@ const packetUtils = {
         };
     },
 
-    isPacketInstanceCompleted(instance) {
+    async isPacketInstanceCompleted(instance, image) {
         if (!instance) return false;
-        const { progressPercentage } = this.calculateInstanceProgress(instance);
+        if (!image) {
+            image = await storage.getPacketImage(instance.imageId);
+        }
+        const { progressPercentage } = this.calculateInstanceProgress(instance, image);
         return progressPercentage >= 100;
     },
 
@@ -507,68 +552,75 @@ const packetUtils = {
     }
     return colors[Math.abs(hash) % colors.length];
   },
-  async markUrlAsVisited(instanceId, url, liveInstance = null) {
-    let instance = liveInstance;
-    if (!instance) {
-        instance = await storage.getPacketInstance(instanceId);
-    }
-    
-    if (!instance) {
-        logger.warn('markUrlAsVisited', 'Packet instance not found', { instanceId });
-        return { success: false, error: 'Packet instance not found' };
-    }
+  
+    async markUrlAsVisited(instanceId, url, liveInstance = null) {
+        let instance = liveInstance;
+        if (!instance) {
+            instance = await storage.getPacketInstance(instanceId);
+        }
+        if (!instance) {
+            logger.warn('markUrlAsVisited', 'Packet instance not found', { instanceId });
+            return { success: false, error: 'Packet instance not found' };
+        }
 
-    const wasCompletedBefore = this.isPacketInstanceCompleted(instance);
-    const foundItem = this.isUrlInPacket(url, instance, { returnItem: true });
+        const image = await storage.getPacketImage(instance.imageId);
+        const wasCompletedBefore = await this.isPacketInstanceCompleted(instance, image);
+        const foundItem = this.isUrlInPacket(url, instance, { returnItem: true });
 
-    if (!foundItem) {
-        return { success: true, notTrackable: true, instance: instance };
-    }
+        if (!foundItem) {
+            return { success: true, notTrackable: true, instance: instance };
+        }
 
-    const isGenerated = (foundItem.type === 'generated' || foundItem.type === 'media');
-    const alreadyVisited = isGenerated
-        ? (instance.visitedGeneratedPageIds || []).includes(foundItem.pageId)
-        : (instance.visitedUrls || []).includes(foundItem.url);
+        const isGenerated = (foundItem.type === 'generated' || foundItem.type === 'media');
+        const alreadyVisited = isGenerated
+            ? (instance.visitedGeneratedPageIds || []).includes(foundItem.pageId)
+            : (instance.visitedUrls || []).includes(foundItem.url);
 
-    if (alreadyVisited) {
-        return { success: true, alreadyVisited: true, instance: instance };
-    }
-    
-    if (isGenerated) {
-        instance.visitedGeneratedPageIds = [...(instance.visitedGeneratedPageIds || []), foundItem.pageId];
-    } else {
-        instance.visitedUrls = [...(instance.visitedUrls || []), foundItem.url];
-    }
+        if (alreadyVisited) {
+            return { success: true, alreadyVisited: true, instance: instance };
+        }
+        
+        if (isGenerated) {
+            instance.visitedGeneratedPageIds = [...(instance.visitedGeneratedPageIds || []), foundItem.pageId];
+        } else {
+            instance.visitedUrls = [...(instance.visitedUrls || []), foundItem.url];
+        }
+        
+        this._updateCheckpointsOnVisit(instance, image);
 
-    if (!liveInstance) {
-        await storage.savePacketInstance(instance);
-    }
-    
-    const justCompleted = !wasCompletedBefore && this.isPacketInstanceCompleted(instance);
-    
-    return { success: true, modified: true, instance, justCompleted };
-  },
-  async markPageIdAsVisited(instanceId, pageId, liveInstance = null) {
-    let instance = liveInstance;
-    if (!instance) {
-        instance = await storage.getPacketInstance(instanceId);
-    }
-    
-    if (!instance) {
-        return { success: false, error: 'Packet instance not found' };
-    }
+        if (!liveInstance) {
+            await storage.savePacketInstance(instance);
+        }
+        
+        const justCompleted = !wasCompletedBefore && await this.isPacketInstanceCompleted(instance, image);
+        
+        return { success: true, modified: true, instance, justCompleted };
+    },
 
-    const wasCompletedBefore = this.isPacketInstanceCompleted(instance);
-    instance.visitedGeneratedPageIds = [...new Set([...(instance.visitedGeneratedPageIds || []), pageId])];
-    
-    if (!liveInstance) {
-        await storage.savePacketInstance(instance);
-    }
+    async markPageIdAsVisited(instanceId, pageId, liveInstance = null) {
+        let instance = liveInstance;
+        if (!instance) {
+            instance = await storage.getPacketInstance(instanceId);
+        }
+        if (!instance) {
+            return { success: false, error: 'Packet instance not found' };
+        }
+        
+        const image = await storage.getPacketImage(instance.imageId);
+        const wasCompletedBefore = await this.isPacketInstanceCompleted(instance, image);
+        instance.visitedGeneratedPageIds = [...new Set([...(instance.visitedGeneratedPageIds || []), pageId])];
+        
+        this._updateCheckpointsOnVisit(instance, image);
 
-    const justCompleted = !wasCompletedBefore && this.isPacketInstanceCompleted(instance);
+        if (!liveInstance) {
+            await storage.savePacketInstance(instance);
+        }
 
-    return { success: true, modified: true, instance, justCompleted };
-  },
+        const justCompleted = !wasCompletedBefore && await this.isPacketInstanceCompleted(instance, image);
+
+        return { success: true, modified: true, instance, justCompleted };
+    },
+
   getDefaultGeneratedPageUrl(instance) {
     if (!instance?.contents) return null;
     const page = instance.contents.find(item => item.type === 'generated');

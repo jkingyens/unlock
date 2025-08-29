@@ -3,7 +3,6 @@
 // and "Completed" packet lists and their associated actions.
 
 import { domRefs } from './dom-references.js';
-// *** FIX: Import the progress calculation function from utils ***
 import { logger, storage, packetUtils, isTabGroupsAvailable, shouldUseTabGroups } from '../utils.js';
 import { showConfirmDialog, showImportDialog, exportPacketAndShowDialog, showCreateSourceDialog, showCreateSourceDialogProgress, hideCreateSourceDialog } from './dialog-handler.js';
 
@@ -75,28 +74,22 @@ export function setupRootViewListeners() {
     }
 }
 
-// --- NEW FUNCTION to handle the create button logic ---
 async function handleCreateButtonClick() {
     try {
         const response = await sendMessageToBackground({ action: 'is_current_tab_packetizable' });
 
         if (response.success && response.isPacketizable) {
-            // --- THE FIX: The logic is now centralized here. ---
             const choice = await showCreateSourceDialog(); 
             
             if (choice === 'blank') {
-                // If user chose blank, now we hide the dialog and navigate.
                 hideCreateSourceDialog();
                 navigateTo('create');
             } else if (choice === 'tab') {
-                // If user chose tab, we keep the dialog open and switch it to progress mode.
                 showCreateSourceDialogProgress('Analyzing page...');
                 sendMessageToBackground({ action: 'create_draft_from_tab' });
             }
-            // If choice is null (cancelled), the dialog is already hidden. Do nothing.
 
         } else {
-            // If the tab isn't valid, skip the dialog entirely.
             navigateTo('create');
         }
     } catch (error) {
@@ -108,9 +101,6 @@ async function handleCreateButtonClick() {
 
 // --- View Rendering & Management ---
 
-/**
- * Fetches all data and renders the entire root view.
- */
 export async function displayRootNavigation() {
     const { inboxList, inProgressList, completedList } = domRefs;
     if (!inboxList || !inProgressList || !completedList) return;
@@ -136,13 +126,27 @@ export async function displayRootNavigation() {
         };
 
         renderImageList(images.sort(sortFn));
-        // After rendering from storage, overlay any in-progress stencils from memory
         inProgressStencils.forEach(stencilData => {
             renderOrUpdateImageStencil(stencilData);
         });
+        
+        const instancesWithImages = instances.map(inst => ({ inst, img: imagesMap[inst.imageId] })).filter(item => item.img);
 
-        renderInstanceList(instances.filter(inst => inst.status !== 'creating' && !packetUtils.isPacketInstanceCompleted(inst)).sort(sortFn), domRefs.inProgressList, "No packets Started.");
-        renderInstanceList(instances.filter(inst => inst.status !== 'creating' && packetUtils.isPacketInstanceCompleted(inst)).sort(sortFn), domRefs.completedList, "No completed packets yet.");
+        const inProgressItems = [];
+        const completedItems = [];
+
+        for (const { inst, img } of instancesWithImages) {
+            if (inst.status !== 'creating') {
+                if (await packetUtils.isPacketInstanceCompleted(inst, img)) {
+                    completedItems.push({ inst, img });
+                } else {
+                    inProgressItems.push({ inst, img });
+                }
+            }
+        }
+        
+        renderInstanceList(inProgressItems.sort((a,b) => sortFn(a.inst, b.inst)), domRefs.inProgressList, "No packets Started.");
+        renderInstanceList(completedItems.sort((a,b) => sortFn(a.inst, b.inst)), domRefs.completedList, "No completed packets yet.");
 
         updateActionButtonsVisibility();
     } catch (error) {
@@ -154,10 +158,6 @@ export async function displayRootNavigation() {
     }
 }
 
-/**
- * Renders the list of packet images in the "Library".
- * @param {Array} images - The array of PacketImage objects.
- */
 function renderImageList(images) {
     const listElement = domRefs.inboxList;
     listElement.innerHTML = '';
@@ -173,20 +173,14 @@ function renderImageList(images) {
     }
 }
 
-/**
- * Renders the list of packet instances.
- * @param {Array} instances - The array of PacketInstance objects.
- * @param {HTMLElement} listElement - The table body element to render into.
- * @param {string} emptyMessage - The message to show if the list is empty.
- */
-function renderInstanceList(instances, listElement, emptyMessage) {
+function renderInstanceList(items, listElement, emptyMessage) {
     listElement.innerHTML = '';
-    if (instances.length === 0) {
+    if (items.length === 0) {
         checkAndRenderEmptyState(listElement, emptyMessage);
     } else {
         const frag = document.createDocumentFragment();
-        instances.forEach(inst => {
-            const row = createInstanceRow(inst);
+        items.forEach(({ inst, img }) => {
+            const row = createInstanceRow(inst, img);
             row.dataset.created = inst.created || inst.instantiated || new Date(0).toISOString();
             frag.appendChild(row);
         });
@@ -194,35 +188,20 @@ function renderInstanceList(instances, listElement, emptyMessage) {
     }
 }
 
-
-/**
- * Creates and returns a table row for a PacketImage (in the Library).
- * @param {object} image - The PacketImage object.
- * @returns {HTMLTableRowElement}
- */
 function createImageRow(image) {
     const row = document.createElement('tr');
     row.dataset.imageId = image.id;
     row.style.cursor = 'pointer';
-
     const nameCell = document.createElement('td');
     nameCell.textContent = image.topic;
-    
     row.appendChild(nameCell);
-
     row.addEventListener('click', () => {
         showLibraryActionDialog(image.id, image.topic);
     });
-
     return row;
 }
 
-/**
- * Creates and returns a table row for a PacketInstance.
- * @param {object} instance - The PacketInstance object.
- * @returns {HTMLTableRowElement}
- */
-function createInstanceRow(instance) {
+function createInstanceRow(instance, image) {
     const row = document.createElement('tr');
     row.dataset.instanceId = instance.instanceId;
 
@@ -230,9 +209,9 @@ function createInstanceRow(instance) {
     let progressPercentage = 0, progressBarTitle = '';
     
     if (!isStencil) {
-        const progressData = packetUtils.calculateInstanceProgress(instance);
+        const progressData = packetUtils.calculateInstanceProgress(instance, image);
         progressPercentage = progressData.progressPercentage;
-        progressBarTitle = `${progressPercentage}% Complete`;
+        progressBarTitle = `${progressData.visitedCount}/${progressData.totalCount} - ${progressPercentage}% Complete`;
     }
 
     const colorName = packetUtils.getColorForTopic(instance.topic);
@@ -268,7 +247,7 @@ function createInstanceRow(instance) {
                 navigateTo('packet-detail', instance.instanceId);
             }
         });
-        if (packetUtils.isPacketInstanceCompleted(instance)) {
+        if (progressPercentage >= 100) {
             row.style.opacity = '0.8';
             row.title = "Packet completed!";
         } else {
@@ -278,14 +257,15 @@ function createInstanceRow(instance) {
     return row;
 }
 
-// --- UI Updates ---
-
-/**
- * Updates a single instance row in the UI or moves it between lists.
- * @param {object} instance - The updated PacketInstance object.
- */
-export function updateInstanceRowUI(instance) {
-    const isCompleted = packetUtils.isPacketInstanceCompleted(instance);
+export async function updateInstanceRowUI(instance) {
+    const image = await storage.getPacketImage(instance.imageId);
+    if (!image) {
+        logger.warn('RootView:updateInstanceRowUI', 'Could not find image for instance, removing row.', { instanceId: instance.instanceId });
+        removeInstanceRow(instance.instanceId);
+        return;
+    }
+    
+    const isCompleted = await packetUtils.isPacketInstanceCompleted(instance, image);
     const targetList = isCompleted ? domRefs.completedList : domRefs.inProgressList;
 
     let sourceList = null;
@@ -298,33 +278,17 @@ export function updateInstanceRowUI(instance) {
     if (!targetList) return;
 
     const existingRow = sourceList?.querySelector(`tr[data-instance-id="${instance.instanceId}"]`);
-
-    if (existingRow && sourceList === targetList) {
-        const progressData = packetUtils.calculateInstanceProgress(instance);
-        const progressBar = existingRow.querySelector('.progress-bar');
-        const progressBarContainer = existingRow.querySelector('.progress-bar-container');
-        
-        if (progressBar) {
-            progressBar.style.width = `${progressData.progressPercentage}%`;
-        }
-        if (progressBarContainer) {
-            progressBarContainer.title = `${progressData.progressPercentage}% Complete`;
-        }
-        
-        if (isCompleted) {
-            existingRow.style.opacity = '0.8';
-            existingRow.title = "Packet completed!";
-        }
-        return;
-    }
-
-    const newRow = createInstanceRow(instance);
+    const newRow = createInstanceRow(instance, image);
     newRow.dataset.created = instance.created || instance.instantiated || new Date(0).toISOString();
-
+    
     if (existingRow) {
-        existingRow.remove();
-        insertRowSorted(newRow, targetList);
-        checkAndRenderEmptyState(sourceList, sourceList === domRefs.inProgressList ? "No packets Started." : "No completed packets yet.");
+        if (sourceList === targetList) {
+            existingRow.replaceWith(newRow);
+        } else {
+            existingRow.remove();
+            insertRowSorted(newRow, targetList);
+            checkAndRenderEmptyState(sourceList, sourceList === domRefs.inProgressList ? "No packets Started." : "No completed packets yet.");
+        }
     } else {
         insertRowSorted(newRow, targetList);
     }
@@ -333,10 +297,6 @@ export function updateInstanceRowUI(instance) {
     updateActionButtonsVisibility();
 }
 
-/**
- * Removes an instance row from the UI.
- * @param {string} instanceId - The ID of the instance to remove.
- */
 export function removeInstanceRow(instanceId) {
     const rowInProgress = domRefs.inProgressList?.querySelector(`tr[data-instance-id="${instanceId}"]`);
     const rowCompleted = domRefs.completedList?.querySelector(`tr[data-instance-id="${instanceId}"]`);
@@ -354,10 +314,6 @@ export function removeInstanceRow(instanceId) {
     updateActionButtonsVisibility();
 }
 
-/**
- * Removes an image row from the Library.
- * @param {string} imageId - The ID of the image to remove.
- */
 export function removeImageRow(imageId) {
     const row = domRefs.inboxList?.querySelector(`tr[data-image-id="${imageId}"]`);
     if (row) {
@@ -366,9 +322,6 @@ export function removeImageRow(imageId) {
         checkAndRenderEmptyState(list, "Library is empty. Create a packet!");
     }
 }
-
-
-// --- Event Handlers & Actions ---
 
 function switchListTab(tabName) {
     if (!['library', 'in-progress', 'completed'].includes(tabName)) return;
@@ -392,7 +345,6 @@ async function handleStartPacket(imageId) {
     showRootViewStatus('Checking for existing packet...', 'info', false);
 
     try {
-        // --- START of the new implementation ---
         const image = await storage.getPacketImage(imageId);
         if (!image) {
             throw new Error("Packet not found in the library.");
@@ -414,16 +366,20 @@ async function handleStartPacket(imageId) {
                 if (goToSettings) {
                     navigateTo('settings');
                 }
-                // Stop further execution if storage is not configured
                 return;
             }
         }
-        // --- END of the new implementation ---
 
         const allInstances = await storage.getPacketInstances();
         const instancesForImage = Object.values(allInstances).filter(inst => inst.imageId === imageId);
 
-        const incompleteInstance = instancesForImage.find(inst => !packetUtils.isPacketInstanceCompleted(inst));
+        let incompleteInstance = null;
+        for (const inst of instancesForImage) {
+            if (!(await packetUtils.isPacketInstanceCompleted(inst, image))) {
+                incompleteInstance = inst;
+                break;
+            }
+        }
 
         if (incompleteInstance) {
             showRootViewStatus('Navigating to your in-progress packet.', 'success');
@@ -516,8 +472,6 @@ async function handleDeleteSelectedInstances() {
     }
 }
 
-// --- Context Menu ---
-
 function setupInstanceContextMenu(row, instance) {
     row.addEventListener('contextmenu', async (e) => {
         e.preventDefault();
@@ -593,8 +547,6 @@ function removeContextMenus() {
     }
 }
 
-// --- Helper Functions ---
-
 function getSelectedInstanceIdsFromActiveList() {
     const listElement = activeListTab === 'in-progress' ? domRefs.inProgressList : domRefs.completedList;
     if (!listElement) return { selectedIds: [] };
@@ -636,10 +588,6 @@ function insertRowSorted(row, listElement) {
     if (!inserted) listElement.appendChild(row);
 }
 
-/**
- * Creates or updates a placeholder "stencil" for a packet image being created.
- * @param {object} data - The progress data from the background.
- */
 export function renderOrUpdateImageStencil(data) {
     const { imageId, topic, progressPercent, text } = data;
     const listElement = domRefs.inboxList;
@@ -687,11 +635,6 @@ export function renderOrUpdateImageStencil(data) {
     if (progressBarContainer) progressBarContainer.title = `${text} - ${progressPercent || 5}%`;
 }
 
-
-/**
- * Removes a stencil row from the Library list.
- * @param {string} imageId - The ID of the stencil to remove.
- */
 export function removeImageStencil(imageId) {
     const listElement = domRefs.inboxList;
     if (!listElement) return;
@@ -702,8 +645,6 @@ export function removeImageStencil(imageId) {
         checkAndRenderEmptyState(listElement, "Library is empty. Create a packet!");
     }
 }
-
-// --- New Stencil State Management Functions ---
 
 export function addOrUpdateInProgressStencil(data) {
     if (!data || !data.imageId) return;

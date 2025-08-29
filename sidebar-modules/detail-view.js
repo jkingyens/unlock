@@ -230,7 +230,7 @@ export async function displayPacketContent(instance, image, browserState, canoni
 
     try {
         const isAlreadyRendered = container.querySelector(`#detail-cards-container[data-instance-id="${instance.instanceId}"]`);
-        const { progressPercentage } = packetUtils.calculateInstanceProgress(instance);
+        const { progressPercentage, visitedCount, totalCount } = packetUtils.calculateInstanceProgress(instance, image);
 
         if (isAlreadyRendered) {
             const visitedUrlsSet = new Set(instance.visitedUrls || []);
@@ -253,10 +253,10 @@ export async function displayPacketContent(instance, image, browserState, canoni
             if (progressBar) progressBar.style.width = `${progressPercentage}%`;
             
             const progressBarContainer = domRefs.detailProgressContainer?.querySelector('.progress-bar-container');
-            if (progressBarContainer) progressBarContainer.title = `${progressPercentage}% Complete`;
+            if (progressBarContainer) progressBarContainer.title = `${visitedCount}/${totalCount} - ${progressPercentage}% Complete`;
             
             const oldActionButtonContainer = document.getElementById('detail-action-button-container');
-            const newActionButtonContainer = await createActionButtons(instance, browserState);
+            const newActionButtonContainer = await createActionButtons(instance, browserState, image);
             if (oldActionButtonContainer) {
                 oldActionButtonContainer.replaceWith(newActionButtonContainer);
             }
@@ -272,8 +272,8 @@ export async function displayPacketContent(instance, image, browserState, canoni
             container.style.setProperty('--packet-color-link-marker', colors.link);
 
             const fragment = document.createDocumentFragment();
-            fragment.appendChild(createProgressSection(instance));
-            fragment.appendChild(await createActionButtons(instance, browserState));
+            fragment.appendChild(createProgressSection(instance, image));
+            fragment.appendChild(await createActionButtons(instance, browserState, image));
             const cardsWrapper = await createCardsSection(instance);
             cardsWrapper.dataset.instanceId = instance.instanceId;
             fragment.appendChild(cardsWrapper);
@@ -333,20 +333,20 @@ function processQueuedDisplayRequest() {
 
 // --- UI Element Creation ---
 
-function createProgressSection(instance) {
-    const { progressPercentage } = packetUtils.calculateInstanceProgress(instance);
+function createProgressSection(instance, image) {
+    const { progressPercentage, visitedCount, totalCount } = packetUtils.calculateInstanceProgress(instance, image);
     const progressWrapper = document.createElement('div');
     progressWrapper.id = 'detail-progress-container';
-    progressWrapper.innerHTML = `<div class="progress-bar-container" title="${progressPercentage}% Complete"><div class="progress-bar" style="width: ${progressPercentage}%"></div></div>`;
+    progressWrapper.innerHTML = `<div class="progress-bar-container" title="${visitedCount}/${totalCount} - ${progressPercentage}% Complete"><div class="progress-bar" style="width: ${progressPercentage}%"></div></div>`;
     domRefs.detailProgressContainer = progressWrapper;
     return progressWrapper;
 }
 
-async function createActionButtons(instance, browserState) {
+async function createActionButtons(instance, browserState, image) {
     const actionButtonContainer = document.createElement('div');
     actionButtonContainer.id = 'detail-action-button-container';
 
-    const isCompleted = packetUtils.isPacketInstanceCompleted(instance);
+    const isCompleted = await packetUtils.isPacketInstanceCompleted(instance, image);
     const tabGroupId = browserState?.tabGroupId;
     let groupHasTabs = false;
 
@@ -474,7 +474,6 @@ export function updateActiveCardHighlight(canonicalPacketUrl) {
 
     let activeCardElement = null;
     cardsContainer.querySelectorAll('.card').forEach(card => {
-        // --- FIX: Decode URLs before comparison ---
         let cardUrl = card.dataset.url;
         try {
             if (cardUrl) cardUrl = decodeURIComponent(cardUrl);
@@ -486,7 +485,6 @@ export function updateActiveCardHighlight(canonicalPacketUrl) {
         } catch (e) { /* ignore invalid url */ }
 
         const isActive = (packetUrl && cardUrl === packetUrl);
-        // --- END FIX ---
         
         card.classList.toggle('active', isActive);
         if (isActive) {

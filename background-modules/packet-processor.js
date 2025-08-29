@@ -9,7 +9,8 @@ import {
     arrayBufferToBase64,
     base64Decode,
     MPI_PARAMS,
-    sanitizeForFileName
+    sanitizeForFileName,
+    packetUtils
 } from '../utils.js';
 import llmService from '../llm_service.js';
 import cloudStorage from '../cloud-storage.js';
@@ -431,6 +432,12 @@ export async function instantiatePacket(imageId, preGeneratedInstanceId, initiat
             visitedGeneratedPageIds: [],
             momentsTripped: packetImage.moments ? Array(packetImage.moments.length).fill(0) : [],
         };
+        
+        // --- START OF THE FIX ---
+        if (Array.isArray(packetImage.checkpoints)) {
+            packetInstance.checkpointsTripped = Array(packetImage.checkpoints.length).fill(0);
+        }
+        // --- END OF THE FIX ---
 
         for (let i = 0; i < packetInstance.contents.length; i++) {
             const item = packetInstance.contents[i];
