@@ -316,25 +316,21 @@ export async function notifyUIsOfStateChange(options = {}) {
 
 
 export async function setMediaPlaybackState(newState, options = { animate: false, source: 'unknown' }) {
-    // --- START OF THE FIX ---
     const oldInstanceId = activeMediaPlayback.instanceId;
     const newInstanceId = newState.instanceId || oldInstanceId;
 
     activeMediaPlayback = { ...activeMediaPlayback, ...newState };
 
-    // If the instanceId has changed, or if there's an instanceId but no live instance object,
-    // we need to load or reload it to ensure our live state is always accurate.
     if (newInstanceId && (newInstanceId !== oldInstanceId || !activeMediaPlayback.instance)) {
         try {
             activeMediaPlayback.instance = await storage.getPacketInstance(newInstanceId);
             logger.log('Background:setMediaPlaybackState', `Loaded/reloaded live instance data for ${newInstanceId} into active media state.`);
         } catch (error) {
             logger.error('Background:setMediaPlaybackState', `Failed to load instance ${newInstanceId}`, error);
-            await resetActiveMediaPlayback(); // Reset if we can't load the instance
+            await resetActiveMediaPlayback();
             return;
         }
     }
-    // --- END OF THE FIX ---
     
     const isPlaying = activeMediaPlayback.isPlaying;
     const hasActiveTrack = !!activeMediaPlayback.pageId;
@@ -358,7 +354,6 @@ async function restoreMediaStateOnStartup() {
     const data = await storage.getSession(CONFIG.STORAGE_KEYS.ACTIVE_MEDIA_KEY);
     if (data && data[CONFIG.STORAGE_KEYS.ACTIVE_MEDIA_KEY]) {
         activeMediaPlayback = data[CONFIG.STORAGE_KEYS.ACTIVE_MEDIA_KEY];
-        // Ensure instance is reloaded from persistent storage on startup
         if (activeMediaPlayback.instanceId) {
             activeMediaPlayback.instance = await storage.getPacketInstance(activeMediaPlayback.instanceId);
         }
@@ -412,7 +407,6 @@ chrome.runtime.onStartup.addListener(async () => {
         await ruleManager.refreshAllRules();
         await getDb();
         await garbageCollectTabContexts();
-        // FIX: Added cleanup for the draft tab group on startup
         await tabGroupHandler.cleanupDraftGroup();
 
         logger.log('Background:onStartup', 'Injecting overlay scripts into existing tabs.');
@@ -498,9 +492,9 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
     
     try {
         const tab = await chrome.tabs.get(tabId);
-        if (tab.groupId && groupsNeedingReorder.has(tab.groupId)) {
+        if (tab.groupId && reorderDebounceTimers.has(tab.groupId)) {
             await reorderGroupFromChangeEvent(tab.groupId);
-            groupsNeedingReorder.delete(tab.groupId); // Clear the flag
+            reorderDebounceTimers.delete(tab.groupId); 
         }
     } catch (e) { /* ignore error if tab is closed quickly */ }
 
@@ -529,7 +523,7 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
     if (instance && context?.canonicalPacketUrl) {
         const itemForVisitTimer = instance.contents.find(i => i.url === context.canonicalPacketUrl);
         if (itemForVisitTimer && !itemForVisitTimer.interactionBasedCompletion) {
-            clearPendingVisitTimer(tabId); // Ensure no old timer is running for this tab
+            clearPendingVisitTimer(tabId);
             startVisitTimer(tabId, instance.instanceId, itemForVisitTimer.url, '[onActivated]');
         }
     }
@@ -718,3 +712,4 @@ async function restoreContextOnStartup() {
         logger.error('Background:restoreContext', 'Error during context restoration', error);
     }
 }
+
