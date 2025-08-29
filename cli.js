@@ -68,6 +68,76 @@ function validatePacketSchema(packetImage) {
 }
 
 /**
+ * Validates if a packet is "winnable" by ensuring all required items are reachable.
+ * @param {object} packetImage The packet image object to validate.
+ * @returns {Array<string>} An array of winnability errors, or an empty array if valid.
+ */
+function validatePacketWinnability(packetImage) {
+    const errors = [];
+
+    // Fallback case: If no checkpoints are defined, the packet is trivially winnable.
+    if (!packetImage.checkpoints || packetImage.checkpoints.length === 0) {
+        return errors;
+    }
+
+    // 1. Initialization
+    const requiredItems = new Set();
+    packetImage.checkpoints.forEach(cp => {
+        cp.requiredItems.forEach(item => {
+            requiredItems.add(item.url || item.pageId);
+        });
+    });
+
+    const unlockedItems = new Set(
+        packetImage.sourceContent
+            .filter(item => typeof item.revealedByMoment !== 'number')
+            .map(item => item.url || item.pageId)
+            .filter(Boolean)
+    );
+
+    const trippedMoments = new Set();
+    let progressMadeInLoop = true;
+
+    // 2. The Unlocking Loop
+    while (progressMadeInLoop) {
+        progressMadeInLoop = false;
+        const newlyVisitedItems = [];
+
+        for (const required of requiredItems) {
+            if (unlockedItems.has(required)) {
+                newlyVisitedItems.push(required);
+                progressMadeInLoop = true;
+            }
+        }
+
+        if (newlyVisitedItems.length > 0) {
+            newlyVisitedItems.forEach(visited => requiredItems.delete(visited));
+
+            const momentsToTrip = (packetImage.moments || [])
+                .filter(moment => newlyVisitedItems.includes(moment.sourcePageId) && !trippedMoments.has(moment.id));
+
+            momentsToTrip.forEach(moment => {
+                trippedMoments.add(moment.id);
+                const momentIndex = packetImage.moments.indexOf(moment);
+
+                packetImage.sourceContent
+                    .filter(item => item.revealedByMoment === momentIndex)
+                    .forEach(item => unlockedItems.add(item.url || item.pageId));
+            });
+        }
+    }
+
+    // 3. Determining the Result
+    if (requiredItems.size > 0) {
+        errors.push('Packet is not winnable. The following required items are unreachable:');
+        requiredItems.forEach(item => errors.push(`- ${item}`));
+    }
+
+    return errors;
+}
+
+
+/**
  * Main function to handle command-line input.
  */
 function main() {
@@ -75,8 +145,8 @@ function main() {
   const command = args[0];
   const filename = args[1];
 
-  if (command !== 'validate' || !filename) {
-    console.error('Usage: pkt validate <filename>');
+  if (!['validate', 'winnable'].includes(command) || !filename) {
+    console.error('Usage: pkt <validate|winnable> <filename>');
     process.exit(1);
   }
 
@@ -90,10 +160,20 @@ function main() {
   try {
     const fileContent = fs.readFileSync(filePath, 'utf8');
     const packetImage = JSON.parse(fileContent);
-    const errors = validatePacketSchema(packetImage);
+    let errors = [];
+
+    if (command === 'validate') {
+        errors = validatePacketSchema(packetImage);
+    } else if (command === 'winnable') {
+        // A packet must be schema-valid before checking winnability
+        errors = validatePacketSchema(packetImage);
+        if (errors.length === 0) {
+            errors = validatePacketWinnability(packetImage);
+        }
+    }
 
     if (errors.length === 0) {
-      console.log(`✅ Success: Packet image "${filename}" is well-formed and valid.`);
+      console.log(`✅ Success: Packet image "${filename}" is valid and completable.`);
       process.exit(0);
     } else {
       console.error(`❌ Validation failed for "${filename}":`);
