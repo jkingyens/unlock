@@ -33,10 +33,11 @@ async function migratePacketImagesIfNecessary() {
     const MIGRATION_FLAG_V2 = 'packetImageMigrationV2Complete';
     const MIGRATION_FLAG_V3 = 'packetImageMigrationV3Complete';
     const MIGRATION_FLAG_V4 = 'packetImageMigrationV4AudioCheckpoint';
+    const MIGRATION_FLAG_V5 = 'packetImageMigrationV5SummaryCheckpoint';
 
-    const flags = await storage.getLocal([MIGRATION_FLAG_V2, MIGRATION_FLAG_V3, MIGRATION_FLAG_V4]);
+    const flags = await storage.getLocal([MIGRATION_FLAG_V2, MIGRATION_FLAG_V3, MIGRATION_FLAG_V4, MIGRATION_FLAG_V5]);
 
-    if (flags[MIGRATION_FLAG_V2] && flags[MIGRATION_FLAG_V3] && flags[MIGRATION_FLAG_V4]) {
+    if (flags[MIGRATION_FLAG_V2] && flags[MIGRATION_FLAG_V3] && flags[MIGRATION_FLAG_V4] && flags[MIGRATION_FLAG_V5]) {
         logger.log('Background:Migration', 'All migrations already completed. Skipping.');
         return;
     }
@@ -163,6 +164,30 @@ async function migratePacketImagesIfNecessary() {
             }
         }
 
+        // --- V5 Migration: Ensure summary page does not contribute to progress ---
+        if (!flags[MIGRATION_FLAG_V5]) {
+            const summaryPage = image.sourceContent.find(item => item.pageId === 'summary-page');
+            if (summaryPage) {
+                migrationNeeded = true;
+                logger.log('Background:Migration', `Found V5 candidate packet image, adjusting checkpoints for summary page: ${imageId}`);
+
+                if (!image.checkpoints) {
+                    image.checkpoints = image.sourceContent
+                        .filter(item => item.format === 'html' && item.pageId !== 'summary-page')
+                        .map(item => ({
+                            title: `Visit ${item.title}`,
+                            requiredItems: [{ url: item.url, pageId: item.pageId }]
+                        }));
+                } else {
+                    image.checkpoints.forEach(checkpoint => {
+                        checkpoint.requiredItems = checkpoint.requiredItems.filter(req => req.pageId !== 'summary-page');
+                    });
+                    image.checkpoints = image.checkpoints.filter(cp => cp.requiredItems.length > 0);
+                }
+                image.migratedV5 = true;
+            }
+        }
+
         imagesToUpdate[imageId] = image;
     }
 
@@ -171,7 +196,7 @@ async function migratePacketImagesIfNecessary() {
         logger.log('Background:Migration', 'All necessary packet image migrations have been completed.');
     }
 
-    await storage.setLocal({ [MIGRATION_FLAG_V2]: true, [MIGRATION_FLAG_V3]: true, [MIGRATION_FLAG_V4]: true });
+    await storage.setLocal({ [MIGRATION_FLAG_V2]: true, [MIGRATION_FLAG_V3]: true, [MIGRATION_FLAG_V4]: true, [MIGRATION_FLAG_V5]: true });
 }
 // --- END: New Migration Logic ---
 
