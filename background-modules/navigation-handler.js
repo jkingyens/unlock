@@ -188,6 +188,9 @@ async function processNavigationEvent(tabId, finalUrl, details) {
             });
             if (momentTripped) {
                 await storage.savePacketInstance(finalInstance);
+                if (activeMediaPlayback.instanceId === finalInstance.instanceId) {
+                    activeMediaPlayback.instance = finalInstance;
+                }
                 sidebarHandler.notifySidebar('moment_tripped', {
                     instanceId: finalInstance.instanceId,
                     instance: finalInstance,
