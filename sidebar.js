@@ -236,9 +236,6 @@ async function openUrl(url, instanceId) {
     isOpeningPacketItem = true;
     setTimeout(() => { isOpeningPacketItem = false; }, 1500);
 
-    // --- REMOVE THIS LINE ---
-    // await detailView.triggerImmediateSave(); 
-
     sendMessageToBackground({
         action: 'open_content',
         data: { instance: instanceToOpen, url: url }
@@ -292,12 +289,21 @@ async function handleBackgroundMessage(message) {
             break;
         case 'moment_tripped':
             if (currentView === 'packet-detail' && currentInstanceId === data.instanceId) {
-                // The full instance data with the updated momentsTripped array is sent.
-                // We can just re-render the dynamic parts of the view.
                 currentInstanceData = data.instance;
                 const image = await storage.getPacketImage(data.instance.imageId);
                 const browserState = await storage.getPacketBrowserState(data.instanceId);
                 await detailView.displayPacketContent(data.instance, image, browserState, currentPacketUrl);
+
+                if (data.mentionedItemId) {
+                    const cardToHighlight = domRefs.packetDetailView.querySelector(
+                        `.card[data-page-id="${data.mentionedItemId}"], .card[data-url="${data.mentionedItemId}"]`
+                    );
+                    if (cardToHighlight) {
+                        cardToHighlight.classList.remove('link-mentioned'); // Reset animation
+                        void cardToHighlight.offsetWidth; // Trigger reflow
+                        cardToHighlight.classList.add('link-mentioned');
+                    }
+                }
             }
             break;
         case 'navigate_to_view':

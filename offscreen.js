@@ -175,18 +175,18 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
     };
 
     function handleMessages(request, sender, sendResponse) {
-        // --- START OF THE FIX: Check if context is still valid before processing ---
         if (!chrome.runtime?.id) {
             console.warn("Offscreen document context invalidated. Ignoring message.", request.type);
-            return; // Context is gone, do nothing.
+            // Do not return true here, as we cannot send a response.
+            return false;
         }
-        // --- END OF THE FIX ---
 
         if (request.target !== 'offscreen') return false;
+
         switch (request.type) {
             case 'control-audio':
                 sendResponse(handleAudioControl(request.data));
-                return false; // Synchronous response
+                return false; 
             case 'parse-html-for-text':
             case 'parse-html-for-text-with-markers':
             case 'parse-html-for-links':
@@ -209,27 +209,24 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
                 } catch (error) {
                     sendResponse({ success: false, error: error.message });
                 }
-                return false; // Synchronous response
+                return false;
             case 'normalize-audio':
                 if (request.data && request.data.base64) {
-                    const audioBuffer = base64ToAb(request.data.base64);
-                    normalizeAudio(audioBuffer).then(processedBuffer => {
+                    normalizeAudio(base64ToAb(request.data.base64)).then(processedBuffer => {
                         const processedBase64 = btoa(new Uint8Array(processedBuffer).reduce((data, byte) => data + String.fromCharCode(byte), ''));
                         sendResponse({ success: true, data: { base64: processedBase64, type: 'audio/wav' } });
                     }).catch(error => sendResponse({ success: false, error: error.message }));
                 } else {
                     sendResponse({ success: false, error: 'No audio data provided.' });
                 }
-                return true; // Asynchronous response
+                return true;
         }
         return false;
     }
     
-    // --- START OF THE FIX: More robust listener attachment ---
     if (chrome.runtime && chrome.runtime.onMessage) {
         chrome.runtime.onMessage.addListener(handleMessages);
     } else {
         console.error("Offscreen document loaded without chrome.runtime.onMessage. This should not happen.");
     }
-    // --- END OF THE FIX ---
 }
