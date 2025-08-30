@@ -411,7 +411,7 @@ body.dark-mode .import-dialog .confirm-btn:hover, body.dark-mode .share-dialog b
 body.dark-mode .import-dialog .cancel-btn, body.dark-mode .share-dialog .close-btn, body.dark-mode .close-group-dialog .cancel-btn, body.dark-mode .confirm-dialog .cancel-btn { background-color: var(--button-secondary-bg); color: var(--text-on-secondary-button); }
 body.dark-mode .import-dialog .cancel-btn:hover, body.dark-mode .share-dialog .close-btn:hover, body.dark-mode .close-group-dialog .cancel-btn:hover, body.dark-mode .confirm-dialog .cancel-btn:hover { background-color: var(--button-secondary-hover-bg); }
 
-/* LLM Model list in settings */
+/* LLM Model List Item Styling */
 .llm-model-item {
       display: flex;
       align-items: center;
@@ -426,7 +426,7 @@ body.dark-mode .import-dialog .cancel-btn:hover, body.dark-mode .share-dialog .c
     }
 .llm-model-item input[type="radio"] {
       margin-right: 10px;
-      width: auto;
+      width: auto; /* override general input width */
       accent-color: var(--text-accent);
     }
 .llm-model-item .model-name-display {
@@ -454,20 +454,20 @@ body.dark-mode .import-dialog .cancel-btn:hover, body.dark-mode .share-dialog .c
     }
 .llm-model-item button:hover {
       background-color: var(--bg-accent);
-      color: var(--text-on-primary-button);
+      color: var(--text-on-primary-button); /* if bg-accent is light, else var(--text-primary) */
     }
-body.dark-mode .llm-model-item button:hover {
+     body.dark-mode .llm-model-item button:hover {
         background-color: var(--button-secondary-hover-bg);
         color: var(--text-primary);
      }
-.llm-model-item .delete-btn {
+    .llm-model-item .delete-btn {
       color: var(--status-error-color);
     }
-.llm-model-item .delete-btn:hover {
+    .llm-model-item .delete-btn:hover {
       background-color: var(--status-error-color);
       color: #fff;
     }
-#llm-edit-form-buttons button, #llm-add-new-model-btn {
+     #llm-edit-form-buttons button, #llm-add-new-model-btn {
         padding: 7px 12px;
         font-size: 0.9em;
      }
@@ -626,22 +626,9 @@ body.dark-mode .llm-model-item button:hover {
   object-fit: fill;
 }
 
-/* --- START OF THE FIX --- */
 #detail-cards-container .card.link-mentioned {
   animation: link-pulse 1.5s ease-out;
-  /* Make the highlight more prominent */
-  border-left-color: var(--text-accent) !important;
 }
-/* Ensure visited items that are mentioned still get highlighted */
-#detail-cards-container .card.link-mentioned.visited {
-    border-left-color: var(--card-border-visited) !important;
-}
-/* Special handling for active items to avoid border conflicts */
-#detail-cards-container .card.link-mentioned.active {
-    border-color: var(--link-pulse-glow-color) !important;
-    border-left-color: var(--card-border-visited); /* Keep left border consistent if active+visited */
-}
-/* --- END OF THE FIX --- */
 
 .card.media .media-play-icon {
   position: relative;

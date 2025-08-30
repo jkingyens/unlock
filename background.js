@@ -32,10 +32,11 @@ import cloudStorage from '../cloud-storage.js';
 async function migratePacketImagesIfNecessary() {
     const MIGRATION_FLAG_V2 = 'packetImageMigrationV2Complete';
     const MIGRATION_FLAG_V3 = 'packetImageMigrationV3Complete';
+    const MIGRATION_FLAG_V4 = 'packetImageMigrationV4AudioCheckpoint';
 
-    const flags = await storage.getLocal([MIGRATION_FLAG_V2, MIGRATION_FLAG_V3]);
+    const flags = await storage.getLocal([MIGRATION_FLAG_V2, MIGRATION_FLAG_V3, MIGRATION_FLAG_V4]);
 
-    if (flags[MIGRATION_FLAG_V2] && flags[MIGRATION_FLAG_V3]) {
+    if (flags[MIGRATION_FLAG_V2] && flags[MIGRATION_FLAG_V3] && flags[MIGRATION_FLAG_V4]) {
         logger.log('Background:Migration', 'All migrations already completed. Skipping.');
         return;
     }
@@ -46,7 +47,7 @@ async function migratePacketImagesIfNecessary() {
     let migrationNeeded = false;
 
     for (const imageId in allImages) {
-        let image = allImages[imageId];
+        let image = { ...allImages[imageId] }; // Work on a copy
         
         // --- V2 Migration: Convert old format to new format ---
         const isLegacyV2 = image.sourceContent && image.sourceContent.some(item => 'type' in item);
@@ -131,6 +132,37 @@ async function migratePacketImagesIfNecessary() {
                 image.migratedV3 = true;
             }
         }
+
+        // --- V4 Migration: Ensure audio files do not contribute to progress ---
+        if (!flags[MIGRATION_FLAG_V4]) {
+            const hasAudio = image.sourceContent.some(item => item.format === 'audio');
+            if (hasAudio) {
+                migrationNeeded = true;
+                logger.log('Background:Migration', `Found V4 candidate packet image, adjusting checkpoints for audio: ${imageId}`);
+
+                if (!image.checkpoints) {
+                    // If no checkpoints exist, create them for all non-audio items.
+                    image.checkpoints = image.sourceContent
+                        .filter(item => item.format === 'html')
+                        .map(item => ({
+                            title: `Visit ${item.title}`,
+                            requiredItems: [{ url: item.url, pageId: item.pageId }]
+                        }));
+                } else {
+                    // If checkpoints exist, filter out any audio requirements.
+                    image.checkpoints.forEach(checkpoint => {
+                        checkpoint.requiredItems = checkpoint.requiredItems.filter(req => {
+                            const item = image.sourceContent.find(i => i.url === req.url || i.pageId === req.pageId);
+                            return item && item.format !== 'audio';
+                        });
+                    });
+                    // Remove any checkpoints that are now empty
+                    image.checkpoints = image.checkpoints.filter(cp => cp.requiredItems.length > 0);
+                }
+                image.migratedV4 = true;
+            }
+        }
+
         imagesToUpdate[imageId] = image;
     }
 
@@ -139,7 +171,7 @@ async function migratePacketImagesIfNecessary() {
         logger.log('Background:Migration', 'All necessary packet image migrations have been completed.');
     }
 
-    await storage.setLocal({ [MIGRATION_FLAG_V2]: true, [MIGRATION_FLAG_V3]: true });
+    await storage.setLocal({ [MIGRATION_FLAG_V2]: true, [MIGRATION_FLAG_V3]: true, [MIGRATION_FLAG_V4]: true });
 }
 // --- END: New Migration Logic ---
 
@@ -445,8 +477,10 @@ chrome.runtime.onMessageExternal.addListener(async (message, sender, sendRespons
     if (message.action === 'page_interaction_complete') {
         const context = await getPacketContext(sender.tab.id);
         if (context?.instanceId && context?.canonicalPacketUrl) {
-            const visitResult = await packetUtils.markUrlAsVisited(context.instanceId, context.canonicalPacketUrl, activeMediaPlayback.instance);
+            const instance = await storage.getPacketInstance(context.instanceId);
+            const visitResult = await packetUtils.markUrlAsVisited(instance, context.canonicalPacketUrl);
             if (visitResult.success && visitResult.modified) {
+                await storage.savePacketInstance(visitResult.instance);
                 sidebarHandler.notifySidebar('packet_instance_updated', { instance: visitResult.instance });
                 await checkAndPromptForCompletion('onMessageExternal', visitResult, context.instanceId);
             }
