@@ -94,7 +94,9 @@ export async function generateDraftPacketFromTab(initiatorTabId) {
         }
 
         const sourcePageContentItem = {
-            type: 'external',
+            origin: 'external',
+            format: 'html',
+            access: 'public',
             url: tab.url,
             title: tab.title || 'Source Page',
             relevance: 'The original source page this packet was created from.'
@@ -126,9 +128,23 @@ export async function generateDraftPacketFromTab(initiatorTabId) {
         
         let validatedExternalLinks = externalContentResponse.success ? (externalContentResponse.data.contents || [])
             .filter(item => item?.url?.startsWith('https://en.wikipedia.org/wiki/') && item.title && item.relevance)
-            .map(item => ({ type: 'external', url: decodeURIComponent(item.url), title: item.title, relevance: item.relevance })) : [];
+            .map(item => ({
+                origin: 'external',
+                format: 'html',
+                access: 'public',
+                url: decodeURIComponent(item.url),
+                title: item.title,
+                relevance: item.relevance
+            })) : [];
 
-        const summaryPageDef = { type: "generated", pageId: "summary-page", title: `${topic} Summary`, contentType: "text/html" };
+        const summaryPageDef = {
+            origin: 'internal',
+            format: 'html',
+            access: 'private',
+            pageId: "summary-page",
+            title: `${topic} Summary`,
+            contentType: "text/html"
+        };
         let audioMediaItem = null;
         let moments = [];
 
@@ -143,19 +159,21 @@ export async function generateDraftPacketFromTab(initiatorTabId) {
         const ttsResponse = await ttsService.generateAudio(plainTextForTTS);
         
         const draftId = `draft_${Date.now()}`; 
+        const links = await getLinksFromHtml(summaryHtmlBodyLLM);
 
         if (ttsResponse.success && ttsResponse.audioBlob) {
             const normalizedAudioBlob = await normalizeAudioOffscreen(ttsResponse.audioBlob);
             const audioBuffer = await normalizedAudioBlob.arrayBuffer();
             audioMediaItem = {
-                type: 'media',
+                origin: 'internal',
+                format: 'audio',
+                access: 'private',
                 pageId: `audio_summary_${Date.now()}`,
                 title: summaryPageDef.title,
                 mimeType: 'audio/wav',
                 published: false 
             };
             
-            const links = await getLinksFromHtml(summaryHtmlBodyLLM);
             const alignmentResponse = await ttsService.getAlignmentForExistingAudio(audioBuffer, plainTextForTTS);
             
             if (alignmentResponse.success && alignmentResponse.wordTimestamps && links.length > 0) {
@@ -182,8 +200,24 @@ export async function generateDraftPacketFromTab(initiatorTabId) {
                     }
                 });
             }
-            
             await indexedDbStorage.saveGeneratedContent(draftId, audioMediaItem.pageId, [{ name: 'audio.wav', content: audioBuffer, contentType: 'audio/wav' }]);
+        } else if (links.length > 0) {
+            // --- START OF THE FIX ---
+            // If there's no audio but there are links, create 'visit' moments
+            // tied to the summary page itself.
+            links.forEach(link => {
+                const linkedItem = validatedExternalLinks.find(ext => ext.url === link.href);
+                if (linkedItem) {
+                    const momentIndex = moments.length;
+                    moments.push({
+                        id: `moment_${momentIndex}`,
+                        type: "visit",
+                        sourcePageId: summaryPageDef.pageId
+                    });
+                    linkedItem.revealedByMoment = momentIndex;
+                }
+            });
+            // --- END OF THE FIX ---
         }
 
         summaryPageDef.contentB64 = arrayBufferToBase64(new TextEncoder().encode(enhanceHtml(summaryHtmlBodyLLM, topic, summaryPageDef.title)));
@@ -322,70 +356,6 @@ export function enhanceHtml(bodyHtml, topic, pageTitle) {
 </html>`;
 }
 
-// --- START: Legacy Packet Migration ---
-function _migrateLegacyPacketImage(legacyImage) {
-    logger.log('PacketProcessor:Migration', `Starting migration for legacy packet image: ${legacyImage.id}`);
-    
-    const newSourceContent = [];
-    const newMoments = [];
-    const externalLinks = [];
-    let mediaItem = null;
-
-    // First pass: extract all items and find the media item
-    for (const item of legacyImage.sourceContent) {
-        if (item.type === 'alternative') {
-            for (const alt of item.alternatives) {
-                if (alt.type === 'media') {
-                    mediaItem = { ...alt }; // Make a copy
-                    newSourceContent.push(mediaItem);
-                } else {
-                    newSourceContent.push(alt);
-                }
-            }
-        } else {
-            if (item.type === 'external') {
-                externalLinks.push(item);
-            }
-            newSourceContent.push(item);
-        }
-    }
-
-    // Second pass: if there was a media item with timestamps, create moments
-    if (mediaItem && Array.isArray(mediaItem.timestamps) && mediaItem.timestamps.length > 0) {
-        mediaItem.timestamps.forEach(ts => {
-            const momentIndex = newMoments.length;
-            newMoments.push({
-                id: `moment_${momentIndex}`,
-                type: 'mediaTimestamp',
-                sourcePageId: mediaItem.pageId,
-                timestamp: ts.startTime
-            });
-
-            // Find the corresponding external link and link it to the new moment
-            const linkedItem = externalLinks.find(link => link.url === ts.url);
-            if (linkedItem) {
-                const itemInNewContent = newSourceContent.find(i => i.url === linkedItem.url);
-                if (itemInNewContent) {
-                    itemInNewContent.revealedByMoment = momentIndex;
-                }
-            }
-        });
-        delete mediaItem.timestamps; // Remove the old timestamps array
-    }
-
-    const migratedImage = {
-        ...legacyImage,
-        sourceContent: newSourceContent,
-        moments: newMoments,
-        migrated: true // Add a flag to show it's been converted
-    };
-    
-    logger.log('PacketProcessor:Migration', `Migration complete for ${legacyImage.id}.`, { newMomentCount: newMoments.length });
-    return migratedImage;
-}
-// --- END: Legacy Packet Migration ---
-
-
 // --- Main Processing Functions ---
 export async function instantiatePacket(imageId, preGeneratedInstanceId, initiatorTabId = null) {
     const instanceId = preGeneratedInstanceId;
@@ -395,24 +365,17 @@ export async function instantiatePacket(imageId, preGeneratedInstanceId, initiat
         let packetImage = await storage.getPacketImage(imageId);
         if (!packetImage) throw new Error(`Packet Image ${imageId} not found.`);
 
-        // --- START: Legacy Packet Migration Check ---
-        const isLegacy = packetImage.sourceContent.some(item => item.type === 'alternative');
-        if (isLegacy) {
-            logger.warn('PacketProcessor:instantiatePacket', `Legacy packet format detected for image ${imageId}. Migrating...`);
-            packetImage = _migrateLegacyPacketImage(packetImage);
-            await storage.savePacketImage(packetImage);
-            logger.log('PacketProcessor:instantiatePacket', `Legacy packet ${imageId} migrated and saved.`);
-        }
-        // --- END: Legacy Packet Migration Check ---
+        // The on-the-fly migration logic that was here has been removed,
+        // as the new global migration in background.js handles it at startup.
 
-        const hasGeneratedContent = packetImage.sourceContent.some(item => item.type === 'generated' || item.type === 'media');
+        const hasInternalContent = packetImage.sourceContent.some(item => item.origin === 'internal');
         let activeCloudConfig = null;
 
-        if (hasGeneratedContent) {
-            logger.log('PacketProcessor:instantiatePacket', 'Packet contains generated content, checking cloud storage...');
+        if (hasInternalContent) {
+            logger.log('PacketProcessor:instantiatePacket', 'Packet contains internal content, checking cloud storage...');
             activeCloudConfig = await storage.getActiveCloudStorageConfig();
             if (!activeCloudConfig) {
-                throw new Error("This packet contains generated pages, but no active cloud storage is configured for publishing.");
+                throw new Error("This packet contains internal content, but no active cloud storage is configured for publishing.");
             }
             if (!(await cloudStorage.initialize())) {
                 throw new Error("Cloud storage failed to initialize for publishing.");
@@ -433,18 +396,16 @@ export async function instantiatePacket(imageId, preGeneratedInstanceId, initiat
             momentsTripped: packetImage.moments ? Array(packetImage.moments.length).fill(0) : [],
         };
         
-        // --- START OF THE FIX ---
         if (Array.isArray(packetImage.checkpoints)) {
             packetInstance.checkpointsTripped = Array(packetImage.checkpoints.length).fill(0);
         }
-        // --- END OF THE FIX ---
 
         for (let i = 0; i < packetInstance.contents.length; i++) {
             const item = packetInstance.contents[i];
-            if (item.type === 'generated') {
+            if (item.origin === 'internal' && item.format === 'html') {
                 const { pageId, contentB64, contentType } = item;
                 if (!contentB64) {
-                    logger.warn('PacketProcessor:instantiate', `Generated item ${pageId} is missing Base64 content. Cannot publish.`);
+                    logger.warn('PacketProcessor:instantiate', `Internal item ${pageId} is missing Base64 content. Cannot publish.`);
                     item.published = false;
                     item.url = null;
                 } else {
@@ -468,7 +429,7 @@ export async function instantiatePacket(imageId, preGeneratedInstanceId, initiat
                     }
                 }
                 delete item.contentB64;
-            } else if (item.type === 'media') {
+            } else if (item.origin === 'internal' && item.format === 'audio') {
                 item.currentTime = 0;
                 item.duration = 0;
                 const { pageId, mimeType, title } = item;
@@ -554,7 +515,7 @@ export async function processDeletePacketsRequest(data, initiatorTabId = null) {
             }
             
             for (const item of instance.contents) {
-                if (item.type === 'media' && item.pageId) {
+                if (item.format === 'audio' && item.pageId) {
                     const sessionKey = `audio_progress_${instanceId}_${item.pageId}`;
                     await storage.removeSession(sessionKey);
                 }
@@ -562,7 +523,7 @@ export async function processDeletePacketsRequest(data, initiatorTabId = null) {
 
             if (await cloudStorage.initialize()) {
                 for (const item of instance.contents) {
-                    if (item.type === 'generated' && item.pageId && item.url) {
+                    if (item.origin === 'internal' && item.pageId && item.url) {
                         await cloudStorage.deletePacketFiles(instanceId, item.pageId)
                             .catch(e => logger.warn('PacketProcessor:delete', `Error deleting cloud files for ${instanceId}/${item.pageId}`, e));
                     }
@@ -616,7 +577,7 @@ export async function importImageFromUrl(url) {
         const importedPacketImage = { ...sharedImage, id: imageId, created: new Date().toISOString(), shareUrl: url };
         
         for (const contentItem of importedPacketImage.sourceContent) {
-            if (contentItem.type === 'media' && contentItem.contentB64) {
+            if (contentItem.format === 'audio' && contentItem.contentB64) {
                 const audioBuffer = base64Decode(contentItem.contentB64);
                 if (audioBuffer) {
                     await indexedDbStorage.saveGeneratedContent(imageId, contentItem.pageId, [{
@@ -668,13 +629,27 @@ export async function processCreatePacketRequest(data, initiatorTabId) {
         }
         const validatedExternalLinks = (externalContentResponse.data.contents || [])
             .filter(item => item?.url?.startsWith('https://en.wikipedia.org/wiki/') && item.title && item.relevance)
-            .map(item => ({ type: 'external', url: decodeURIComponent(item.url), title: item.title, relevance: item.relevance }));
+            .map(item => ({
+                origin: 'external',
+                format: 'html',
+                access: 'public',
+                url: decodeURIComponent(item.url),
+                title: item.title,
+                relevance: item.relevance
+            }));
         if (validatedExternalLinks.length === 0) {
             throw new Error(`LLM returned no valid Wikipedia articles for "${topic}". Please try a more specific topic.`);
         }
         sendStencilProgressNotification(imageId, 'articles', 'completed', `Found ${validatedExternalLinks.length} articles`, 30);
         
-        const summaryPageDef = { type: "generated", pageId: "summary-page", title: `${topic} Summary`, contentType: "text/html" };
+        const summaryPageDef = {
+            origin: 'internal',
+            format: 'html',
+            access: 'private',
+            pageId: "summary-page",
+            title: `${topic} Summary`,
+            contentType: "text/html"
+        };
 
         sendStencilProgressNotification(imageId, 'generate_summary', 'active', 'Generating summary...', 40);
         const summaryResponse = await llmService.callLLM('summary_page', { topic: topic, allPacketContents: validatedExternalLinks });
@@ -722,7 +697,9 @@ export async function processCreatePacketRequestFromTab(initiatorTabId) {
         }
 
         const sourcePageContentItem = {
-            type: 'external',
+            origin: 'external',
+            format: 'html',
+            access: 'public',
             url: tab.url,
             title: tab.title || 'Source Page',
             relevance: 'The original source page this packet was created from.'
@@ -761,14 +738,28 @@ export async function processCreatePacketRequestFromTab(initiatorTabId) {
         
         let validatedExternalLinks = externalContentResponse.success ? (externalContentResponse.data.contents || [])
             .filter(item => item?.url?.startsWith('https://en.wikipedia.org/wiki/') && item.title && item.relevance)
-            .map(item => ({ type: 'external', url: decodeURIComponent(item.url), title: item.title, relevance: item.relevance })) : [];
+            .map(item => ({
+                origin: 'external',
+                format: 'html',
+                access: 'public',
+                url: decodeURIComponent(item.url),
+                title: item.title,
+                relevance: item.relevance
+            })) : [];
 
         if (validatedExternalLinks.length === 0) {
             logger.warn('PacketProcessor:FromTab', `LLM returned no valid Wikipedia articles for "${topic}". Packet will be created without them.`);
         }
         sendStencilProgressNotification(imageId, 'articles', 'completed', `Found ${validatedExternalLinks.length} articles`, 40, topic);
 
-        const summaryPageDef = { type: "generated", pageId: "summary-page", title: `${topic} Summary`, contentType: "text/html" };
+        const summaryPageDef = {
+            origin: 'internal',
+            format: 'html',
+            access: 'private',
+            pageId: "summary-page",
+            title: `${topic} Summary`,
+            contentType: "text/html"
+        };
         let audioMediaItem = null;
         let moments = [];
 
@@ -789,7 +780,9 @@ export async function processCreatePacketRequestFromTab(initiatorTabId) {
             const normalizedAudioBlob = await normalizeAudioOffscreen(ttsResponse.audioBlob);
             const audioBuffer = await normalizedAudioBlob.arrayBuffer();
             audioMediaItem = {
-                type: 'media',
+                origin: 'internal',
+                format: 'audio',
+                access: 'private',
                 pageId: `audio_summary_${Date.now()}`,
                 title: summaryPageDef.title,
                 mimeType: 'audio/wav'
@@ -906,8 +899,8 @@ export async function processRepublishRequest(data, initiatorTabId = null) {
         const packetImage = await storage.getPacketImage(instance.imageId);
         if (!packetImage) throw new Error(`Packet Image ${instance.imageId} not found.`);
 
-        const sourceContentItem = packetImage.sourceContent.find(item => item.type === 'generated' && item.pageId === pageId);
-        if (!sourceContentItem) throw new Error(`Generated item ${pageId} not found in packet image.`);
+        const sourceContentItem = packetImage.sourceContent.find(item => item.origin === 'internal' && item.pageId === pageId);
+        if (!sourceContentItem) throw new Error(`Internal item ${pageId} not found in packet image.`);
         
         if (!sourceContentItem.contentB64) {
             throw new Error(`Cannot republish: Base64 content for ${pageId} not found in PacketImage.`);
@@ -930,7 +923,7 @@ export async function processRepublishRequest(data, initiatorTabId = null) {
 
         let itemUpdated = false;
         instance.contents = instance.contents.map(item => {
-            if (item.pageId === pageId && item.type === 'generated') {
+            if (item.pageId === pageId && item.origin === 'internal') {
                 item.url = newS3Key;
                 item.published = true;
                 itemUpdated = true;
@@ -939,7 +932,7 @@ export async function processRepublishRequest(data, initiatorTabId = null) {
         });
 
         if (!itemUpdated) {
-             logger.warn('PacketProcessor:republish', `Generated item ${pageId} not found in instance ${instanceId} contents during update.`);
+             logger.warn('PacketProcessor:republish', `Internal item ${pageId} not found in instance ${instanceId} contents during update.`);
         }
 
         delete instance.status;
@@ -989,7 +982,9 @@ export async function processGenerateCustomPageRequest(data) {
         const isInteractive = finalHtml.includes("notifyExtensionOnCompletion()");
 
         const newContentItem = {
-            type: 'generated',
+            origin: 'internal',
+            format: 'html',
+            access: 'private',
             pageId: `custom_${Date.now()}`,
             title: pageTitle,
             contentType: 'text/html',
@@ -1052,7 +1047,7 @@ export async function publishImageForSharing(imageId) {
         const imageForExport = JSON.parse(JSON.stringify(packetImage));
 
         for (const contentItem of imageForExport.sourceContent) {
-            if (contentItem.type === 'media') {
+            if (contentItem.format === 'audio') {
                 const mediaContent = await indexedDbStorage.getGeneratedContent(imageId, contentItem.pageId);
                 if (mediaContent && mediaContent[0] && mediaContent[0].content) {
                     contentItem.contentB64 = arrayBufferToBase64(mediaContent[0].content);

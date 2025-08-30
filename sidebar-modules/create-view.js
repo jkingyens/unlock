@@ -116,10 +116,10 @@ export async function prepareCreateView(imageToEdit = null) {
 
 // --- Helper for URL generation ---
 function getUrlForItem(item, index) {
-    if (item.type === 'external') {
+    if (item.origin === 'external') {
         return item.url;
     }
-    if (item.type === 'generated' && item.pageId) {
+    if (item.origin === 'internal' && item.pageId) {
         return chrome.runtime.getURL(`preview.html?pageId=${item.pageId}`);
     }
     return null;
@@ -135,7 +135,6 @@ async function syncDraftGroup() {
     }
     isTabGroupSyncing = true;
     try {
-        // --- THE FIX: Draft packets use the new flat structure ---
         const desiredUrls = draftPacket.sourceContent
             .map(item => getUrlForItem(item))
             .filter(Boolean);
@@ -210,14 +209,18 @@ function createDraftContentCard(contentItem, index) {
     card.setAttribute('draggable', 'true');
     card.dataset.index = index;
     
-    const { title = 'Untitled', type } = contentItem;
+    const { title = 'Untitled', format, origin } = contentItem;
     let iconHTML = '?';
     let displayUrl = '';
     const itemUrl = getUrlForItem(contentItem, index);
 
-    if (type === 'external') { iconHTML = '🔗'; try { displayUrl = new URL(itemUrl).hostname.replace(/^www\./, ''); } catch (e) { displayUrl = itemUrl ? itemUrl.substring(0, 40) + '...' : 'Invalid URL'; }
-    } else if (type === 'generated') { iconHTML = '📄'; displayUrl = "Preview (Generated)";
-    } else if (type === 'media') { 
+    if (format === 'html' && origin === 'external') {
+        iconHTML = '🔗';
+        try { displayUrl = new URL(itemUrl).hostname.replace(/^www\./, ''); } catch (e) { displayUrl = itemUrl ? itemUrl.substring(0, 40) + '...' : 'Invalid URL'; }
+    } else if (format === 'html' && origin === 'internal') {
+        iconHTML = '📄';
+        displayUrl = "Preview (Generated)";
+    } else if (format === 'audio') {
         iconHTML = '▶️';
         displayUrl = "Audio Preview";
         card.classList.add('media');
@@ -228,7 +231,7 @@ function createDraftContentCard(contentItem, index) {
     card.addEventListener('click', async (e) => {
         if (e.target.classList.contains('delete-draft-item-btn') || e.target.classList.contains('drag-handle')) return;
         
-        if (contentItem.type === 'media') {
+        if (contentItem.format === 'audio') {
             toggleDraftAudioPlayback(contentItem, card);
         } else if (itemUrl) {
             if (await shouldUseTabGroups()) {
@@ -403,7 +406,14 @@ async function handleAddCurrentPageToDraft() {
             throw new Error("This page is already in the draft.");
         }
         
-        draftPacket.sourceContent.push({ type: 'external', url: currentUrl, title: title, relevance: '' });
+        draftPacket.sourceContent.push({
+            origin: 'external',
+            format: 'html',
+            access: 'public',
+            url: currentUrl,
+            title: title,
+            relevance: ''
+        });
         
         renderDraftContentList();
         await storage.setSession({ 'draftPacketForPreview': draftPacket });
@@ -536,7 +546,9 @@ function handleFileDrop(e) {
             const reader = new FileReader();
             reader.onload = async (event) => {
                 const newMediaItem = {
-                    type: 'media',
+                    origin: 'internal',
+                    format: 'audio',
+                    access: 'private',
                     pageId: `media_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
                     title: file.name,
                     mimeType: file.type,

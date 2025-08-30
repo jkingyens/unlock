@@ -67,12 +67,12 @@ export async function addOrUpdatePacketRules(instance) {
         return { success: false, rulesCreated: 0, error: 'Invalid instance data.' };
     }
 
-    const generatedContentItems = instance.contents.filter(item =>
-        item.type === 'generated' && item.published && item.url && item.pageId && item.publishContext
+    const privateContentItems = instance.contents.filter(item =>
+        item.access === 'private' && item.published && item.url && item.pageId && item.publishContext
     );
 
-    if (generatedContentItems.length === 0) {
-        logger.log('RuleManager:addOrUpdate', `No published generated content with context to create rules for in instance ${instance.instanceId}.`);
+    if (privateContentItems.length === 0) {
+        logger.log('RuleManager:addOrUpdate', `No published private content with context to create rules for in instance ${instance.instanceId}.`);
         await removePacketRules(instance.instanceId);
         return { success: true, rulesCreated: 0 };
     }
@@ -80,11 +80,11 @@ export async function addOrUpdatePacketRules(instance) {
     const newRules = [];
     const ruleIdsToRemove = [];
 
-    for (const item of generatedContentItems) {
+    for (const item of privateContentItems) {
         ruleIdsToRemove.push(getRuleId(instance.instanceId, item.pageId));
     }
 
-    for (const item of generatedContentItems) {
+    for (const item of privateContentItems) {
         const s3Key = item.url;
         const canonicalUrl = cloudStorage.constructPublicUrl(s3Key, item.publishContext);
         if (!canonicalUrl) {
@@ -145,7 +145,7 @@ export async function removePacketRules(instanceId) {
     const ruleIdsToRemove = [];
     if (instance && instance.contents) {
         instance.contents.forEach(item => {
-            if (item.type === 'generated' && item.pageId) {
+            if (item.access === 'private' && item.pageId) {
                 ruleIdsToRemove.push(getRuleId(instanceId, item.pageId));
             }
         });
@@ -188,7 +188,7 @@ export async function refreshAllRules() {
         for (const instanceId in allInstances) {
             await addOrUpdatePacketRules(allInstances[instanceId]);
             allInstances[instanceId].contents.forEach(item => {
-                if(item.type === 'generated' && item.pageId) {
+                if(item.access === 'private' && item.pageId) {
                     ruleIdsForExistingInstances.add(getRuleId(instanceId, item.pageId));
                 }
             });

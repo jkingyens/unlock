@@ -418,17 +418,11 @@ const packetUtils = {
             if (instance.checkpointsTripped[index] === 1) {
                 return;
             }
-
-            // --- START OF THE FIX ---
-            // The logic must check if EVERY required item has been visited.
-            const isCompleted = checkpoint.requiredItems.every(requiredItem => {
-                // Directly check if the required URL or pageId is in the visited sets.
-                const urlVisited = requiredItem.url && visitedUrlsSet.has(requiredItem.url);
-                const pageIdVisited = requiredItem.pageId && visitedGeneratedIds.has(requiredItem.pageId);
+            const isCompleted = checkpoint.requiredItems.every(req => {
+                const urlVisited = req.url && visitedUrlsSet.has(req.url);
+                const pageIdVisited = req.pageId && visitedGeneratedIds.has(req.pageId);
                 return urlVisited || pageIdVisited;
             });
-            // --- END OF THE FIX ---
-
             if (isCompleted) {
                 instance.checkpointsTripped[index] = 1;
                 checkpointsModified = true;
@@ -457,10 +451,7 @@ const packetUtils = {
         if (!Array.isArray(instance.contents)) {
             return { visitedCount: 0, totalCount: 0, progressPercentage: 0 };
         }
-        const trackableItems = instance.contents.filter(item =>
-            (item.type === 'external' && item.url) ||
-            ((item.type === 'generated' || item.type === 'media') && item.pageId)
-        );
+        const trackableItems = instance.contents.filter(item => item.url || item.pageId);
         const totalCount = trackableItems.length;
         if (totalCount === 0) {
             return { visitedCount: 0, totalCount: 0, progressPercentage: 100 };
@@ -469,9 +460,9 @@ const packetUtils = {
         const visitedGeneratedIds = new Set(instance.visitedGeneratedPageIds || []);
         let visitedCount = 0;
         trackableItems.forEach(item => {
-            if (item.type === 'external' && visitedUrlsSet.has(item.url)) {
+            if (item.origin === 'external' && visitedUrlsSet.has(item.url)) {
                 visitedCount++;
-            } else if ((item.type === 'generated' || item.type === 'media') && visitedGeneratedIds.has(item.pageId)) {
+            } else if (item.origin === 'internal' && visitedGeneratedIds.has(item.pageId)) {
                 visitedCount++;
             }
         });
@@ -515,11 +506,11 @@ const packetUtils = {
             }
         }
         
-        if (item.type === 'external' && decodedItemUrl && decodedItemUrl === decodedLoadedUrl) {
+        if (item.origin === 'external' && decodedItemUrl && decodedItemUrl === decodedLoadedUrl) {
              return options.returnItem ? item : true;
         }
 
-        if ((item.type === 'generated' || item.type === 'media') && item.url) {
+        if (item.origin === 'internal' && item.url) {
             if (decodedItemUrl === decodedLoadedUrl) {
                 return options.returnItem ? item : true;
             }
@@ -553,13 +544,10 @@ const packetUtils = {
     return colors[Math.abs(hash) % colors.length];
   },
   
-    async markUrlAsVisited(instanceId, url, liveInstance = null) {
-        let instance = liveInstance;
+    // --- START OF THE FIX ---
+    async markUrlAsVisited(instance, url) {
         if (!instance) {
-            instance = await storage.getPacketInstance(instanceId);
-        }
-        if (!instance) {
-            logger.warn('markUrlAsVisited', 'Packet instance not found', { instanceId });
+            logger.warn('markUrlAsVisited', 'Packet instance not found');
             return { success: false, error: 'Packet instance not found' };
         }
 
@@ -571,8 +559,8 @@ const packetUtils = {
             return { success: true, notTrackable: true, instance: instance };
         }
 
-        const isGenerated = (foundItem.type === 'generated' || foundItem.type === 'media');
-        const alreadyVisited = isGenerated
+        const isInternal = foundItem.origin === 'internal';
+        const alreadyVisited = isInternal
             ? (instance.visitedGeneratedPageIds || []).includes(foundItem.pageId)
             : (instance.visitedUrls || []).includes(foundItem.url);
 
@@ -580,22 +568,19 @@ const packetUtils = {
             return { success: true, alreadyVisited: true, instance: instance };
         }
         
-        if (isGenerated) {
+        if (isInternal) {
             instance.visitedGeneratedPageIds = [...(instance.visitedGeneratedPageIds || []), foundItem.pageId];
         } else {
             instance.visitedUrls = [...(instance.visitedUrls || []), foundItem.url];
         }
         
         this._updateCheckpointsOnVisit(instance, image);
-
-        if (!liveInstance) {
-            await storage.savePacketInstance(instance);
-        }
         
         const justCompleted = !wasCompletedBefore && await this.isPacketInstanceCompleted(instance, image);
         
         return { success: true, modified: true, instance, justCompleted };
     },
+    // --- END OF THE FIX ---
 
     async markPageIdAsVisited(instanceId, pageId, liveInstance = null) {
         let instance = liveInstance;
@@ -623,12 +608,12 @@ const packetUtils = {
 
   getDefaultGeneratedPageUrl(instance) {
     if (!instance?.contents) return null;
-    const page = instance.contents.find(item => item.type === 'generated');
+    const page = instance.contents.find(item => item.format === 'html' && item.origin === 'internal');
     return page ? page.url : null;
   },
   getGeneratedPages(instance) {
       if (!instance?.contents) return [];
-      return instance.contents.filter(item => item.type === 'generated');
+      return instance.contents.filter(item => item.format === 'html' && item.origin === 'internal');
   }
 };
 

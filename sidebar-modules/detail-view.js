@@ -241,11 +241,13 @@ export async function displayPacketContent(instance, image, browserState, canoni
                                   (card.dataset.url && visitedUrlsSet.has(card.dataset.url));
                 card.classList.toggle('visited', isVisited);
                 
-                const momentIndex = parseInt(card.dataset.momentIndex, 10);
-                if (!isNaN(momentIndex)) {
-                    const isRevealed = instance.momentsTripped[momentIndex] === 1;
+                // --- START OF THE FIX ---
+                const momentIndices = card.dataset.momentIndices ? JSON.parse(card.dataset.momentIndices) : [];
+                if (momentIndices.length > 0) {
+                    const isRevealed = momentIndices.some(index => instance.momentsTripped[index] === 1);
                     card.classList.toggle('hidden-by-rule', !isRevealed);
                 }
+                // --- END OF THE FIX ---
             });
             updateActiveCardHighlight(canonicalPacketUrl);
             
@@ -390,38 +392,28 @@ async function createCardsSection(instance) {
 }
 
 async function createContentCard(contentItem, instance) {
-    if (!contentItem || !contentItem.type) return null;
+    if (!contentItem || !contentItem.format) return null;
 
     const card = document.createElement('div');
     card.className = 'card';
-    let { url: urlToOpen, title = 'Untitled', relevance = '', type } = contentItem;
-    let displayUrl = urlToOpen || '(URL missing)', iconHTML = '?', isClickable = false;
+    const { url: urlToOpen, title = 'Untitled', relevance = '', format, origin } = contentItem;
 
     if (contentItem.url) card.dataset.url = contentItem.url;
     if (contentItem.pageId) card.dataset.pageId = contentItem.pageId;
 
-    if (type === 'external') {
-        iconHTML = '🔗';
-        if (urlToOpen) {
-            isClickable = true;
-            try { displayUrl = new URL(urlToOpen).hostname.replace(/^www\./, ''); } catch (e) { displayUrl = urlToOpen; }
-        }
-        card.innerHTML = `<div class="card-icon">${iconHTML}</div><div class="card-text"><div class="card-title">${title}</div><div class="card-url">${displayUrl}</div>${relevance ? `<div class="card-relevance">${relevance}</div>` : ''}</div>`;
-    } else if (type === 'generated') {
-        iconHTML = '📄';
-        if (urlToOpen && contentItem.published) {
-            isClickable = true;
-            displayUrl = title;
+    let isClickable = (origin === 'external') || (origin === 'internal' && contentItem.published);
+
+    if (format === 'html') {
+        let iconHTML = origin === 'external' ? '🔗' : '📄';
+        let displayUrl = '';
+        if (origin === 'external') {
+            try { displayUrl = new URL(urlToOpen).hostname.replace(/^www\./, ''); } catch (e) { displayUrl = urlToOpen || '(URL missing)'; }
         } else {
-            card.style.opacity = '0.7';
-            displayUrl = contentItem.published ? '(Error: URL missing)' : '(Not Published)';
+            displayUrl = contentItem.published ? title : '(Not Published)';
         }
         card.innerHTML = `<div class="card-icon">${iconHTML}</div><div class="card-text"><div class="card-title">${title}</div><div class="card-url">${displayUrl}</div>${relevance ? `<div class="card-relevance">${relevance}</div>` : ''}</div>`;
-    } else if (type === 'media') {
+    } else if (format === 'audio') {
         card.classList.add('media');
-        if (contentItem.published) isClickable = true;
-        else card.style.opacity = '0.7';
-        
         card.innerHTML = `
             <div class="media-waveform-container">
                  <canvas class="waveform-canvas"></canvas>
@@ -429,24 +421,35 @@ async function createContentCard(contentItem, instance) {
             </div>`;
     }
     
+    if (!isClickable) {
+        card.style.opacity = '0.7';
+    }
+
     const visitedUrlsSet = new Set(instance.visitedUrls || []);
     const visitedGeneratedIds = new Set(instance.visitedGeneratedPageIds || []);
-    const isVisited = visitedGeneratedIds.has(contentItem.pageId) || (contentItem.url && visitedUrlsSet.has(contentItem.url));
+    const isVisited = (origin === 'internal' && visitedGeneratedIds.has(contentItem.pageId)) ||
+                      (origin === 'external' && contentItem.url && visitedUrlsSet.has(contentItem.url));
+
     if (isVisited) {
         card.classList.add('visited');
     }
 
-    if (typeof contentItem.revealedByMoment === 'number') {
-        card.dataset.momentIndex = contentItem.revealedByMoment;
-        const isRevealed = instance.momentsTripped && instance.momentsTripped[contentItem.revealedByMoment] === 1;
+    // --- START OF THE FIX ---
+    const momentIndices = Array.isArray(contentItem.revealedByMoments) ? contentItem.revealedByMoments :
+                          (typeof contentItem.revealedByMoment === 'number' ? [contentItem.revealedByMoment] : []);
+
+    if (momentIndices.length > 0) {
+        card.dataset.momentIndices = JSON.stringify(momentIndices);
+        const isRevealed = momentIndices.some(index => instance.momentsTripped && instance.momentsTripped[index] === 1);
         if (!isRevealed) {
             card.classList.add('hidden-by-rule');
         }
     }
+    // --- END OF THE FIX ---
 
     if (isClickable) {
         card.classList.add('clickable');
-        if (type === 'media') {
+        if (format === 'audio') {
             playMediaInCard(card, contentItem, instance);
         } else {
             card.addEventListener('click', (e) => {

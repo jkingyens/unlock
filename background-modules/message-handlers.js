@@ -193,7 +193,7 @@ async function handleOpenContent(data, sender, sendResponse) {
         const contentItem = instance.contents.find(item => item.url === targetCanonicalUrl);
         let finalUrlToOpen;
 
-        if (contentItem && (contentItem.type === 'generated' || contentItem.type === 'media')) {
+        if (contentItem && contentItem.access === 'private') {
             if (contentItem.publishContext) {
                 finalUrlToOpen = cloudStorage.constructPublicUrl(targetCanonicalUrl, contentItem.publishContext);
             } else {
@@ -214,17 +214,12 @@ async function handleOpenContent(data, sender, sendResponse) {
             await chrome.tabs.update(targetTab.id, { url: finalUrlToOpen, active: true });
             if (targetTab.windowId) await chrome.windows.update(targetTab.windowId, { focused: true });
         } else {
-            // --- START OF THE FIX ---
-            // Create a blank tab first to get a stable tab ID
             const newTab = await chrome.tabs.create({ url: 'about:blank', active: false });
             if (!newTab || typeof newTab.id !== 'number') throw new Error('Tab creation failed.');
             
-            // NOW set the token, before any navigation starts
             await storage.setSession({ [`trusted_intent_${newTab.id}`]: trustedIntent });
 
-            // THEN, update the tab to the final URL, which will trigger navigation
             await chrome.tabs.update(newTab.id, { url: finalUrlToOpen, active: true });
-            // --- END OF THE FIX ---
         }
         
         sendResponse({ success: true });
@@ -240,7 +235,7 @@ async function handleMarkUrlVisited(data, sendResponse) {
      const { packetId: instanceId, url } = data;
      if (!instanceId || !url) return sendResponse({ success: false, error: 'Missing instanceId or url' });
      try {
-          const result = await packetUtils.markUrlAsVisited(instanceId, url, activeMediaPlayback.instance);
+          const result = await packetUtils.markUrlAsVisited(instance.instanceId, url);
           if (result.success && !result.alreadyVisited && !result.notTrackable) {
                try { chrome.runtime.sendMessage({ action: 'url_visited', data: { packetId: instanceId, url } }); } catch (e) { /* ignore */ }
           }
@@ -277,7 +272,7 @@ async function handleSidebarReady(data, sender, sendResponse) {
 
 function findMediaItemInInstance(instance, pageId) {
     if (!instance || !instance.contents || !pageId) return null;
-    return instance.contents.find(item => item.pageId === pageId && item.type === 'media');
+    return instance.contents.find(item => item.pageId === pageId && item.format === 'audio');
 }
 
 async function handlePlaybackActionRequest(data, sender, sendResponse) {
@@ -296,7 +291,7 @@ async function handlePlaybackActionRequest(data, sender, sendResponse) {
                 if (!instance) throw new Error(`Could not find instance ${instanceId}.`);
 
                 const mediaItem = findMediaItemInInstance(instance, pageId);
-                if (!mediaItem) throw new Error(`Could not find track ${pageId} in packet.`);
+                if (!mediaItem) throw new Error(`Could not find audio track ${pageId} in packet.`);
 
                 const cachedAudio = await indexedDbStorage.getGeneratedContent(instance.imageId, pageId);
                 if (!cachedAudio || !cachedAudio[0]?.content) throw new Error("Could not find cached audio data.");
@@ -420,7 +415,11 @@ const actionHandlers = {
                     instance.momentsTripped[index] = 1;
                     momentTripped = true;
                     
-                    const revealedItem = instance.contents.find(item => item.revealedByMoment === index);
+                    const revealedItem = instance.contents.find(item => 
+                        (Array.isArray(item.revealedByMoments) && item.revealedByMoments.includes(index)) ||
+                        item.revealedByMoment === index
+                    );
+
                     if (revealedItem) {
                         activeMediaPlayback.lastTrippedMoment = {
                             title: revealedItem.title,
@@ -431,7 +430,8 @@ const actionHandlers = {
                     
                     sidebarHandler.notifySidebar('moment_tripped', { 
                         instanceId: instance.instanceId, 
-                        instance: instance, 
+                        instance: instance,
+                        mentionedItemId: revealedItem ? (revealedItem.pageId || revealedItem.url) : null
                     });
                 }
             });
@@ -566,7 +566,7 @@ const actionHandlers = {
     'page_interaction_complete': async (data, sender, sendResponse) => {
         const context = await getPacketContext(sender.tab.id);
         if (context?.instanceId && context?.canonicalPacketUrl) {
-            const visitResult = await packetUtils.markUrlAsVisited(context.instanceId, context.canonicalPacketUrl, activeMediaPlayback.instance);
+            const visitResult = await packetUtils.markUrlAsVisited(context.instanceId, context.canonicalPacketUrl);
             if (visitResult.success && visitResult.modified) {
                 await storage.savePacketInstance(visitResult.instance);
                 sidebarHandler.notifySidebar('packet_instance_updated', { instance: visitResult.instance });

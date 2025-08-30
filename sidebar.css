@@ -259,13 +259,11 @@ body.dark-mode .creation-stage-text {
   border-left-color: var(--border-primary);
   transition: transform 0.15s, box-shadow 0.15s, border-color 0.2s, background-color 0.2s;
 }
-/* --- START OF THE FIX --- */
 #detail-cards-container .card.clickable:not(.active):hover {
   background-color: var(--bg-tertiary);
   border-color: var(--border-primary);
   border-left-color: var(--border-focus);
 }
-/* --- END OF THE FIX --- */
 #detail-cards-container .card.clickable.opening {
   opacity: 0.7;
   cursor: wait;
@@ -628,17 +626,22 @@ body.dark-mode .llm-model-item button:hover {
   object-fit: fill;
 }
 
+/* --- START OF THE FIX --- */
 #detail-cards-container .card.link-mentioned {
   animation: link-pulse 1.5s ease-out;
+  /* Make the highlight more prominent */
   border-left-color: var(--text-accent) !important;
 }
+/* Ensure visited items that are mentioned still get highlighted */
 #detail-cards-container .card.link-mentioned.visited {
     border-left-color: var(--card-border-visited) !important;
 }
+/* Special handling for active items to avoid border conflicts */
 #detail-cards-container .card.link-mentioned.active {
     border-color: var(--link-pulse-glow-color) !important;
-    border-left-color: var(--card-border-visited);
+    border-left-color: var(--card-border-visited); /* Keep left border consistent if active+visited */
 }
+/* --- END OF THE FIX --- */
 
 .card.media .media-play-icon {
   position: relative;
@@ -718,7 +721,7 @@ body.dark-mode .llm-model-item button:hover {
     top: 10%; /* Position from the top */
     height: 80%; /* Height of the marker line */
     width: 2px; /* Width of the marker line */
-    background-color: #FFFFFF; /* --- THE FIX: Hardcode to white --- */
+    background-color: #FFFFFF;
     opacity: 0.7;
     border-radius: 1px;
     transform: translateX(-50%); /* Center the marker on its percentage position */
@@ -730,7 +733,7 @@ body.dark-mode .llm-model-item button:hover {
 }
 
 body.dark-mode .waveform-link-marker {
-     background-color: #FFFFFF; /* --- THE FIX: Hardcode to white in dark mode too --- */
+     background-color: #FFFFFF;
 }
 
 body.dark-mode .waveform-link-marker.visited {

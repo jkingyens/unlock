@@ -28,84 +28,174 @@ import * as tabGroupHandler from './background-modules/tab-group-handler.js';
 import * as sidebarHandler from './background-modules/sidebar-handler.js';
 import cloudStorage from '../cloud-storage.js';
 
-// --- THE FIX: Call the listener registration at the top level ---
+// --- START: New Migration Logic ---
+async function migratePacketImagesIfNecessary() {
+    const MIGRATION_FLAG_V2 = 'packetImageMigrationV2Complete';
+    const MIGRATION_FLAG_V3 = 'packetImageMigrationV3Complete';
+
+    const flags = await storage.getLocal([MIGRATION_FLAG_V2, MIGRATION_FLAG_V3]);
+
+    if (flags[MIGRATION_FLAG_V2] && flags[MIGRATION_FLAG_V3]) {
+        logger.log('Background:Migration', 'All migrations already completed. Skipping.');
+        return;
+    }
+
+    logger.log('Background:Migration', 'Running one-time migration check for packet images...');
+    const allImages = await storage.getPacketImages();
+    let imagesToUpdate = {};
+    let migrationNeeded = false;
+
+    for (const imageId in allImages) {
+        let image = allImages[imageId];
+        
+        // --- V2 Migration: Convert old format to new format ---
+        const isLegacyV2 = image.sourceContent && image.sourceContent.some(item => 'type' in item);
+        if (isLegacyV2 && !flags[MIGRATION_FLAG_V2]) {
+            migrationNeeded = true;
+            logger.log('Background:Migration', `Found legacy V2 packet image, converting: ${imageId}`);
+            const newSourceContent = [];
+            const newMoments = image.moments || [];
+            let mediaItemForTimestamps = null;
+
+            const flatSourceContent = image.sourceContent.flatMap(item =>
+                item.type === 'alternative' ? item.alternatives : item
+            );
+            const externalLinks = flatSourceContent.filter(item => item.type === 'external');
+
+            flatSourceContent.forEach(item => {
+                let newItem;
+                if (item.type === 'media') {
+                    newItem = { origin: 'internal', format: 'audio', access: 'private', ...item };
+                    mediaItemForTimestamps = newItem;
+                } else if (item.type === 'generated') {
+                    newItem = { origin: 'internal', format: 'html', access: 'private', ...item };
+                } else { // external
+                    newItem = { origin: 'external', format: 'html', access: 'public', ...item };
+                }
+                delete newItem.type;
+                newSourceContent.push(newItem);
+            });
+
+            if (mediaItemForTimestamps && Array.isArray(mediaItemForTimestamps.timestamps)) {
+                mediaItemForTimestamps.timestamps.forEach(ts => {
+                    const momentIndex = newMoments.length;
+                    newMoments.push({
+                        id: `moment_${momentIndex}`,
+                        type: 'mediaTimestamp',
+                        sourcePageId: mediaItemForTimestamps.pageId,
+                        timestamp: ts.startTime
+                    });
+                    const linkedItem = externalLinks.find(link => link.url === ts.url);
+                    if (linkedItem) {
+                        const itemInNewContent = newSourceContent.find(i => i.url === linkedItem.url);
+                        if (itemInNewContent) itemInNewContent.revealedByMoment = momentIndex;
+                    }
+                });
+                delete mediaItemForTimestamps.timestamps;
+            }
+            image = { ...image, sourceContent: newSourceContent, moments: newMoments, migratedV2: true };
+        }
+
+        // --- V3 Migration: Add summary page visit as a reveal mechanism ---
+        if (!flags[MIGRATION_FLAG_V3]) {
+            const hasHiddenItems = image.sourceContent.some(item => item.revealedByMoment || item.revealedByMoments);
+            const summaryPage = image.sourceContent.find(item => item.pageId === 'summary-page');
+
+            if (hasHiddenItems && summaryPage) {
+                migrationNeeded = true;
+                logger.log('Background:Migration', `Found V3 candidate packet image, ensuring summary page reveal: ${imageId}`);
+                
+                let summaryVisitMomentIndex = image.moments.findIndex(m => m.type === 'visit' && m.sourcePageId === summaryPage.pageId);
+                
+                if (summaryVisitMomentIndex === -1) {
+                    summaryVisitMomentIndex = image.moments.length;
+                    image.moments.push({
+                        id: `moment_${summaryVisitMomentIndex}`,
+                        type: 'visit',
+                        sourcePageId: summaryPage.pageId
+                    });
+                }
+
+                image.sourceContent.forEach(item => {
+                    if (item.revealedByMoment || item.revealedByMoments) {
+                        let momentIndices = new Set(item.revealedByMoments || []);
+                        if (typeof item.revealedByMoment === 'number') {
+                            momentIndices.add(item.revealedByMoment);
+                        }
+                        momentIndices.add(summaryVisitMomentIndex);
+                        
+                        item.revealedByMoments = Array.from(momentIndices);
+                        delete item.revealedByMoment;
+                    }
+                });
+                image.migratedV3 = true;
+            }
+        }
+        imagesToUpdate[imageId] = image;
+    }
+
+    if (migrationNeeded) {
+        await storage.setLocal({ [CONFIG.STORAGE_KEYS.PACKET_IMAGES]: imagesToUpdate });
+        logger.log('Background:Migration', 'All necessary packet image migrations have been completed.');
+    }
+
+    await storage.setLocal({ [MIGRATION_FLAG_V2]: true, [MIGRATION_FLAG_V3]: true });
+}
+// --- END: New Migration Logic ---
+
 attachNavigationListeners();
 const reorderDebounceTimers = new Map();
 
-// This new helper function will robustly schedule the reordering
 async function scheduleReorder(groupId) {
     if (!groupId || !(await shouldUseTabGroups())) return;
-
-    // If a reorder is already scheduled for this group, cancel it
     if (reorderDebounceTimers.has(groupId)) {
         clearTimeout(reorderDebounceTimers.get(groupId));
     }
-
-    // Schedule a new reorder to run after a short delay
     const timerId = setTimeout(() => {
         reorderGroupFromChangeEvent(groupId)
             .catch(err => logger.error("DebouncedReorder", `Error reordering group ${groupId}`, err));
-        reorderDebounceTimers.delete(groupId); // Clean up the timer
-    }, 350); // 350ms is a safe delay to ensure the browser UI has settled
-
+        reorderDebounceTimers.delete(groupId);
+    }, 350);
     reorderDebounceTimers.set(groupId, timerId);
 }
 
-// --- Modify your EXISTING listeners to use the new scheduler ---
-
 chrome.tabs.onCreated.addListener(async (tab) => {
     if (tab.groupId && tab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE) {
-        await scheduleReorder(tab.groupId); // Use the new scheduler
+        await scheduleReorder(tab.groupId);
     }
 });
 
 chrome.tabs.onAttached.addListener(async (tabId, attachInfo) => {
-    await scheduleReorder(attachInfo.newGroupId); // Use the new scheduler
+    await scheduleReorder(attachInfo.newGroupId);
 });
-
-
-// --- Add this NEW listener for moved tabs ---
 
 chrome.tabs.onMoved.addListener(async (tabId, moveInfo) => {
     try {
-        // We need to get the tab to find its group ID
         const tab = await chrome.tabs.get(tabId);
         if (tab.groupId && tab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE) {
-            await scheduleReorder(tab.groupId); // Use the new scheduler
+            await scheduleReorder(tab.groupId);
         }
-    } catch (e) {
-        // This can error if the tab is closed while being moved. It's safe to ignore.
-    }
+    } catch (e) {}
 });
 
-// --- Add a flag to gate navigation events during startup ---
 let isRestoring = true;
 let resolveInitialization;
 
-// This promise will be awaited by critical event listeners.
-// It ensures they don't run until we've confirmed the extension's state.
 const initializationPromise = new Promise(resolve => {
     resolveInitialization = resolve;
 });
 
-// This self-executing function checks the session state immediately when the worker starts.
 (async () => {
-    const isBrowserStartupComplete = await chrome.storage.session.get('isBrowserStartupComplete');
+    const isBrowserStartupComplete = await storage.getSession('isBrowserStartupComplete');
     if (isBrowserStartupComplete) {
-        // This is a simple wake-up, not a fresh start.
-        // The onStartup/onInstalled listeners will NOT run.
         isRestoring = false;
         logger.log('Background:Lifecycle', 'Service worker woke up. Initialization complete.');
-        // Resolve the promise immediately so event listeners can proceed.
-        resolveInitialization(); // <<< ADD THIS LINE();
+        resolveInitialization();
     }
-    // If the flag is not set, we do nothing. We wait for onStartup or onInstalled
-    // to run and eventually call resolveInitialization().
 })();
 
 const AUDIO_KEEP_ALIVE_ALARM = 'audio-keep-alive';
 
-// This object holds the current state and is exported for other modules to read.
 export let activeMediaPlayback = {
     tabId: null,
     instanceId: null,
@@ -114,46 +204,31 @@ export let activeMediaPlayback = {
     topic: '',
     currentTime: 0,
     duration: 0,
-    instance: null, // Holds the live instance object during playback
-    lastTrippedMoment: null, // Holds info about the last moment for the overlay
+    instance: null,
+    lastTrippedMoment: null,
 };
 
-// This is the single, authoritative function for clearing the in-memory state.
 export async function resetActiveMediaPlayback() {
     await controlAudioInOffscreen('stop', {});
-
     if (activeMediaPlayback.isPlaying && activeMediaPlayback.instance) {
         await saveCurrentTime(activeMediaPlayback.instanceId, activeMediaPlayback.pageId, 0, true);
     }
     logger.log('Background', 'CRITICAL LOG: Resetting global activeMediaPlayback state.');
-    
     activeMediaPlayback = {
-        tabId: null,
-        instanceId: null,
-        pageId: null,
-        isPlaying: false,
-        topic: '',
-        currentTime: 0,
-        duration: 0,
-        instance: null,
-        lastTrippedMoment: null,
+        tabId: null, instanceId: null, pageId: null, isPlaying: false, topic: '',
+        currentTime: 0, duration: 0, instance: null, lastTrippedMoment: null,
     };
-    
     await storage.removeSession(CONFIG.STORAGE_KEYS.ACTIVE_MEDIA_KEY);
     await notifyUIsOfStateChange();
 }
 
-
-// Rule refresh alarm name
 const RULE_REFRESH_ALARM_NAME = 'refreshRedirectRules';
 
-// --- Helper: Initialize Storage ---
 async function initializeStorageAndSettings() {
-    await storage.getSettings(); // Ensures defaults are applied if nothing exists
+    await storage.getSettings();
     logger.log('Background', 'Storage and settings initialized/verified.');
 }
 
-// --- Offscreen Document and Audio Control ---
 let creatingOffscreenDocument;
 
 async function hasOffscreenDocument() {
@@ -163,14 +238,12 @@ async function hasOffscreenDocument() {
         });
         return contexts.length > 0;
     }
-    return false; // Fallback for safety
+    return false;
 }
 
 async function setupOffscreenDocument() {
     try {
-        if (await hasOffscreenDocument()) {
-            return;
-        }
+        if (await hasOffscreenDocument()) return;
         if (creatingOffscreenDocument) {
             await creatingOffscreenDocument;
         } else {
@@ -184,11 +257,10 @@ async function setupOffscreenDocument() {
         }
     } catch (error) {
         logger.error('Background', 'Failed to create offscreen document.', error);
-        creatingOffscreenDocument = null; // Reset promise on failure
-        throw error; // Propagate error
+        creatingOffscreenDocument = null;
+        throw error;
     }
 }
-
 
 export async function controlAudioInOffscreen(command, data) {
     try {
@@ -204,31 +276,14 @@ export async function controlAudioInOffscreen(command, data) {
     }
 }
 
-// --- Universal Script Injection ---
 async function injectOverlayScripts(tabId) {
     try {
         const tab = await chrome.tabs.get(tabId);
-        if (!tab || !tab.url || !tab.url.startsWith('http')) {
-            return;
-        }
-
-        await chrome.scripting.executeScript({
-            target: { tabId: tabId },
-            files: ['overlay.js']
-        });
-        await chrome.scripting.insertCSS({
-            target: { tabId: tabId },
-            files: ['overlay.css']
-        });
+        if (!tab || !tab.url || !tab.url.startsWith('http')) return;
+        await chrome.scripting.executeScript({ target: { tabId: tabId }, files: ['overlay.js'] });
+        await chrome.scripting.insertCSS({ target: { tabId: tabId }, files: ['overlay.css'] });
     } catch (e) {
-        const expectedErrors = [
-            "Cannot access a chrome:// URL",
-            "Cannot access a chrome-extension:// URL",
-            "The tab was closed.",
-            "No tab with id",
-            "Cannot access contents of the page",
-            "Frame with ID 0 was removed."
-        ];
+        const expectedErrors = ["Cannot access a chrome:// URL", "The tab was closed.", "No tab with id", "Cannot access contents of the page", "Frame with ID 0 was removed."];
         if (!expectedErrors.some(msg => e.message.includes(msg))) {
             logger.error('Background:injectOverlayScripts', `Failed to inject scripts into tab ${tabId}`, e);
         }
@@ -237,25 +292,20 @@ async function injectOverlayScripts(tabId) {
 
 function findMediaItemInInstance(instance, pageId) {
     if (!instance || !instance.contents || !pageId) return null;
-    return instance.contents.find(item => item.pageId === pageId && item.type === 'media');
+    return instance.contents.find(item => item.pageId === pageId && item.format === 'audio');
 }
 
 export async function saveCurrentTime(instanceId, pageId, providedCurrentTime, isStopping = false) {
     try {
         const instance = await storage.getPacketInstance(instanceId);
         if (!instance) return;
-
         const mediaItem = findMediaItemInInstance(instance, pageId);
         if (!mediaItem) return;
-
         let timeToSave = providedCurrentTime;
         if (typeof timeToSave === 'undefined') {
             const response = await controlAudioInOffscreen('get_current_time', { pageId });
-            if (response.success) {
-                timeToSave = response.currentTime;
-            }
+            if (response.success) timeToSave = response.currentTime;
         }
-
         if (typeof timeToSave === 'number') {
             mediaItem.currentTime = isStopping ? 0 : timeToSave;
             await storage.savePacketInstance(instance);
@@ -268,59 +318,35 @@ export async function saveCurrentTime(instanceId, pageId, providedCurrentTime, i
 
 export async function notifyUIsOfStateChange(options = {}) {
     let instance = activeMediaPlayback.instance;
-
     if (!instance) {
-        const emptyState = { 
-            ...activeMediaPlayback, 
-            isPlaying: false, 
-            currentTime: 0, 
-            duration: 0, 
-            momentsTripped: [],
-            lastTrippedMoment: null
-        };
+        const emptyState = { ...activeMediaPlayback, isPlaying: false, currentTime: 0, duration: 0, momentsTripped: [], lastTrippedMoment: null };
         sidebarHandler.notifySidebar('playback_state_updated', emptyState);
         const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
         if (activeTab) {
              try {
                  await injectOverlayScripts(activeTab.id);
-                 await chrome.tabs.sendMessage(activeTab.id, {
-                    action: 'sync_overlay_state',
-                    data: { isVisible: false }
-                });
+                 await chrome.tabs.sendMessage(activeTab.id, { action: 'sync_overlay_state', data: { isVisible: false } });
              } catch(e) {}
         }
         return;
     }
-    
-    const playbackStateForUI = {
-        ...activeMediaPlayback,
-        momentsTripped: instance.momentsTripped || [],
-        ...options
-    };
-
+    const playbackStateForUI = { ...activeMediaPlayback, momentsTripped: instance.momentsTripped || [], ...options };
     const { isSidebarOpen } = await storage.getSession({ isSidebarOpen: false });
     const overlayEnabled = await shouldShowOverlay();
     playbackStateForUI.isVisible = !!activeMediaPlayback.pageId && !isSidebarOpen && overlayEnabled;
-
     if (activeMediaPlayback.tabId) {
         try {
             await injectOverlayScripts(activeMediaPlayback.tabId);
-            await chrome.tabs.sendMessage(activeMediaPlayback.tabId, {
-                action: 'sync_overlay_state',
-                data: playbackStateForUI
-            });
+            await chrome.tabs.sendMessage(activeMediaPlayback.tabId, { action: 'sync_overlay_state', data: playbackStateForUI });
         } catch (e) {}
     }
     sidebarHandler.notifySidebar('playback_state_updated', playbackStateForUI);
 }
 
-
 export async function setMediaPlaybackState(newState, options = { animate: false, source: 'unknown' }) {
     const oldInstanceId = activeMediaPlayback.instanceId;
     const newInstanceId = newState.instanceId || oldInstanceId;
-
     activeMediaPlayback = { ...activeMediaPlayback, ...newState };
-
     if (newInstanceId && (newInstanceId !== oldInstanceId || !activeMediaPlayback.instance)) {
         try {
             activeMediaPlayback.instance = await storage.getPacketInstance(newInstanceId);
@@ -331,22 +357,18 @@ export async function setMediaPlaybackState(newState, options = { animate: false
             return;
         }
     }
-    
     const isPlaying = activeMediaPlayback.isPlaying;
     const hasActiveTrack = !!activeMediaPlayback.pageId;
-
     if (!isPlaying && hasActiveTrack) {
         chrome.alarms.create(AUDIO_KEEP_ALIVE_ALARM, { periodInMinutes: 0.4 });
     } else {
         chrome.alarms.clear(AUDIO_KEEP_ALIVE_ALARM);
     }
-
     if (hasActiveTrack) {
         await storage.setSession({ [CONFIG.STORAGE_KEYS.ACTIVE_MEDIA_KEY]: activeMediaPlayback });
     } else {
         await storage.removeSession(CONFIG.STORAGE_KEYS.ACTIVE_MEDIA_KEY);
     }
-    
     await notifyUIsOfStateChange(options);
 }
 
@@ -360,22 +382,18 @@ async function restoreMediaStateOnStartup() {
     }
 }
 
-// --- Event Listeners ---
 chrome.runtime.onInstalled.addListener(async (details) => {
     try {
         logger.log('Background:onInstalled', `Extension ${details.reason}`);
         await initializeStorageAndSettings();
+        await migratePacketImagesIfNecessary(); // <-- MIGRATION CALL
         await restoreMediaStateOnStartup();
         await cloudStorage.initialize().catch(err => logger.error('Background:onInstalled', 'Initial cloud storage init failed', err));
         await ruleManager.refreshAllRules();
-
         const tabs = await chrome.tabs.query({ url: ["http://*/*", "https://*/*"] });
         for (const tab of tabs) {
-            if (tab.id) {
-                injectOverlayScripts(tab.id);
-            }
+            if (tab.id) injectOverlayScripts(tab.id);
         }
-
         try {
             if (chrome.sidePanel && chrome.sidePanel.setPanelBehavior) {
                  await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
@@ -384,11 +402,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
              logger.error('Background:onInstalled', 'Error setting side panel behavior:', error);
         }
         await getDb();
-
-        chrome.alarms.create(RULE_REFRESH_ALARM_NAME, {
-            delayInMinutes: 55,
-            periodInMinutes: 55
-        });
+        chrome.alarms.create(RULE_REFRESH_ALARM_NAME, { delayInMinutes: 55, periodInMinutes: 55 });
         await chrome.storage.session.set({ isBrowserStartupComplete: true });
     } finally {
         isRestoring = false;
@@ -401,6 +415,7 @@ chrome.runtime.onStartup.addListener(async () => {
     try {
         logger.log('Background:onStartup', 'Browser startup detected. Navigation processing is paused.');
         await initializeStorageAndSettings();
+        await migratePacketImagesIfNecessary(); // <-- MIGRATION CALL
         await restoreMediaStateOnStartup();
         await cloudStorage.initialize().catch(err => {});
         await restoreContextOnStartup();
@@ -408,7 +423,6 @@ chrome.runtime.onStartup.addListener(async () => {
         await getDb();
         await garbageCollectTabContexts();
         await tabGroupHandler.cleanupDraftGroup();
-
         logger.log('Background:onStartup', 'Injecting overlay scripts into existing tabs.');
         const tabs = await chrome.tabs.query({ url: ["http://*/*", "https://*/*"] });
         for (const tab of tabs) {
@@ -416,7 +430,6 @@ chrome.runtime.onStartup.addListener(async () => {
                 injectOverlayScripts(tab.id).catch(e => logger.warn('Background:onStartup', `Failed to inject script into tab ${tab.id}`, e));
             }
         }
-        
     } finally {
         isRestoring = false;
         logger.log('Background:onStartup', 'Startup process complete. Navigation processing is now enabled.');
@@ -450,26 +463,14 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     }
 });
 
-chrome.tabs.onCreated.addListener(async (tab) => {
-    if (tab.groupId && tab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE) {
-        await reorderGroupFromChangeEvent(tab.groupId);
-    }
-});
-
-chrome.tabs.onAttached.addListener(async (tabId, attachInfo) => {
-    await reorderGroupFromChangeEvent(attachInfo.newGroupId);
-});
-
 async function reorderGroupFromChangeEvent(groupId) {
     if (!groupId || !(await shouldUseTabGroups())) return;
     try {
         const group = await chrome.tabGroups.get(groupId);
-
         if (group.title === tabGroupHandler.DRAFT_GROUP_TITLE) {
             await tabGroupHandler.orderDraftTabsInGroup(groupId);
             return;
         }
-
         const instanceId = getInstanceIdFromGroupTitle(group.title);
         if (instanceId) {
             const instance = await storage.getPacketInstance(instanceId);
@@ -485,19 +486,16 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
     const closingState = await storage.getSession('isClosingGroup');
     if (closingState && closingState.isClosingGroup) {
         logger.log('Background:onActivated', 'Ignoring tab activation event due to tab group closure in progress.');
-        return; // Exit immediately
+        return;
     }
-
     const tabId = activeInfo.tabId;
-    
     try {
         const tab = await chrome.tabs.get(tabId);
         if (tab.groupId && reorderDebounceTimers.has(tab.groupId)) {
             await reorderGroupFromChangeEvent(tab.groupId);
             reorderDebounceTimers.delete(tab.groupId); 
         }
-    } catch (e) { /* ignore error if tab is closed quickly */ }
-
+    } catch (e) {}
     if (activeMediaPlayback.pageId) {
         activeMediaPlayback.tabId = tabId;
         await notifyUIsOfStateChange();
@@ -505,11 +503,9 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
     await sidebarHandler.updateActionForTab(tabId);
     const context = await getPacketContext(tabId);
     let instance = context ? await storage.getPacketInstance(context.instanceId) : null;
-    
     if (instance && activeMediaPlayback.instanceId === instance.instanceId) {
         instance = activeMediaPlayback.instance;
     }
-
     if (sidebarHandler.isSidePanelAvailable()) {
         sidebarHandler.notifySidebar('update_sidebar_context', {
             tabId,
@@ -519,7 +515,6 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
             currentUrl: instance ? context.currentBrowserUrl : null
         });
     }
-
     if (instance && context?.canonicalPacketUrl) {
         const itemForVisitTimer = instance.contents.find(i => i.url === context.canonicalPacketUrl);
         if (itemForVisitTimer && !itemForVisitTimer.interactionBasedCompletion) {
@@ -528,7 +523,6 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
         }
     }
 });
-
 
 chrome.tabs.onRemoved.addListener(async (tabId, removeInfo) => {
     if (tabId === activeMediaPlayback.tabId) {
@@ -551,7 +545,6 @@ chrome.tabs.onReplaced.addListener(async (addedTabId, removedTabId) => {
 
 function attachNavigationListeners() {
     if (!chrome.webNavigation) { return; }
-
     const onCommittedWrapper = async (details) => {
         await initializationPromise;
         if (isRestoring) {
@@ -560,7 +553,6 @@ function attachNavigationListeners() {
         }
         onCommitted(details);
     };
-
     const onHistoryStateUpdatedWrapper = async (details) => {
         await initializationPromise;
         if (isRestoring) {
@@ -569,7 +561,6 @@ function attachNavigationListeners() {
         }
         onHistoryStateUpdated(details);
     };
-
     if (chrome.webNavigation.onCommitted.hasListener(onCommitted)) {
         chrome.webNavigation.onCommitted.removeListener(onCommitted);
     }
@@ -584,10 +575,8 @@ chrome.runtime.onConnect.addListener(async (port) => {
   if (port.name === 'sidebar') {
     await storage.setSession({ isSidebarOpen: true });
     await notifyUIsOfStateChange();
-
     port.onDisconnect.addListener(async () => {
       await storage.setSession({ isSidebarOpen: false });
-      
       if (activeMediaPlayback.pageId) {
           try {
               const [activeTab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
@@ -603,7 +592,6 @@ chrome.runtime.onConnect.addListener(async (port) => {
   }
 });
 
-// --- Garbage Collection ---
 async function garbageCollectTabContexts() {
     logger.log('Background:GC', 'Starting garbage collection for tab contexts...');
     let itemsRemovedCount = 0;
@@ -613,7 +601,6 @@ async function garbageCollectTabContexts() {
         const contextPrefix = CONFIG.STORAGE_KEYS.PACKET_CONTEXT_PREFIX;
         const contextKeys = Object.keys(allLocalData).filter(key => key.startsWith(contextPrefix));
         if (contextKeys.length === 0) { logger.log('Background:GC', 'No context keys found.'); return 0; }
-
         let allTabs = [];
         try {
             allTabs = await chrome.tabs.query({});
@@ -622,7 +609,6 @@ async function garbageCollectTabContexts() {
         }
         const existingTabIds = new Set(allTabs.map(tab => tab.id));
         const keysToRemove = [];
-
         contextKeys.forEach(key => {
             const tabIdStr = key.substring(contextPrefix.length);
             const tabId = parseInt(tabIdStr, 10);
@@ -630,7 +616,6 @@ async function garbageCollectTabContexts() {
                 keysToRemove.push(key);
             }
         });
-
         if (keysToRemove.length > 0) {
             await storage.removeLocal(keysToRemove);
             itemsRemovedCount = keysToRemove.length;
@@ -669,37 +654,26 @@ async function restoreContextOnStartup() {
         logger.log('Background:restoreContext', 'Tab Groups disabled, skipping restoration.');
         return;
     }
-
     try {
         const allGroups = await chrome.tabGroups.query({});
-
         for (const group of allGroups) {
             const instanceId = getInstanceIdFromGroupTitle(group.title);
             if (!instanceId) continue;
-
             const instance = await storage.getPacketInstance(instanceId);
             if (!instance) continue;
-            
             const tabsInGroup = await chrome.tabs.query({ groupId: group.id });
-
-            const tabbableContents = instance.contents.filter(item =>
-                item.type === 'external' || item.type === 'generated'
-            );
-            
+            const tabbableContents = instance.contents.filter(item => item.format === 'html');
             for (let i = 0; i < tabsInGroup.length; i++) {
                 const tab = tabsInGroup[i];
                 const contentItem = tabbableContents[i];
-
                 if (tab && contentItem && contentItem.url) {
                     logger.log('Background:restoreContext', `Restoring context for tab ${tab.id} to packet item "${contentItem.title}" based on tab order.`);
-
                     await storage.setSession({
                         [`trusted_intent_${tab.id}`]: {
                             instanceId: instance.instanceId,
                             canonicalPacketUrl: contentItem.url,
                         }
                     });
-
                     await setPacketContext(tab.id, instance.instanceId, contentItem.url, tab.url);
                     await sidebarHandler.updateActionForTab(tab.id);
                 } else {
@@ -712,4 +686,3 @@ async function restoreContextOnStartup() {
         logger.error('Background:restoreContext', 'Error during context restoration', error);
     }
 }
-
