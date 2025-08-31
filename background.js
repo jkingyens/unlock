@@ -30,15 +30,15 @@ import cloudStorage from '../cloud-storage.js';
 
 // --- START: New Migration Logic ---
 async function migratePacketImagesIfNecessary() {
-    const MIGRATION_FLAG_LRL_V2 = 'packetImageMigrationLRLv2Complete';
-    const flags = await storage.getLocal([MIGRATION_FLAG_LRL_V2]);
+    const MIGRATION_FLAG_LRL = 'packetImageMigrationLrlComplete';
+    const flags = await storage.getLocal([MIGRATION_FLAG_LRL]);
 
-    if (flags[MIGRATION_FLAG_LRL_V2]) {
+    if (flags[MIGRATION_FLAG_LRL]) {
         logger.log('Background:Migration', 'All migrations already completed. Skipping.');
         return;
     }
 
-    logger.log('Background:Migration', 'Running one-time migration check for packet images...');
+    logger.log('Background:Migration', 'Running one-time migration for LRL fields...');
     const allImages = await storage.getPacketImages();
     let imagesToUpdate = {};
     let migrationNeeded = false;
@@ -47,56 +47,31 @@ async function migratePacketImagesIfNecessary() {
         let image = { ...allImages[imageId] };
         let wasModified = false;
 
-        image.sourceContent.forEach(item => {
-            if (item.origin === 'internal' && !item.lrl) {
-                wasModified = true;
-                const oldIdentifier = item.pageId || item.url;
-                if (oldIdentifier) {
-                    let sanitizedId = sanitizeForFileName(oldIdentifier);
-                    const extension = item.format === 'audio' ? '.wav' : '.html';
-                    
-                    // --- START OF FIX for .wav.wav ---
-                    if (sanitizedId.endsWith('.wav.wav')) {
-                        sanitizedId = sanitizedId.slice(0, -4);
-                    }
-                    
-                    const newLrl = sanitizedId.endsWith(extension)
-                        ? `/${item.format}/${sanitizedId}`
-                        : `/${item.format}/${sanitizedId}${extension}`;
-                    // --- END OF FIX ---
-                    
-                    item.lrl = newLrl;
-                    item.url = null;
-                    if (item.pageId) delete item.pageId;
+        if (image.sourceContent && Array.isArray(image.sourceContent)) {
+            image.sourceContent.forEach(item => {
+                // If an item is internal and has a URL but no LRL, it's from the old format.
+                if (item.origin === 'internal' && item.url && !item.lrl) {
+                    item.lrl = item.url; // The old URL is the new LRL.
+                    item.url = null;      // The new URL should be null until published.
+                    wasModified = true;
                 }
-            }
-        });
+            });
+        }
 
         if (wasModified) {
             migrationNeeded = true;
-            logger.log('Background:Migration', `Migrating packet image to new LRL format: ${imageId}`);
-            // Also migrate moments if they exist
-            if (Array.isArray(image.moments)) {
-                image.moments.forEach(moment => {
-                    if (moment.sourceUrl) {
-                        const foundItem = image.sourceContent.find(item => item.url === moment.sourceUrl || item.pageId === moment.sourceUrl);
-                        if(foundItem && foundItem.lrl) {
-                            moment.sourceUrl = foundItem.lrl;
-                        }
-                    }
-                     if (moment.sourcePageId) delete moment.sourcePageId;
-                });
-            }
+            logger.log('Background:Migration', `Migrated LRL fields for packet image: ${imageId}`);
         }
+        
         imagesToUpdate[imageId] = image;
     }
 
     if (migrationNeeded) {
         await storage.setLocal({ [CONFIG.STORAGE_KEYS.PACKET_IMAGES]: imagesToUpdate });
-        logger.log('Background:Migration', 'All necessary packet image migrations have been completed.');
+        logger.log('Background:Migration', 'Completed LRL field migration for all applicable Packet Images.');
     }
 
-    await storage.setLocal({ [MIGRATION_FLAG_LRL_V2]: true });
+    await storage.setLocal({ [MIGRATION_FLAG_LRL]: true });
 }
 // --- END: New Migration Logic ---
 
@@ -160,7 +135,7 @@ export let activeMediaPlayback = {
     url: null,
     lrl: null,
     isPlaying: false,
-    topic: '',
+    title: '',
     currentTime: 0,
     duration: 0,
     instance: null,
@@ -174,7 +149,7 @@ export async function resetActiveMediaPlayback() {
     }
     logger.log('Background', 'CRITICAL LOG: Resetting global activeMediaPlayback state.');
     activeMediaPlayback = {
-        tabId: null, instanceId: null, url: null, lrl: null, isPlaying: false, topic: '',
+        tabId: null, instanceId: null, url: null, lrl: null, isPlaying: false, title: '',
         currentTime: 0, duration: 0, instance: null, lastTrippedMoment: null,
     };
     await storage.removeSession(CONFIG.STORAGE_KEYS.ACTIVE_MEDIA_KEY);
@@ -289,7 +264,15 @@ export async function notifyUIsOfStateChange(options = {}) {
         }
         return;
     }
-    const playbackStateForUI = { ...activeMediaPlayback, momentsTripped: instance.momentsTripped || [], ...options };
+    // --- START OF FIX ---
+    // Ensure the instance data within the playback state is always the most current version.
+    const playbackStateForUI = {
+        ...activeMediaPlayback,
+        instance: instance, // Explicitly include the full, updated instance
+        momentsTripped: instance.momentsTripped || [],
+        ...options
+    };
+    // --- END OF FIX ---
     const { isSidebarOpen } = await storage.getSession({ isSidebarOpen: false });
     const overlayEnabled = await shouldShowOverlay();
     playbackStateForUI.isVisible = !!activeMediaPlayback.url && !isSidebarOpen && overlayEnabled;
@@ -346,7 +329,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
         logger.log('Background:onInstalled', `Extension ${details.reason}`);
         await initializeStorageAndSettings();
         await migratePacketImagesIfNecessary();
-        await indexedDbStorage.debugDumpIndexedDb(); // Log DB contents for verification
+        await indexedDbStorage.debugDumpIndexedDb();
         await restoreMediaStateOnStartup();
         await cloudStorage.initialize().catch(err => logger.error('Background:onInstalled', 'Initial cloud storage init failed', err));
         await ruleManager.refreshAllRules();
@@ -376,7 +359,7 @@ chrome.runtime.onStartup.addListener(async () => {
         logger.log('Background:onStartup', 'Browser startup detected. Navigation processing is paused.');
         await initializeStorageAndSettings();
         await migratePacketImagesIfNecessary();
-        await indexedDbStorage.debugDumpIndexedDb(); // Log DB contents for verification
+        await indexedDbStorage.debugDumpIndexedDb();
         await restoreMediaStateOnStartup();
         await cloudStorage.initialize().catch(err => {});
         await restoreContextOnStartup();

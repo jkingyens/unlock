@@ -110,7 +110,7 @@ if (!window.unlockOverlayInitialized) {
         overlay.classList.toggle('playing', isPlaying);
 
         // --- Text Content ---
-        overlayText.textContent = state.topic || 'Unlock Media';
+        overlayText.textContent = state.title || 'Unlock Media';
 
         // --- Moment Mention ---
         const hasMoment = state.lastTrippedMoment;

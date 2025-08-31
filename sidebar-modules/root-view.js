@@ -193,10 +193,10 @@ function createImageRow(image) {
     row.dataset.imageId = image.id;
     row.style.cursor = 'pointer';
     const nameCell = document.createElement('td');
-    nameCell.textContent = image.topic;
+    nameCell.textContent = image.title;
     row.appendChild(nameCell);
     row.addEventListener('click', () => {
-        showLibraryActionDialog(image.id, image.topic);
+        showLibraryActionDialog(image.id, image.title);
     });
     return row;
 }
@@ -214,7 +214,7 @@ function createInstanceRow(instance, image) {
         progressBarTitle = `${progressData.visitedCount}/${progressData.totalCount} - ${progressPercentage}% Complete`;
     }
 
-    const colorName = packetUtils.getColorForTopic(instance.topic);
+    const colorName = packetUtils.getColorForTopic(instance.title);
     const colorHex = (packetColorMap[colorName] || defaultPacketColors).progress;
 
     const checkboxCell = document.createElement('td');
@@ -227,7 +227,7 @@ function createInstanceRow(instance, image) {
     checkboxCell.appendChild(checkbox);
 
     const nameCell = document.createElement('td');
-    nameCell.textContent = instance.topic;
+    nameCell.textContent = instance.title;
 
     const progressCell = document.createElement('td');
     progressCell.innerHTML = `
@@ -239,7 +239,7 @@ function createInstanceRow(instance, image) {
 
     if (isStencil) {
         row.classList.add('stencil-packet');
-        row.title = `Packet "${instance.topic}" is being created...`;
+        row.title = `Packet "${instance.title}" is being created...`;
     } else {
         setupInstanceContextMenu(row, instance);
         row.addEventListener('click', (e) => {
@@ -411,10 +411,10 @@ async function handleEditPacket(imageId) {
 
 async function handleDeletePacketImage(imageId) {
     const image = await storage.getPacketImage(imageId);
-    const topic = image?.topic || 'this packet';
+    const title = image?.title || 'this packet';
 
     const confirmed = await showConfirmDialog(
-        `Delete "${topic}" from your Library permanently?`,
+        `Delete "${title}" from your Library permanently?`,
         'Delete',
         'Cancel',
         true
@@ -422,16 +422,16 @@ async function handleDeletePacketImage(imageId) {
 
     if (confirmed) {
         await sendMessageToBackground({ action: 'delete_packet_image', data: { imageId } });
-        showRootViewStatus(`Packet "${topic}" deleted.`, 'success');
+        showRootViewStatus(`Packet "${title}" deleted.`, 'success');
     }
 }
 
 
-async function showLibraryActionDialog(imageId, topic) {
+async function showLibraryActionDialog(imageId, title) {
     currentActionImageId = imageId;
     const dialog = document.getElementById('library-action-dialog');
     if (dialog) {
-        dialog.querySelector('#library-action-title').textContent = topic;
+        dialog.querySelector('#library-action-title').textContent = title;
 
         const exportBtn = dialog.querySelector('#lib-action-export-btn');
         if (exportBtn) {
@@ -494,7 +494,7 @@ function setupInstanceContextMenu(row, instance) {
         addDivider(menu);
 
         addMenuItem(menu, 'Delete Packet', async () => {
-            const confirmed = await showConfirmDialog(`Delete packet "${instance.topic}"? This cannot be undone.`, 'Delete', 'Cancel', true);
+            const confirmed = await showConfirmDialog(`Delete packet "${instance.title}"? This cannot be undone.`, 'Delete', 'Cancel', true);
             if (confirmed) {
                 sendMessageToBackground({action:'delete_packets', data:{packetIds:[instance.instanceId]}});
             }
@@ -589,7 +589,7 @@ function insertRowSorted(row, listElement) {
 }
 
 export function renderOrUpdateImageStencil(data) {
-    const { imageId, topic, progressPercent, text } = data;
+    const { imageId, title, progressPercent, text } = data;
     const listElement = domRefs.inboxList;
     if (!listElement) return;
 
@@ -614,7 +614,7 @@ export function renderOrUpdateImageStencil(data) {
         contentCell.style.gap = '8px';
 
         contentCell.innerHTML = `
-            <span class="stencil-title" style="flex-grow: 1;">${topic || 'Creating...'}</span>
+            <span class="stencil-title" style="flex-grow: 1;">${title || 'Creating...'}</span>
             <span class="creation-stage-text" style="flex-shrink: 0;"></span>
             <div class="progress-bar-container" title="Creating..." style="width: 100px; flex-shrink: 0;">
                 <div class="progress-bar" style="width: 5%;"></div>
@@ -629,7 +629,7 @@ export function renderOrUpdateImageStencil(data) {
     const progressBarElement = row.querySelector('.progress-bar');
     const progressBarContainer = row.querySelector('.progress-bar-container');
 
-    if (titleElement && topic) titleElement.textContent = topic;
+    if (titleElement && title) titleElement.textContent = title;
     if (progressTextElement) progressTextElement.textContent = `(${text})`;
     if (progressBarElement) progressBarElement.style.width = `${progressPercent || 5}%`;
     if (progressBarContainer) progressBarContainer.title = `${text} - ${progressPercent || 5}%`;
