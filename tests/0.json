@@ -7,11 +7,9 @@
       "origin": "internal",
       "format": "html",
       "access": "private",
-      "pageId": "summary-page",
+      "url": "/pages/summary-page.html",
       "title": "Packet Summary (Does Not Grant Progress)",
-      "relevance": "An overview of this test packet.",
-      "contentType": "text/html",
-      "contentB64": "PGgxPlBhY2tldCBTdW1tYXJ5PC9oMT48cD5UaGlzIGlzIGEgdGVzdCBwYWNrZXQgZm9yIHRoZSBjaGVja3BvaW50IHN5c3RlbS4gVmlzaXRpbmcgdGhpcyBwYWdlIGl0c2VsZiBkb2VzIG5vdCBncmFudCBwcm9ncmVzcy48L3A+"
+      "relevance": "An overview of this test packet."
     },
     {
       "origin": "external",

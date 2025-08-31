@@ -267,7 +267,34 @@ const indexedDbStorage = {
            logger.error('IndexedDB', 'Error transferring draft content', { originalDraftId, finalImageId, error });
            return false;
        }
-   }
+   },
+    // --- START: New Debugging Function ---
+    async debugDumpIndexedDb() {
+        if (!CONFIG.DEBUG) return;
+        try {
+            const db = await getDb();
+            const tx = db.transaction(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT, 'readonly');
+            const store = tx.objectStore(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT);
+            const request = store.getAllKeys();
+
+            const keys = await new Promise((resolve, reject) => {
+                request.onerror = (event) => reject(event.target.error);
+                request.onsuccess = (event) => resolve(event.target.result);
+            });
+
+            console.log("--- IndexedDB Content Keys ---");
+            if (keys && keys.length > 0) {
+                console.log(keys);
+            } else {
+                console.log("Database is empty.");
+            }
+            console.log("------------------------------");
+
+        } catch (error) {
+            logger.error('IndexedDB', 'Error dumping database keys', error);
+        }
+    }
+    // --- END: New Debugging Function ---
 };
 
 const storage = {
@@ -412,16 +439,13 @@ const packetUtils = {
         }
         let checkpointsModified = false;
         const visitedUrlsSet = new Set(instance.visitedUrls || []);
-        const visitedGeneratedIds = new Set(instance.visitedGeneratedPageIds || []);
 
         image.checkpoints.forEach((checkpoint, index) => {
             if (instance.checkpointsTripped[index] === 1) {
                 return;
             }
             const isCompleted = checkpoint.requiredItems.every(req => {
-                const urlVisited = req.url && visitedUrlsSet.has(req.url);
-                const pageIdVisited = req.pageId && visitedGeneratedIds.has(req.pageId);
-                return urlVisited || pageIdVisited;
+                return req.url && visitedUrlsSet.has(req.url);
             });
             if (isCompleted) {
                 instance.checkpointsTripped[index] = 1;
@@ -451,21 +475,14 @@ const packetUtils = {
         if (!Array.isArray(instance.contents)) {
             return { visitedCount: 0, totalCount: 0, progressPercentage: 0 };
         }
-        const trackableItems = instance.contents.filter(item => item.url || item.pageId);
+        const trackableItems = instance.contents.filter(item => item.url && item.format === 'html');
         const totalCount = trackableItems.length;
         if (totalCount === 0) {
             return { visitedCount: 0, totalCount: 0, progressPercentage: 100 };
         }
         const visitedUrlsSet = new Set(instance.visitedUrls || []);
-        const visitedGeneratedIds = new Set(instance.visitedGeneratedPageIds || []);
-        let visitedCount = 0;
-        trackableItems.forEach(item => {
-            if (item.origin === 'external' && visitedUrlsSet.has(item.url)) {
-                visitedCount++;
-            } else if (item.origin === 'internal' && visitedGeneratedIds.has(item.pageId)) {
-                visitedCount++;
-            }
-        });
+        const visitedCount = trackableItems.filter(item => visitedUrlsSet.has(item.url)).length;
+        
         return {
             visitedCount: visitedCount,
             totalCount,
@@ -544,7 +561,6 @@ const packetUtils = {
     return colors[Math.abs(hash) % colors.length];
   },
   
-    // --- START OF THE FIX ---
     async markUrlAsVisited(instance, url) {
         if (!instance) {
             logger.warn('markUrlAsVisited', 'Packet instance not found');
@@ -559,50 +575,19 @@ const packetUtils = {
             return { success: true, notTrackable: true, instance: instance };
         }
 
-        const isInternal = foundItem.origin === 'internal';
-        const alreadyVisited = isInternal
-            ? (instance.visitedGeneratedPageIds || []).includes(foundItem.pageId)
-            : (instance.visitedUrls || []).includes(foundItem.url);
+        const canonicalUrl = foundItem.url;
+        const alreadyVisited = (instance.visitedUrls || []).includes(canonicalUrl);
 
         if (alreadyVisited) {
             return { success: true, alreadyVisited: true, instance: instance };
         }
         
-        if (isInternal) {
-            instance.visitedGeneratedPageIds = [...(instance.visitedGeneratedPageIds || []), foundItem.pageId];
-        } else {
-            instance.visitedUrls = [...(instance.visitedUrls || []), foundItem.url];
-        }
+        instance.visitedUrls = [...(instance.visitedUrls || []), canonicalUrl];
         
         this._updateCheckpointsOnVisit(instance, image);
         
         const justCompleted = !wasCompletedBefore && await this.isPacketInstanceCompleted(instance, image);
         
-        return { success: true, modified: true, instance, justCompleted };
-    },
-    // --- END OF THE FIX ---
-
-    async markPageIdAsVisited(instanceId, pageId, liveInstance = null) {
-        let instance = liveInstance;
-        if (!instance) {
-            instance = await storage.getPacketInstance(instanceId);
-        }
-        if (!instance) {
-            return { success: false, error: 'Packet instance not found' };
-        }
-        
-        const image = await storage.getPacketImage(instance.imageId);
-        const wasCompletedBefore = await this.isPacketInstanceCompleted(instance, image);
-        instance.visitedGeneratedPageIds = [...new Set([...(instance.visitedGeneratedPageIds || []), pageId])];
-        
-        this._updateCheckpointsOnVisit(instance, image);
-
-        if (!liveInstance) {
-            await storage.savePacketInstance(instance);
-        }
-
-        const justCompleted = !wasCompletedBefore && await this.isPacketInstanceCompleted(instance, image);
-
         return { success: true, modified: true, instance, justCompleted };
     },
 

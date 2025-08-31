@@ -4,21 +4,27 @@
   "created": "2025-09-10T18:40:00Z",
   "sourceContent": [
     {
-      "type": "external",
+      "origin": "external",
+      "format": "html",
+      "access": "public",
       "url": "https://en.wikipedia.org/wiki/Logic_bomb",
       "title": "Page A (Visible by Default)",
       "relevance": "This is the starting point. Visiting it is required for Checkpoint 1."
     },
     {
-      "type": "external",
+      "origin": "external",
+      "format": "html",
+      "access": "public",
       "url": "https://en.wikipedia.org/wiki/Deadlock",
       "title": "Page B (Hidden, Required for Checkpoint 2)",
       "relevance": "This page is required for Checkpoint 2, but it is hidden until Moment 1 is tripped.",
       "revealedByMoment": 0
     },
     {
-      "type": "generated",
-      "pageId": "page-c",
+      "origin": "internal",
+      "format": "html",
+      "access": "private",
+      "url": "/pages/page-c.html",
       "title": "Page C (Hidden, Triggers Moment 1)",
       "relevance": "This page must be visited to trip Moment 1, which reveals Page B. However, this page itself is hidden until Moment 2 is tripped.",
       "revealedByMoment": 1
@@ -42,13 +48,13 @@
     {
       "id": "moment_0",
       "type": "mediaTimestamp",
-      "sourcePageId": "page-c",
+      "sourceUrl": "/pages/page-c.html",
       "timestamp": 1
     },
     {
       "id": "moment_1",
       "type": "mediaTimestamp",
-      "sourcePageId": "https://en.wikipedia.org/wiki/Deadlock",
+      "sourceUrl": "https://en.wikipedia.org/wiki/Deadlock",
       "timestamp": 1
     }
   ]
