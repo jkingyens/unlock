@@ -25,7 +25,6 @@
       "format": "html",
       "access": "private",
       "lrl": "/pages/page-c.html",
-      "url": null,
       "title": "Page C (Hidden, Triggers Moment 1)",
       "context": "This page must be visited to trip Moment 1, which reveals Page B. However, this page itself is hidden until Moment 2 is tripped.",
       "revealedByMoment": 1

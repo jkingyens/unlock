@@ -250,39 +250,53 @@ export async function saveCurrentTime(instanceId, url, providedCurrentTime, isSt
     }
 }
 
-export async function notifyUIsOfStateChange(options = {}) {
-    let instance = activeMediaPlayback.instance;
-    if (!instance) {
-        const emptyState = { ...activeMediaPlayback, isPlaying: false, currentTime: 0, duration: 0, momentsTripped: [], lastTrippedMoment: null };
-        sidebarHandler.notifySidebar('playback_state_updated', emptyState);
-        const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-        if (activeTab) {
-             try {
-                 await injectOverlayScripts(activeTab.id);
-                 await chrome.tabs.sendMessage(activeTab.id, { action: 'sync_overlay_state', data: { isVisible: false } });
-             } catch(e) {}
-        }
-        return;
-    }
-    // --- START OF FIX ---
-    // Ensure the instance data within the playback state is always the most current version.
-    const playbackStateForUI = {
-        ...activeMediaPlayback,
-        instance: instance, // Explicitly include the full, updated instance
-        momentsTripped: instance.momentsTripped || [],
-        ...options
-    };
-    // --- END OF FIX ---
+export async function notifyUIsOfStateChange(options) {
+    const effectiveOptions = options || {};
     const { isSidebarOpen } = await storage.getSession({ isSidebarOpen: false });
-    const overlayEnabled = await shouldShowOverlay();
-    playbackStateForUI.isVisible = !!activeMediaPlayback.url && !isSidebarOpen && overlayEnabled;
-    if (activeMediaPlayback.tabId) {
+
+    // --- Path for Sidebar: Always send the full state object ---
+    const fullStateForSidebar = {
+        ...activeMediaPlayback,
+        instance: activeMediaPlayback.instance,
+        momentsTripped: activeMediaPlayback.instance?.momentsTripped || [],
+        ...effectiveOptions
+    };
+    sidebarHandler.notifySidebar('playback_state_updated', fullStateForSidebar);
+
+    // --- Path for Overlay: Statelessly find the active tab and send a lightweight object ---
+    if (!isSidebarOpen) {
         try {
-            await injectOverlayScripts(activeMediaPlayback.tabId);
-            await chrome.tabs.sendMessage(activeMediaPlayback.tabId, { action: 'sync_overlay_state', data: playbackStateForUI });
-        } catch (e) {}
+            const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+            if (!activeTab || !activeTab.id) return;
+
+            const overlayEnabled = await shouldShowOverlay();
+            let isPathBlocked = false;
+            if (activeTab.url) {
+                try {
+                    const url = new URL(activeTab.url);
+                    if (url.pathname === '/item') {
+                        isPathBlocked = true;
+                    }
+                } catch (e) { /* Ignore invalid URLs */ }
+            }
+
+            const lightweightStateForOverlay = {
+                isVisible: !!activeMediaPlayback.url && overlayEnabled && !isPathBlocked,
+                isPlaying: activeMediaPlayback.isPlaying,
+                title: activeMediaPlayback.title,
+                lastTrippedMoment: effectiveOptions.animateMomentMention ? activeMediaPlayback.lastTrippedMoment : null,
+                showVisitedAnimation: !!effectiveOptions.showVisitedAnimation
+            };
+
+            await injectOverlayScripts(activeTab.id);
+            await chrome.tabs.sendMessage(activeTab.id, { action: 'update_overlay_state', data: lightweightStateForOverlay });
+
+        } catch (e) {
+             if (!e.message.toLowerCase().includes('no tab with id')) {
+                 logger.error('Background:notifyUIs', 'Error notifying overlay', e);
+             }
+        }
     }
-    sidebarHandler.notifySidebar('playback_state_updated', playbackStateForUI);
 }
 
 export async function setMediaPlaybackState(newState, options = { animate: false, source: 'unknown' }) {
@@ -442,16 +456,15 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
             reorderDebounceTimers.delete(tab.groupId); 
         }
     } catch (e) {}
-    if (activeMediaPlayback.url) {
-        activeMediaPlayback.tabId = tabId;
-        await notifyUIsOfStateChange();
-    }
+    
     await sidebarHandler.updateActionForTab(tabId);
     const context = await getPacketContext(tabId);
     let instance = context ? await storage.getPacketInstance(context.instanceId) : null;
+    
     if (instance && activeMediaPlayback.instanceId === instance.instanceId) {
         instance = activeMediaPlayback.instance;
     }
+
     if (sidebarHandler.isSidePanelAvailable()) {
         sidebarHandler.notifySidebar('update_sidebar_context', {
             tabId,
@@ -461,6 +474,7 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
             currentUrl: instance ? context.currentBrowserUrl : null
         });
     }
+
     if (instance && context?.canonicalPacketUrl) {
         const itemForVisitTimer = instance.contents.find(i => i.url === context.canonicalPacketUrl);
         if (itemForVisitTimer && !itemForVisitTimer.interactionBasedCompletion) {
@@ -533,7 +547,7 @@ chrome.runtime.onConnect.addListener(async (port) => {
               logger.warn('Background:onDisconnect', 'Could not get active tab when sidebar closed.', e);
           }
       }
-      await notifyUIsOfStateChange(null, { animate: true });
+      await notifyUIsOfStateChange({ animate: true });
     });
   }
 });

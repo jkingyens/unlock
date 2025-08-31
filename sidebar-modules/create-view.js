@@ -118,9 +118,8 @@ function getUrlForItem(item, index) {
     if (item.origin === 'external') {
         return item.url;
     }
-    // REFACTOR: Use the LRL to build the preview URL
-    if (item.origin === 'internal' && item.url) {
-        return chrome.runtime.getURL(`preview.html?rlr=${encodeURIComponent(item.url)}`);
+    if (item.origin === 'internal' && item.lrl) {
+        return chrome.runtime.getURL(`preview.html?rlr=${encodeURIComponent(item.lrl)}`);
     }
     return null;
 }
@@ -213,7 +212,6 @@ function createDraftContentCard(contentItem, index) {
     let displayUrl = '';
     const itemUrl = getUrlForItem(contentItem, index);
     
-    // REFACTOR: Use 'data-url' for all items for consistency
     card.dataset.url = contentItem.url;
 
     if (format === 'html' && origin === 'external') {
@@ -264,19 +262,15 @@ function isDraftDirty() {
 async function toggleDraftAudioPlayback(item, card) {
     const iconElement = card.querySelector('.card-icon');
 
-    // --- START OF FIX ---
-    // Check if the clicked item is the currently active one.
     if (draftActiveAudio && draftActiveAudio.dataset.lrl === item.lrl) {
         if (draftActiveAudio.paused) {
             draftActiveAudio.play();
         } else {
             draftActiveAudio.pause();
         }
-        return; // Action is complete, exit the function.
+        return;
     }
-    // --- END OF FIX ---
 
-    // If another audio is playing, stop it first.
     if (draftActiveAudio) {
         draftActiveAudio.pause();
         const oldCard = document.querySelector(`.card.media[data-lrl="${draftActiveAudio.dataset.lrl}"]`);
@@ -323,7 +317,7 @@ async function handleImproveAudio(mediaItem, button) {
             action: 'improve_draft_audio',
             data: {
                 draftId: draftPacket.id,
-                mediaUrl: mediaItem.url // Use URL instead of pageId
+                mediaUrl: mediaItem.lrl 
             }
         });
 
@@ -560,7 +554,6 @@ function handleFileDrop(e) {
                     origin: 'internal',
                     format: 'audio',
                     access: 'private',
-                    url: null,
                     lrl: lrl,
                     title: file.name,
                     mimeType: file.type,

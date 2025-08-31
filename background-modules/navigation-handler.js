@@ -22,6 +22,7 @@ import * as tabGroupHandler from './tab-group-handler.js';
 
 const pendingVisits = {};
 const pendingNavigationActionTimers = new Map();
+let mostRecentInstance = null; // Cache for the most recently handled instance
 
 export function clearPendingVisitTimer(tabId) {
     if (pendingVisits[tabId]?.timerId) {
@@ -72,24 +73,28 @@ export async function checkAndPromptForCompletion(logPrefix, visitResult, instan
             return;
         }
         logger.log('NavigationHandler', 'Packet just completed. Acknowledging and showing prompt.', instanceId);
-        instanceData.completionAcknowledged = true;
-        await storage.savePacketInstance(instanceData);
-        sidebarHandler.notifySidebar('packet_instance_updated', { instance: instanceData, source: 'completion_ack' });
-        if (activeMediaPlayback.instanceId === instanceId) {
-            await resetActiveMediaPlayback();
-        }
+
         if (sidebarHandler.isSidePanelAvailable()) {
-            sidebarHandler.notifySidebar('show_confetti', { topic: instanceData.topic || '', instanceId: instanceId });
+            sidebarHandler.notifySidebar('show_confetti', { title: instanceData.title || '', instanceId: instanceId });
+            
             if (await shouldUseTabGroups()) {
                 const browserState = await storage.getPacketBrowserState(instanceId);
                 if (browserState?.tabGroupId) {
                     sidebarHandler.notifySidebar('prompt_close_tab_group', {
                         instanceId: instanceId,
                         tabGroupId: browserState.tabGroupId,
-                        topic: instanceData.topic || 'this packet'
+                        topic: instanceData.title || 'this packet'
                     });
                 }
             }
+        }
+
+        instanceData.completionAcknowledged = true;
+        await storage.savePacketInstance(instanceData);
+        sidebarHandler.notifySidebar('packet_instance_updated', { instance: instanceData, source: 'completion_ack' });
+        
+        if (activeMediaPlayback.instanceId === instanceId) {
+            await resetActiveMediaPlayback();
         }
     }
 }
@@ -173,16 +178,12 @@ async function processNavigationEvent(tabId, finalUrl, details) {
     logger.log(logPrefix, 'Final context after logic:', finalContext);
     let finalInstance = finalContext ? await storage.getPacketInstance(finalContext.instanceId) : null;
     
-    // --- START OF FIX ---
-    // If the instance being navigated to is the one with active media playback,
-    // use the in-memory version from activeMediaPlayback, as it's guaranteed
-    // to have the most up-to-the-millisecond state for moments. This prevents
-    // a race condition where a storage.save operation from a tripped moment has not completed yet.
     if (finalInstance && activeMediaPlayback.instanceId === finalInstance.instanceId) {
         finalInstance = activeMediaPlayback.instance;
         logger.log(logPrefix, 'Using live instance data from activeMediaPlayback to avoid race condition.');
     }
-    // --- END OF FIX ---
+    
+    mostRecentInstance = finalInstance;
 
     let image = finalInstance ? await storage.getPacketImage(finalInstance.imageId) : null;
 
@@ -278,9 +279,14 @@ export async function startVisitTimer(tabId, instanceId, canonicalPacketUrl, log
             if (tab && tab.active) {
                 logger.log(logPrefix, 'Visit timer fired for active tab. Marking as visited.');
                 
-                let instanceToUpdate = (activeMediaPlayback.instanceId === instanceId)
-                    ? activeMediaPlayback.instance
-                    : await storage.getPacketInstance(instanceId);
+                let instanceToUpdate = null;
+                if (mostRecentInstance && mostRecentInstance.instanceId === instanceId) {
+                    instanceToUpdate = mostRecentInstance;
+                } else if (activeMediaPlayback.instanceId === instanceId) {
+                    instanceToUpdate = activeMediaPlayback.instance;
+                } else {
+                    instanceToUpdate = await storage.getPacketInstance(instanceId);
+                }
                 
                 if (!instanceToUpdate) {
                     logger.warn(logPrefix, "Instance not found when visit timer fired.", { instanceId });
@@ -294,15 +300,13 @@ export async function startVisitTimer(tabId, instanceId, canonicalPacketUrl, log
                     
                     await storage.savePacketInstance(updatedInstance);
                     
+                    mostRecentInstance = updatedInstance;
                     if (activeMediaPlayback.instanceId === instanceId) {
                         activeMediaPlayback.instance = updatedInstance;
                     }
 
                     sidebarHandler.notifySidebar('packet_instance_updated', { instance: updatedInstance, source: 'dwell_visit' });
                     
-                    if (activeMediaPlayback.instanceId !== instanceId) {
-                        await setMediaPlaybackState({ instanceId: instanceId, tabId: tabId, topic: updatedInstance.topic }, { showVisitedAnimation: true, source: 'dwell_visit' });
-                    }
                     await checkAndPromptForCompletion(logPrefix, visitResult, instanceId);
                 }
             } else {

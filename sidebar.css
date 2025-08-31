@@ -253,11 +253,10 @@ body.dark-mode .creation-stage-text {
   box-shadow: 0 1px 2px var(--card-shadow);
   cursor: default;
   position: relative;
-  /* Define base border style here */
   border: 1px solid var(--border-secondary);
   border-left-width: 3px;
   border-left-color: var(--border-primary);
-  transition: transform 0.15s, box-shadow 0.15s, border-color 0.2s, background-color 0.2s;
+  transition: transform 0.15s, box-shadow 0.15s, border-color 0.2s, background-color 0.2s, outline 0.2s;
 }
 #detail-cards-container .card.clickable:not(.active):hover {
   background-color: var(--bg-tertiary);
@@ -279,24 +278,15 @@ body.dark-mode .creation-stage-text {
 }
 #detail-cards-container .card.active {
   background-color: var(--bg-accent);
-  border: 2px solid var(--card-border-active); /* Sets the thicker active border for top, right, bottom */
-  padding: 11px;                             /* Adjusts padding for the thicker border */
-  border-left-width: 3px;                      /* Overrides the left border to match other cards */
-  padding-left: 12px;                          /* Adjusts left padding to restore perfect alignment */
-}
-
-#detail-cards-container .card.active.visited {
-  border-left-color: var(--card-border-visited);
+  outline: 2px solid var(--card-border-active);
+  outline-offset: -2px;
 }
 #detail-cards-container .card.media {
   padding: 0;
   height: 64px;
 }
-#detail-cards-container .card.media.active {
-    padding: 0;
-}
 #detail-cards-container .card.media.visited {
-    border: 1px solid var(--card-border-visited);
+    border-color: var(--card-border-visited);
 }
 
 

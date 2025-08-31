@@ -69,7 +69,6 @@ async function initialize() {
         } else {
             const response = await sendMessageToBackground({ action: 'get_current_tab_context' });
             if (response?.success) {
-                // --- FIX: Ensure context is fully updated before navigating ---
                 await updateSidebarContext(response);
                 if (!response.instanceId) {
                     navigateTo('root');
@@ -127,15 +126,11 @@ export async function navigateTo(viewName, instanceId = null, data = null) {
     try {
         switch(viewName) {
             case 'packet-detail':
-                const [instanceData, browserState] = await Promise.all([
-                    storage.getPacketInstance(instanceId),
-                    storage.getPacketBrowserState(instanceId)
-                ]);
+                const instanceData = await storage.getPacketInstance(instanceId);
 
                 if (!instanceData) throw new Error(`Packet instance ${instanceId} not found.`);
                 
-                const imageData = await storage.getPacketImage(instanceData.imageId);
-                if (!imageData) throw new Error(`Packet image ${instanceData.imageId} for instance ${instanceId} not found.`);
+                const browserState = await storage.getPacketBrowserState(instanceId);
 
                 currentView = 'packet-detail';
                 currentInstanceId = instanceData.instanceId;
@@ -143,7 +138,7 @@ export async function navigateTo(viewName, instanceId = null, data = null) {
                 newSidebarTitle = instanceData.title || 'Packet Details';
                 domRefs.packetDetailView.classList.remove('hidden');
                 
-                await detailView.displayPacketContent(instanceData, imageData, browserState, currentPacketUrl);
+                await detailView.displayPacketContent(instanceData, browserState, currentPacketUrl);
                 break;
             case 'create':
                 currentView = 'create';
@@ -209,18 +204,11 @@ async function updateSidebarContext(contextData) {
             return; 
         }
 
-        const newImageData = await storage.getPacketImage(newInstanceData.imageId);
-        if (!newImageData) {
-            logger.error('Sidebar:updateSidebarContext', `Could not find image for instance ${newInstanceId}.`);
-            navigateTo('root');
-            return;
-        }
-
         currentInstanceData = newInstanceData;
         currentPacketUrl = newPacketUrl;
         
         const browserState = await storage.getPacketBrowserState(currentInstanceId);
-        await detailView.displayPacketContent(currentInstanceData, newImageData, browserState, currentPacketUrl);
+        await detailView.displayPacketContent(currentInstanceData, browserState, currentPacketUrl);
     }
 }
 
@@ -283,26 +271,24 @@ async function handleBackgroundMessage(message) {
             showRootViewStatus(`Creation failed: ${data?.error || 'Unknown'}`, 'error');
             break;
         case 'playback_state_updated':
-            // --- START OF LOGGING ---
-            logger.log('Sidebar:MessageHandler', 'Received playback_state_updated', { 
-                instanceId: data.instanceId,
-                isPlaying: data.isPlaying,
-                currentTime: data.currentTime,
-                momentsTripped: data.instance?.momentsTripped 
-            });
-            // --- END OF LOGGING ---
+            // --- START OF FIX: Ensure the latest instance data is used for rendering ---
             if (currentView === 'packet-detail' && currentInstanceId === data.instanceId) {
-                
-                // --- START OF FIX ---
-                // 1. Update the sidebar's main instance data FIRST.
+                // Update the sidebar's master copy of the instance state
                 currentInstanceData = data.instance;
 
-                // 2. Now, call the detail view functions which may rely on that updated state.
-                detailView.updatePlaybackUI(data); 
-                detailView.updateCardVisibility(data.instance);
-                // --- END OF FIX ---
-            }
+                // Pass the fresh instance data directly to the UI update functions
+                detailView.updatePlaybackUI(data, currentInstanceData); 
+                detailView.updateCardVisibility(currentInstanceData);
 
+                if (data.lastTrippedMoment?.url) {
+                    const cardToAnimate = domRefs.packetDetailView.querySelector(`.card[data-url="${data.lastTrippedMoment.url}"]`);
+                    if (cardToAnimate) {
+                        cardToAnimate.classList.add('link-mentioned');
+                        setTimeout(() => cardToAnimate.classList.remove('link-mentioned'), 1500);
+                    }
+                }
+            }
+            // --- END OF FIX ---
             break;
         case 'navigate_to_view':
             if (data?.viewName) {
@@ -339,9 +325,9 @@ async function handleBackgroundMessage(message) {
             if (currentView === 'root') {
                 rootView.updateInstanceRowUI(data.instance);
             } else if (currentView === 'packet-detail' && currentInstanceId === data.instance.instanceId) {
-                const browserState = await storage.getPacketBrowserState(data.instance.instanceId);
-                const image = await storage.getPacketImage(data.instance.imageId);
-                await detailView.displayPacketContent(data.instance, image, browserState, currentPacketUrl);
+                storage.getPacketBrowserState(data.instance.instanceId).then(browserState => {
+                    detailView.displayPacketContent(data.instance, browserState, currentPacketUrl);
+                });
             }
             break;
         case 'packet_instance_deleted':
