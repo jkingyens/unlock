@@ -84,14 +84,14 @@ function validatePacketWinnability(packetImage) {
     const requiredItems = new Set();
     packetImage.checkpoints.forEach(cp => {
         cp.requiredItems.forEach(item => {
-            requiredItems.add(item.url || item.pageId);
+            requiredItems.add(item.url); // Now only uses URL
         });
     });
 
     const unlockedItems = new Set(
         packetImage.sourceContent
             .filter(item => typeof item.revealedByMoment !== 'number')
-            .map(item => item.url || item.pageId)
+            .map(item => item.url)
             .filter(Boolean)
     );
 
@@ -114,7 +114,7 @@ function validatePacketWinnability(packetImage) {
             newlyVisitedItems.forEach(visited => requiredItems.delete(visited));
 
             const momentsToTrip = (packetImage.moments || [])
-                .filter(moment => newlyVisitedItems.includes(moment.sourcePageId) && !trippedMoments.has(moment.id));
+                .filter(moment => newlyVisitedItems.includes(moment.sourceUrl) && !trippedMoments.has(moment.id));
 
             momentsToTrip.forEach(moment => {
                 trippedMoments.add(moment.id);
@@ -122,7 +122,7 @@ function validatePacketWinnability(packetImage) {
 
                 packetImage.sourceContent
                     .filter(item => item.revealedByMoment === momentIndex)
-                    .forEach(item => unlockedItems.add(item.url || item.pageId));
+                    .forEach(item => unlockedItems.add(item.url));
             });
         }
     }

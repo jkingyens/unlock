@@ -4,7 +4,7 @@
 // rapid clicks from creating duplicate tabs, fixing a critical race condition.
 
 import { domRefs } from './dom-references.js';
-import { logger, storage, packetUtils, indexedDbStorage } from '../utils.js';
+import { logger, storage, packetUtils, indexedDbStorage, sanitizeForFileName } from '../utils.js';
 
 // --- Module-specific State & Dependencies ---
 let isDisplayingPacketContent = false;
@@ -12,7 +12,7 @@ let queuedDisplayRequest = null;
 const audioDataCache = new Map();
 let currentDetailInstance = null;
 let saveStateDebounceTimer = null; // Timer for debounced state saving
-let currentPlayingPageId = null; // Track which media item is active in this view
+let currentPlayingUrl = null; // Track which media item is active in this view
 let sendMessageToBackground;
 let navigateTo;
 let openUrl;
@@ -36,7 +36,7 @@ export function init(dependencies) {
 export function clearCurrentDetailView() {
     logger.log("DetailView", "Clearing internal state for deleted packet.");
     currentDetailInstance = null;
-    currentPlayingPageId = null;
+    currentPlayingUrl = null;
     clearTimeout(saveStateDebounceTimer);
     saveStateDebounceTimer = null;
 }
@@ -45,18 +45,18 @@ export function clearCurrentDetailView() {
 export function updatePlaybackUI(state) {
     if (!currentDetailInstance || !domRefs.packetDetailView) return;
 
-    currentPlayingPageId = state.isPlaying ? state.pageId : null;
+    currentPlayingUrl = state.isPlaying ? state.url : null;
 
     // Update play/pause icon on all media cards
     const allMediaCards = domRefs.packetDetailView.querySelectorAll('.card.media');
     allMediaCards.forEach(card => {
-        const cardPageId = card.dataset.pageId;
-        const isPlayingThisCard = state.isPlaying && state.pageId === cardPageId;
+        const cardUrl = card.dataset.url;
+        const isPlayingThisCard = state.isPlaying && state.url === cardUrl;
         card.classList.toggle('playing', isPlayingThisCard);
     });
 
     // Update waveform for the active track
-    if (state.pageId) {
+    if (state.url) {
         redrawAllVisibleWaveforms(state);
     }
 }
@@ -173,18 +173,19 @@ async function redrawAllVisibleWaveforms(playbackState = {}) {
     };
 
     for (const card of mediaCards) {
-        const pageId = card.dataset.pageId;
+        const url = card.dataset.url;
+        const lrl = card.dataset.lrl;
         const canvas = card.querySelector('.waveform-canvas');
         const markerContainer = card.querySelector('.waveform-marker-container');
-        const contentItem = currentDetailInstance.contents.find(item => item.pageId === pageId);
-        const audioCacheKey = `${currentDetailInstance.imageId}::${pageId}`;
+        const contentItem = currentDetailInstance.contents.find(item => item.url === url);
+        const audioCacheKey = `${currentDetailInstance.imageId}::${url}`;
         
         const cachedAudioData = audioDataCache.get(audioCacheKey);
         if (!cachedAudioData) continue;
         const { samples: audioSamples, sampleRate, duration: cachedDuration } = cachedAudioData;
 
         if (canvas && contentItem && audioSamples) {
-            const isTheActiveTrack = playbackState.pageId === pageId;
+            const isTheActiveTrack = playbackState.url === url;
             const currentTime = isTheActiveTrack ? (playbackState.currentTime || 0) : (contentItem.currentTime || 0);
             const audioDuration = isTheActiveTrack && playbackState.duration > 0 ? playbackState.duration : cachedDuration;
             
@@ -195,7 +196,7 @@ async function redrawAllVisibleWaveforms(playbackState = {}) {
                 audioSampleRate: sampleRate
             });
 
-            const relevantMoments = (image.moments || []).filter(m => m.sourcePageId === pageId);
+            const relevantMoments = (image.moments || []).filter(m => m.sourceUrl === lrl);
             drawLinkMarkers(markerContainer, {
                 ...colorOptions,
                 moments: relevantMoments,
@@ -234,20 +235,16 @@ export async function displayPacketContent(instance, image, browserState, canoni
 
         if (isAlreadyRendered) {
             const visitedUrlsSet = new Set(instance.visitedUrls || []);
-            const visitedGeneratedIds = new Set(instance.visitedGeneratedPageIds || []);
 
             container.querySelectorAll('.card').forEach(card => {
-                const isVisited = (card.dataset.pageId && visitedGeneratedIds.has(card.dataset.pageId)) ||
-                                  (card.dataset.url && visitedUrlsSet.has(card.dataset.url));
+                const isVisited = card.dataset.url && visitedUrlsSet.has(card.dataset.url);
                 card.classList.toggle('visited', isVisited);
                 
-                // --- START OF THE FIX ---
                 const momentIndices = card.dataset.momentIndices ? JSON.parse(card.dataset.momentIndices) : [];
                 if (momentIndices.length > 0) {
                     const isRevealed = momentIndices.some(index => instance.momentsTripped[index] === 1);
                     card.classList.toggle('hidden-by-rule', !isRevealed);
                 }
-                // --- END OF THE FIX ---
             });
             updateActiveCardHighlight(canonicalPacketUrl);
             
@@ -276,7 +273,7 @@ export async function displayPacketContent(instance, image, browserState, canoni
             const fragment = document.createDocumentFragment();
             fragment.appendChild(createProgressSection(instance, image));
             fragment.appendChild(await createActionButtons(instance, browserState, image));
-            const cardsWrapper = await createCardsSection(instance);
+            const cardsWrapper = await createCardsSection(instance, image);
             cardsWrapper.dataset.instanceId = instance.instanceId;
             fragment.appendChild(cardsWrapper);
 
@@ -286,12 +283,13 @@ export async function displayPacketContent(instance, image, browserState, canoni
             
             const mediaCards = container.querySelectorAll('.card.media');
             for (const mediaCard of mediaCards) {
-                const pageId = mediaCard.dataset.pageId;
-                const contentItem = instance.contents.find(item => item.pageId === pageId);
+                const url = mediaCard.dataset.url;
+                const lrl = mediaCard.dataset.lrl;
                 const canvas = mediaCard.querySelector('.waveform-canvas');
 
-                if (contentItem && canvas) {
-                    const audioContent = await indexedDbStorage.getGeneratedContent(instance.imageId, contentItem.pageId);
+                if (lrl && canvas) {
+                    const indexedDbKey = sanitizeForFileName(lrl);
+                    const audioContent = await indexedDbStorage.getGeneratedContent(instance.imageId, indexedDbKey);
                     if (audioContent && audioContent[0]?.content) {
                         try {
                             const audioData = audioContent[0].content;
@@ -299,7 +297,7 @@ export async function displayPacketContent(instance, image, browserState, canoni
                             const decodedData = await audioContext.decodeAudioData(audioData.slice(0));
                             const samples = decodedData.getChannelData(0);
                             
-                            audioDataCache.set(`${instance.imageId}::${contentItem.pageId}`, {
+                            audioDataCache.set(`${instance.imageId}::${url}`, {
                                 samples: samples,
                                 sampleRate: decodedData.sampleRate,
                                 duration: decodedData.duration
@@ -310,6 +308,8 @@ export async function displayPacketContent(instance, image, browserState, canoni
                         } catch (err) {
                             logger.error("DetailView", "Failed to draw initial waveform post-render", err);
                         }
+                    } else {
+                        logger.warn("DetailView", "Could not find audio content in IndexedDB for waveform", { lrl });
                     }
                 }
             }
@@ -373,12 +373,12 @@ async function createActionButtons(instance, browserState, image) {
     return actionButtonContainer;
 }
 
-async function createCardsSection(instance) {
+async function createCardsSection(instance, image) {
     const cardsWrapper = document.createElement('div');
     cardsWrapper.id = 'detail-cards-container';
     
     if (instance.contents && instance.contents.length > 0) {
-        const cardPromises = instance.contents.map(item => createContentCard(item, instance));
+        const cardPromises = instance.contents.map(item => createContentCard(item, instance, image));
         const cards = await Promise.all(cardPromises);
         cards.forEach(card => {
             if (card) cardsWrapper.appendChild(card);
@@ -391,15 +391,15 @@ async function createCardsSection(instance) {
     return cardsWrapper;
 }
 
-async function createContentCard(contentItem, instance) {
+async function createContentCard(contentItem, instance, image) {
     if (!contentItem || !contentItem.format) return null;
 
     const card = document.createElement('div');
     card.className = 'card';
-    const { url: urlToOpen, title = 'Untitled', relevance = '', format, origin } = contentItem;
+    const { url, lrl, title = 'Untitled', relevance = '', format, origin } = contentItem;
 
-    if (contentItem.url) card.dataset.url = contentItem.url;
-    if (contentItem.pageId) card.dataset.pageId = contentItem.pageId;
+    if (url) card.dataset.url = url;
+    if (lrl) card.dataset.lrl = lrl;
 
     let isClickable = (origin === 'external') || (origin === 'internal' && contentItem.published);
 
@@ -407,7 +407,7 @@ async function createContentCard(contentItem, instance) {
         let iconHTML = origin === 'external' ? '🔗' : '📄';
         let displayUrl = '';
         if (origin === 'external') {
-            try { displayUrl = new URL(urlToOpen).hostname.replace(/^www\./, ''); } catch (e) { displayUrl = urlToOpen || '(URL missing)'; }
+            try { displayUrl = new URL(url).hostname.replace(/^www\./, ''); } catch (e) { displayUrl = url || '(URL missing)'; }
         } else {
             displayUrl = contentItem.published ? title : '(Not Published)';
         }
@@ -426,17 +426,20 @@ async function createContentCard(contentItem, instance) {
     }
 
     const visitedUrlsSet = new Set(instance.visitedUrls || []);
-    const visitedGeneratedIds = new Set(instance.visitedGeneratedPageIds || []);
-    const isVisited = (origin === 'internal' && visitedGeneratedIds.has(contentItem.pageId)) ||
-                      (origin === 'external' && contentItem.url && visitedUrlsSet.has(contentItem.url));
+    const isVisited = url && visitedUrlsSet.has(url);
 
     if (isVisited) {
         card.classList.add('visited');
     }
-
-    // --- START OF THE FIX ---
-    const momentIndices = Array.isArray(contentItem.revealedByMoments) ? contentItem.revealedByMoments :
-                          (typeof contentItem.revealedByMoment === 'number' ? [contentItem.revealedByMoment] : []);
+    
+    const imageItem = image.sourceContent.find(item => item.lrl === lrl) || contentItem;
+    if (!imageItem) {
+        logger.error("DetailView", "Could not find matching image item for instance item", { contentItem });
+        return card; // Return a partially rendered card to prevent a crash
+    }
+    
+    const momentIndices = Array.isArray(imageItem.revealedByMoments) ? imageItem.revealedByMoments :
+                          (typeof imageItem.revealedByMoment === 'number' ? [imageItem.revealedByMoment] : []);
 
     if (momentIndices.length > 0) {
         card.dataset.momentIndices = JSON.stringify(momentIndices);
@@ -445,7 +448,6 @@ async function createContentCard(contentItem, instance) {
             card.classList.add('hidden-by-rule');
         }
     }
-    // --- END OF THE FIX ---
 
     if (isClickable) {
         card.classList.add('clickable');
@@ -460,7 +462,7 @@ async function createContentCard(contentItem, instance) {
                 setTimeout(() => card.classList.remove('opening'), 2000);
 
                 if (typeof openUrl === 'function') {
-                    openUrl(urlToOpen, instance.instanceId);
+                    openUrl(url, instance.instanceId);
                 }
             });
         }
@@ -538,7 +540,7 @@ export function stopAudioIfPacketDeleted(deletedPacketId) {
 
 async function playMediaInCard(card, contentItem, instance) {
     card.addEventListener('click', () => {
-        const isThisCardPlaying = currentPlayingPageId === contentItem.pageId;
+        const isThisCardPlaying = currentPlayingUrl === contentItem.url;
 
         if (isThisCardPlaying) {
             sendMessageToBackground({
@@ -551,7 +553,8 @@ async function playMediaInCard(card, contentItem, instance) {
                 data: {
                     intent: 'play',
                     instanceId: instance.instanceId,
-                    pageId: contentItem.pageId
+                    url: contentItem.url,
+                    lrl: contentItem.lrl // Pass the LRL for DB lookup
                 }
             });
         }

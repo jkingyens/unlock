@@ -180,10 +180,11 @@ async function processNavigationEvent(tabId, finalUrl, details) {
         if (loadedItem) {
             let momentTripped = false;
             (image.moments || []).forEach((moment, index) => {
-                if (moment.type === 'visit' && moment.sourcePageId === loadedItem.pageId && finalInstance.momentsTripped[index] === 0) {
+                // REFACTOR: Check sourceUrl instead of sourcePageId
+                if (moment.type === 'visit' && moment.sourceUrl === loadedItem.url && finalInstance.momentsTripped[index] === 0) {
                     finalInstance.momentsTripped[index] = 1;
                     momentTripped = true;
-                    logger.log(logPrefix, `DECISION: Navigation to page ${loadedItem.pageId} is tripping moment ${index}.`);
+                    logger.log(logPrefix, `DECISION: Navigation to page with URL ${loadedItem.url} is tripping moment ${index}.`);
                 }
             });
             if (momentTripped) {
@@ -263,7 +264,6 @@ export async function startVisitTimer(tabId, instanceId, canonicalPacketUrl, log
             if (tab && tab.active) {
                 logger.log(logPrefix, 'Visit timer fired for active tab. Marking as visited.');
                 
-                // --- START OF THE FIX ---
                 let instanceToUpdate = (activeMediaPlayback.instanceId === instanceId)
                     ? activeMediaPlayback.instance
                     : await storage.getPacketInstance(instanceId);
@@ -291,7 +291,6 @@ export async function startVisitTimer(tabId, instanceId, canonicalPacketUrl, log
                     }
                     await checkAndPromptForCompletion(logPrefix, visitResult, instanceId);
                 }
-                 // --- END OF THE FIX ---
             } else {
                  logger.log(logPrefix, 'Visit timer fired, but tab was not active. Visit not marked.');
             }

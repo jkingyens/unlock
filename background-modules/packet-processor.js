@@ -141,7 +141,8 @@ export async function generateDraftPacketFromTab(initiatorTabId) {
             origin: 'internal',
             format: 'html',
             access: 'private',
-            pageId: "summary-page",
+            lrl: `/pages/summary.html`, // The permanent local resource locator
+            url: null, // URL is null until published
             title: `${topic} Summary`,
             contentType: "text/html"
         };
@@ -168,7 +169,8 @@ export async function generateDraftPacketFromTab(initiatorTabId) {
                 origin: 'internal',
                 format: 'audio',
                 access: 'private',
-                pageId: `audio_summary_${Date.now()}`,
+                lrl: `/media/audio_summary_${Date.now()}.wav`,
+                url: null,
                 title: summaryPageDef.title,
                 mimeType: 'audio/wav',
                 published: false 
@@ -193,18 +195,16 @@ export async function generateDraftPacketFromTab(initiatorTabId) {
                         moments.push({
                             id: `moment_${momentIndex}`,
                             type: "mediaTimestamp",
-                            sourcePageId: audioMediaItem.pageId,
+                            sourceUrl: audioMediaItem.lrl,
                             timestamp: parseFloat(startTime.toFixed(2))
                         });
                         linkedItem.revealedByMoment = momentIndex;
                     }
                 });
             }
-            await indexedDbStorage.saveGeneratedContent(draftId, audioMediaItem.pageId, [{ name: 'audio.wav', content: audioBuffer, contentType: 'audio/wav' }]);
+            const indexedDbKey = sanitizeForFileName(audioMediaItem.lrl);
+            await indexedDbStorage.saveGeneratedContent(draftId, indexedDbKey, [{ name: 'audio.wav', content: audioBuffer, contentType: 'audio/wav' }]);
         } else if (links.length > 0) {
-            // --- START OF THE FIX ---
-            // If there's no audio but there are links, create 'visit' moments
-            // tied to the summary page itself.
             links.forEach(link => {
                 const linkedItem = validatedExternalLinks.find(ext => ext.url === link.href);
                 if (linkedItem) {
@@ -212,12 +212,11 @@ export async function generateDraftPacketFromTab(initiatorTabId) {
                     moments.push({
                         id: `moment_${momentIndex}`,
                         type: "visit",
-                        sourcePageId: summaryPageDef.pageId
+                        sourceUrl: summaryPageDef.lrl
                     });
                     linkedItem.revealedByMoment = momentIndex;
                 }
             });
-            // --- END OF THE FIX ---
         }
 
         summaryPageDef.contentB64 = arrayBufferToBase64(new TextEncoder().encode(enhanceHtml(summaryHtmlBodyLLM, topic, summaryPageDef.title)));
@@ -365,9 +364,6 @@ export async function instantiatePacket(imageId, preGeneratedInstanceId, initiat
         let packetImage = await storage.getPacketImage(imageId);
         if (!packetImage) throw new Error(`Packet Image ${imageId} not found.`);
 
-        // The on-the-fly migration logic that was here has been removed,
-        // as the new global migration in background.js handles it at startup.
-
         const hasInternalContent = packetImage.sourceContent.some(item => item.origin === 'internal');
         let activeCloudConfig = null;
 
@@ -392,74 +388,77 @@ export async function instantiatePacket(imageId, preGeneratedInstanceId, initiat
             instantiated: new Date().toISOString(),
             contents: JSON.parse(JSON.stringify(packetImage.sourceContent)),
             visitedUrls: [],
-            visitedGeneratedPageIds: [],
             momentsTripped: packetImage.moments ? Array(packetImage.moments.length).fill(0) : [],
         };
         
         if (Array.isArray(packetImage.checkpoints)) {
             packetInstance.checkpointsTripped = Array(packetImage.checkpoints.length).fill(0);
         }
+        
+        const imageContentMap = new Map(packetImage.sourceContent.map(item => [item.lrl, item]));
 
         for (let i = 0; i < packetInstance.contents.length; i++) {
             const item = packetInstance.contents[i];
-            if (item.origin === 'internal' && item.format === 'html') {
-                const { pageId, contentB64, contentType } = item;
-                if (!contentB64) {
-                    logger.warn('PacketProcessor:instantiate', `Internal item ${pageId} is missing Base64 content. Cannot publish.`);
-                    item.published = false;
-                    item.url = null;
-                } else {
-                    const decodedContent = base64Decode(contentB64);
-                    const filesToUpload = [{ name: 'index.html', content: new TextDecoder().decode(decodedContent), contentType }];
-                    
-                    await indexedDbStorage.saveGeneratedContent(imageId, pageId, filesToUpload);
-
-                    const uploadResult = await cloudStorage.uploadPacketFiles(instanceId, pageId, filesToUpload, 'private');
-                    if (uploadResult.success) {
-                        item.url = uploadResult.url;
-                        item.published = true;
-                        item.publishContext = {
-                            storageConfigId: activeCloudConfig.id,
-                            provider: activeCloudConfig.provider,
-                            region: activeCloudConfig.region,
-                            bucket: activeCloudConfig.bucket
-                        };
-                    } else {
-                        throw new Error(`Failed to publish ${pageId}: ${uploadResult.error}`);
-                    }
+            if (item.origin === 'internal') {
+                const lrl = item.lrl;
+                if (!lrl) {
+                    logger.warn('PacketProcessor:instantiate', 'Skipping internal item with no LRL.', item);
+                    continue;
                 }
-                delete item.contentB64;
-            } else if (item.origin === 'internal' && item.format === 'audio') {
-                item.currentTime = 0;
-                item.duration = 0;
-                const { pageId, mimeType, title } = item;
-                const cachedContent = await indexedDbStorage.getGeneratedContent(imageId, pageId);
+                const cloudPath = `packets/${instanceId}${lrl.startsWith('/') ? lrl : '/' + lrl}`;
+                
+                let contentToUpload;
+                let contentType;
+                const originalImageItem = imageContentMap.get(lrl);
 
-                if (!cachedContent || cachedContent.length === 0) {
-                    logger.warn('PacketProcessor:instantiate', `Media item ${pageId} is missing from IndexedDB, so it cannot be published.`);
-                    item.published = false;
-                    item.url = null;
-                } else {
-                    const fileContent = cachedContent[0].content;
-                    const fileExtension = mimeType === 'audio/wav' ? '.wav' : (mimeType === 'audio/mpeg' ? '.mp3' : '');
-                    const fileName = sanitizeForFileName(title) + fileExtension;
-                    const filePath = `packets/${instanceId}/${pageId}/${fileName}`;
-                    
-                    const uploadResult = await cloudStorage.uploadFile(filePath, fileContent, mimeType, 'private');
-                    if (uploadResult.success) {
-                        item.url = uploadResult.fileName;
-                        item.published = true;
-                        item.publishContext = {
-                            storageConfigId: activeCloudConfig.id,
-                            provider: activeCloudConfig.provider,
-                            region: activeCloudConfig.region,
-                            bucket: activeCloudConfig.bucket
-                        };
-                    } else {
+                if (!originalImageItem) {
+                     logger.warn('PacketProcessor:instantiate', `Could not find original image item for LRL ${lrl}. Skipping publish.`);
+                     item.published = false;
+                     item.url = null;
+                     continue;
+                }
+
+                if (item.format === 'html') {
+                    if (!originalImageItem.contentB64) {
+                        logger.warn('PacketProcessor:instantiate', `Internal item ${lrl} is missing Base64 content. Cannot publish.`);
                         item.published = false;
                         item.url = null;
-                        throw new Error(`Failed to publish media ${title}: ${uploadResult.error}`);
+                        continue;
                     }
+                    contentToUpload = new TextDecoder().decode(base64Decode(originalImageItem.contentB64));
+                    contentType = originalImageItem.contentType;
+                    delete item.contentB64;
+
+                } else if (item.format === 'audio') {
+                    item.currentTime = 0;
+                    item.duration = 0;
+                    const indexedDbKey = sanitizeForFileName(originalImageItem.lrl); 
+                    const cachedContent = await indexedDbStorage.getGeneratedContent(imageId, indexedDbKey);
+                    if (!cachedContent || cachedContent.length === 0) {
+                         logger.warn('PacketProcessor:instantiate', `Media item ${lrl} is missing from IndexedDB. Cannot publish.`);
+                        item.published = false;
+                        item.url = null;
+                        continue;
+                    }
+                    contentToUpload = cachedContent[0].content;
+                    contentType = item.mimeType;
+                }
+
+                const uploadResult = await cloudStorage.uploadFile(cloudPath, contentToUpload, contentType, 'private');
+                
+                if (uploadResult.success) {
+                    item.url = uploadResult.fileName;
+                    item.published = true;
+                    item.publishContext = {
+                        storageConfigId: activeCloudConfig.id,
+                        provider: activeCloudConfig.provider,
+                        region: activeCloudConfig.region,
+                        bucket: activeCloudConfig.bucket
+                    };
+                } else {
+                    item.published = false;
+                    item.url = null;
+                    throw new Error(`Failed to publish ${lrl}: ${uploadResult.error}`);
                 }
             }
         }
@@ -515,17 +514,17 @@ export async function processDeletePacketsRequest(data, initiatorTabId = null) {
             }
             
             for (const item of instance.contents) {
-                if (item.format === 'audio' && item.pageId) {
-                    const sessionKey = `audio_progress_${instanceId}_${item.pageId}`;
+                if (item.format === 'audio' && item.url) {
+                    const sessionKey = `audio_progress_${instanceId}_${sanitizeForFileName(item.url)}`;
                     await storage.removeSession(sessionKey);
                 }
             }
 
             if (await cloudStorage.initialize()) {
                 for (const item of instance.contents) {
-                    if (item.origin === 'internal' && item.pageId && item.url) {
-                        await cloudStorage.deletePacketFiles(instanceId, item.pageId)
-                            .catch(e => logger.warn('PacketProcessor:delete', `Error deleting cloud files for ${instanceId}/${item.pageId}`, e));
+                    if (item.origin === 'internal' && item.published && item.url) {
+                        await cloudStorage.deleteFile(item.url)
+                            .catch(e => logger.warn('PacketProcessor:delete', `Error deleting cloud file ${item.url}`, e));
                     }
                 }
             } else {
@@ -580,7 +579,8 @@ export async function importImageFromUrl(url) {
             if (contentItem.format === 'audio' && contentItem.contentB64) {
                 const audioBuffer = base64Decode(contentItem.contentB64);
                 if (audioBuffer) {
-                    await indexedDbStorage.saveGeneratedContent(imageId, contentItem.pageId, [{
+                    const indexedDbKey = sanitizeForFileName(contentItem.lrl);
+                    await indexedDbStorage.saveGeneratedContent(imageId, indexedDbKey, [{
                         name: 'audio.wav',
                         content: audioBuffer,
                         contentType: contentItem.mimeType
@@ -646,7 +646,8 @@ export async function processCreatePacketRequest(data, initiatorTabId) {
             origin: 'internal',
             format: 'html',
             access: 'private',
-            pageId: "summary-page",
+            lrl: "/pages/summary.html",
+            url: null,
             title: `${topic} Summary`,
             contentType: "text/html"
         };
@@ -756,7 +757,8 @@ export async function processCreatePacketRequestFromTab(initiatorTabId) {
             origin: 'internal',
             format: 'html',
             access: 'private',
-            pageId: "summary-page",
+            lrl: `/pages/summary.html`,
+            url: null,
             title: `${topic} Summary`,
             contentType: "text/html"
         };
@@ -783,7 +785,8 @@ export async function processCreatePacketRequestFromTab(initiatorTabId) {
                 origin: 'internal',
                 format: 'audio',
                 access: 'private',
-                pageId: `audio_summary_${Date.now()}`,
+                lrl: `/media/audio_summary_${Date.now()}.wav`,
+                url: null,
                 title: summaryPageDef.title,
                 mimeType: 'audio/wav'
             };
@@ -808,15 +811,15 @@ export async function processCreatePacketRequestFromTab(initiatorTabId) {
                         moments.push({
                             id: `moment_${momentIndex}`,
                             type: "mediaTimestamp",
-                            sourcePageId: audioMediaItem.pageId,
+                            sourceUrl: audioMediaItem.lrl,
                             timestamp: parseFloat(startTime.toFixed(2))
                         });
                         linkedItem.revealedByMoment = momentIndex;
                     }
                 });
             }
-
-            await indexedDbStorage.saveGeneratedContent(imageId, audioMediaItem.pageId, [{ name: 'audio.wav', content: audioBuffer, contentType: 'audio/wav' }]);
+            const indexedDbKey = sanitizeForFileName(audioMediaItem.lrl);
+            await indexedDbStorage.saveGeneratedContent(imageId, indexedDbKey, [{ name: 'audio.wav', content: audioBuffer, contentType: 'audio/wav' }]);
             logger.log('PacketProcessor:FromTab', 'Successfully created media item for TTS audio and saved to IndexedDB.');
         } else {
             logger.warn('PacketProcessor:FromTab', 'Failed to generate audio from TTS service.', ttsResponse?.error);
@@ -884,11 +887,11 @@ export async function processDeletePacketImageRequest(data) {
 }
 
 export async function processRepublishRequest(data, initiatorTabId = null) {
-    const { instanceId, pageId } = data;
-    if (!instanceId || !pageId) return { success: false, error: "Instance ID and Page ID are required." };
+    const { instanceId, url } = data;
+    if (!instanceId || !url) return { success: false, error: "Instance ID and URL are required." };
 
-    logger.log('PacketProcessor:processRepublishRequest', `Republishing ${pageId} for instance ${instanceId}`);
-    sendProgressNotification('packet_instance_updated', { instance: { instanceId, status: 'republishing_page', pageId }});
+    logger.log('PacketProcessor:processRepublishRequest', `Republishing ${url} for instance ${instanceId}`);
+    sendProgressNotification('packet_instance_updated', { instance: { instanceId, status: 'republishing_page', url }});
 
 
     try {
@@ -899,52 +902,40 @@ export async function processRepublishRequest(data, initiatorTabId = null) {
         const packetImage = await storage.getPacketImage(instance.imageId);
         if (!packetImage) throw new Error(`Packet Image ${instance.imageId} not found.`);
 
-        const sourceContentItem = packetImage.sourceContent.find(item => item.origin === 'internal' && item.pageId === pageId);
-        if (!sourceContentItem) throw new Error(`Internal item ${pageId} not found in packet image.`);
+        const sourceContentItem = packetImage.sourceContent.find(item => item.lrl === url);
+        if (!sourceContentItem) throw new Error(`Internal item with LRL ${url} not found in packet image.`);
         
         if (!sourceContentItem.contentB64) {
-            throw new Error(`Cannot republish: Base64 content for ${pageId} not found in PacketImage.`);
+            throw new Error(`Cannot republish: Base64 content for ${url} not found in PacketImage.`);
         }
 
-        const decodedContent = base64Decode(sourceContentItem.contentB64);
-        const filesToUpload = [{ name: 'index.html', content: new TextDecoder().decode(decodedContent), contentType: sourceContentItem.contentType || 'text/html' }];
-
+        const decodedContent = new TextDecoder().decode(base64Decode(sourceContentItem.contentB64));
+        
         if (!(await cloudStorage.initialize())) {
              throw new Error("Cloud storage not initialized. Cannot republish.");
         }
 
-        const uploadResult = await cloudStorage.uploadPacketFiles(instanceId, pageId, filesToUpload, 'private');
+        const instanceItem = instance.contents.find(item => item.lrl === url);
+        if (!instanceItem) throw new Error(`Could not find published item in instance for LRL ${url}`);
+
+        const cloudPath = instanceItem.url;
+        const contentType = sourceContentItem.contentType || 'text/html';
+
+        const uploadResult = await cloudStorage.uploadFile(cloudPath, decodedContent, contentType, 'private');
         if (!uploadResult || !uploadResult.success) {
-            throw new Error(uploadResult.error || `Failed to republish ${pageId} to cloud.`);
+            throw new Error(uploadResult.error || `Failed to republish ${cloudPath} to cloud.`);
         }
-
-        const mainHtmlFileResult = uploadResult.files?.find(f => f.fileName && f.fileName.endsWith('index.html'));
-        const newS3Key = mainHtmlFileResult?.fileName || `packets/${instanceId}/${pageId}/index.html`;
-
-        let itemUpdated = false;
-        instance.contents = instance.contents.map(item => {
-            if (item.pageId === pageId && item.origin === 'internal') {
-                item.url = newS3Key;
-                item.published = true;
-                itemUpdated = true;
-            }
-            return item;
-        });
-
-        if (!itemUpdated) {
-             logger.warn('PacketProcessor:republish', `Internal item ${pageId} not found in instance ${instanceId} contents during update.`);
-        }
-
+        
         delete instance.status;
         await storage.savePacketInstance(instance);
         await ruleManager.addOrUpdatePacketRules(instance);
 
-        logger.log('PacketProcessor:republish', `${pageId} republished for instance ${instanceId}. New URL: ${newS3Key}`);
+        logger.log('PacketProcessor:republish', `${url} republished for instance ${instanceId}.`);
         sendProgressNotification('packet_instance_updated', { instance: instance, source: 'republish_complete' });
         return { success: true, instance: instance, message: `${sourceContentItem.title} republished.` };
 
     } catch (error) {
-        logger.error('PacketProcessor:republish', `Error republishing ${pageId} for ${instanceId}`, error);
+        logger.error('PacketProcessor:republish', `Error republishing ${url} for ${instanceId}`, error);
         const instanceWithError = await storage.getPacketInstance(instanceId);
         if (instanceWithError) {
             delete instanceWithError.status;
@@ -985,7 +976,8 @@ export async function processGenerateCustomPageRequest(data) {
             origin: 'internal',
             format: 'html',
             access: 'private',
-            pageId: `custom_${Date.now()}`,
+            lrl: `/pages/custom_${sanitizeForFileName(pageTitle)}_${Date.now()}.html`,
+            url: null,
             title: pageTitle,
             contentType: 'text/html',
             contentB64: contentB64,
@@ -1002,15 +994,16 @@ export async function processGenerateCustomPageRequest(data) {
 }
 
 export async function processImproveDraftAudio(data) {
-    const { draftId, mediaPageId } = data;
-    if (!draftId || !mediaPageId) {
-        return { success: false, error: "Missing draftId or mediaPageId for audio improvement." };
+    const { draftId, mediaUrl } = data;
+    if (!draftId || !mediaUrl) {
+        return { success: false, error: "Missing draftId or mediaUrl for audio improvement." };
     }
 
     try {
-        const audioContent = await indexedDbStorage.getGeneratedContent(draftId, mediaPageId);
+        const indexedDbKey = sanitizeForFileName(mediaUrl);
+        const audioContent = await indexedDbStorage.getGeneratedContent(draftId, indexedDbKey);
         if (!audioContent || audioContent.length === 0) {
-            throw new Error(`Audio content not found in IndexedDB for pageId: ${mediaPageId}`);
+            throw new Error(`Audio content not found in IndexedDB for url: ${mediaUrl}`);
         }
         
         const originalBlob = new Blob([audioContent[0].content], { type: audioContent[0].contentType });
@@ -1018,14 +1011,13 @@ export async function processImproveDraftAudio(data) {
         
         const updatedBuffer = await normalizedBlob.arrayBuffer();
 
-        // Overwrite the existing audio in IndexedDB with the improved version
-        await indexedDbStorage.saveGeneratedContent(draftId, mediaPageId, [{
-            name: 'audio.wav', // Saving as WAV as that's what our encoder produces
+        await indexedDbStorage.saveGeneratedContent(draftId, indexedDbKey, [{
+            name: 'audio.wav',
             content: updatedBuffer,
             contentType: 'audio/wav'
         }]);
 
-        logger.log("PacketProcessor:processImproveDraftAudio", "Successfully improved and saved audio.", { draftId, mediaPageId });
+        logger.log("PacketProcessor:processImproveDraftAudio", "Successfully improved and saved audio.", { draftId, mediaUrl });
         return { success: true };
 
     } catch (error) {
@@ -1048,7 +1040,8 @@ export async function publishImageForSharing(imageId) {
 
         for (const contentItem of imageForExport.sourceContent) {
             if (contentItem.format === 'audio') {
-                const mediaContent = await indexedDbStorage.getGeneratedContent(imageId, contentItem.pageId);
+                const indexedDbKey = sanitizeForFileName(contentItem.lrl);
+                const mediaContent = await indexedDbStorage.getGeneratedContent(imageId, indexedDbKey);
                 if (mediaContent && mediaContent[0] && mediaContent[0].content) {
                     contentItem.contentB64 = arrayBufferToBase64(mediaContent[0].content);
                 }

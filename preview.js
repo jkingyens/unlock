@@ -1,17 +1,16 @@
 // ext/preview.js
 document.addEventListener('DOMContentLoaded', () => {
     const params = new URLSearchParams(window.location.search);
-    const pageId = params.get('pageId');
+    const rlr = params.get('rlr'); // REFACTOR: Get 'rlr' instead of 'pageId'
 
-    if (!pageId) {
-        document.body.innerHTML = '<h1>Error: No pageId provided.</h1>';
+    if (!rlr) {
+        document.body.innerHTML = '<h1>Error: No resource locator provided.</h1>';
         return;
     }
 
-    // --- FIX START: Send message to background and handle direct response ---
     chrome.runtime.sendMessage({
         action: 'get_draft_item_for_preview',
-        data: { pageId: pageId }
+        data: { rlr: rlr } // REFACTOR: Send 'rlr' in the message
     }, (response) => {
         if (response && response.success) {
             const frame = document.getElementById('content-frame');

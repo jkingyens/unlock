@@ -28,7 +28,7 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
                         data: {
                             currentTime: audio.currentTime,
                             duration: audio.duration,
-                            pageId: audio.dataset.pageId
+                            url: audio.dataset.url // REFACTOR: Send url instead of pageId
                         }
                     });
                 }
@@ -46,7 +46,7 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
                     action: 'media_playback_complete',
                     data: {
                         instanceId: audio.dataset.instanceId,
-                        pageId: audio.dataset.pageId
+                        url: audio.dataset.url // REFACTOR: Send url instead of pageId
                     }
                 });
             }
@@ -58,7 +58,8 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
         const { command, data } = request;
         switch (command) {
             case 'play':
-                const needsSrcUpdate = audio.dataset.instanceId !== data.instanceId || audio.dataset.pageId !== data.pageId;
+                // REFACTOR: Check url instead of pageId
+                const needsSrcUpdate = audio.dataset.instanceId !== data.instanceId || audio.dataset.url !== data.url;
                 if (needsSrcUpdate) {
                     const audioBuffer = base64ToAb(data.audioB64);
                     const blob = new Blob([audioBuffer], { type: data.mimeType });
@@ -67,7 +68,8 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
                         URL.revokeObjectURL(audio.src);
                     }
                     audio.src = audioUrl;
-                    audio.dataset.pageId = data.pageId;
+                    // REFACTOR: Store url in dataset
+                    audio.dataset.url = data.url;
                     audio.dataset.instanceId = data.instanceId;
                     audio.addEventListener('loadedmetadata', () => {
                         if (data.startTime) audio.currentTime = data.startTime;
@@ -90,7 +92,8 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
                 }
                 audio.src = '';
                 audio.removeAttribute('src');
-                audio.dataset.pageId = '';
+                // REFACTOR: Clear url from dataset
+                audio.dataset.url = '';
                 audio.dataset.instanceId = '';
                 break;
             case 'toggle':
