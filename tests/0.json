@@ -8,7 +8,6 @@
       "format": "html",
       "access": "private",
       "lrl": "/pages/summary-page.html",
-      "url": null,
       "title": "Packet Summary (Does Not Grant Progress)",
       "context": "An overview of this test packet."
     },

@@ -433,14 +433,14 @@ const storage = {
 };
 
 const packetUtils = {
-    _updateCheckpointsOnVisit(instance, image) {
-        if (!image || !Array.isArray(image.checkpoints) || !Array.isArray(instance.checkpointsTripped)) {
+    _updateCheckpointsOnVisit(instance) {
+        if (!instance || !Array.isArray(instance.checkpoints) || !Array.isArray(instance.checkpointsTripped)) {
             return false;
         }
         let checkpointsModified = false;
         const visitedUrlsSet = new Set(instance.visitedUrls || []);
 
-        image.checkpoints.forEach((checkpoint, index) => {
+        instance.checkpoints.forEach((checkpoint, index) => {
             if (instance.checkpointsTripped[index] === 1) {
                 return;
             }
@@ -456,26 +456,22 @@ const packetUtils = {
         return checkpointsModified;
     },
 
-    calculateInstanceProgress(instance, image = null) {
+    calculateInstanceProgress(instance) {
         if (!instance) {
             return { visitedCount: 0, totalCount: 0, progressPercentage: 0 };
         }
-        // --- START OF FIX ---
-        // Use the sanitized 'checkpoints' array directly from the instance, not the original image.
-        if (Array.isArray(instance.checkpoints) && Array.isArray(instance.checkpointsTripped)) {
+        
+        if (Array.isArray(instance.checkpoints) && instance.checkpoints.length > 0 && Array.isArray(instance.checkpointsTripped)) {
             const totalCount = instance.checkpoints.length;
-        // --- END OF FIX ---
-            if (totalCount === 0) {
-                return { visitedCount: 0, totalCount: 0, progressPercentage: 100 };
-            }
-            // Count how many of the (now guaranteed to be valid) checkpoints have been tripped.
             const visitedCount = instance.checkpointsTripped.filter(c => c === 1).length;
+            const progressPercentage = totalCount > 0 ? Math.round((visitedCount / totalCount) * 100) : 0;
             return {
                 visitedCount,
                 totalCount,
-                progressPercentage: Math.round((visitedCount / totalCount) * 100)
+                progressPercentage
             };
         }
+
         if (!Array.isArray(instance.contents)) {
             return { visitedCount: 0, totalCount: 0, progressPercentage: 0 };
         }
@@ -494,12 +490,9 @@ const packetUtils = {
         };
     },
 
-    async isPacketInstanceCompleted(instance, image) {
+    async isPacketInstanceCompleted(instance) {
         if (!instance) return false;
-        if (!image) {
-            image = await storage.getPacketImage(instance.imageId);
-        }
-        const { progressPercentage } = this.calculateInstanceProgress(instance, image);
+        const { progressPercentage } = this.calculateInstanceProgress(instance);
         return progressPercentage >= 100;
     },
 
@@ -571,8 +564,7 @@ const packetUtils = {
             return { success: false, error: 'Packet instance not found' };
         }
 
-        const image = await storage.getPacketImage(instance.imageId);
-        const wasCompletedBefore = await this.isPacketInstanceCompleted(instance, image);
+        const wasCompletedBefore = await this.isPacketInstanceCompleted(instance);
         const foundItem = this.isUrlInPacket(url, instance, { returnItem: true });
 
         if (!foundItem) {
@@ -588,9 +580,9 @@ const packetUtils = {
         
         instance.visitedUrls = [...(instance.visitedUrls || []), canonicalUrl];
         
-        this._updateCheckpointsOnVisit(instance, image);
+        this._updateCheckpointsOnVisit(instance);
         
-        const justCompleted = !wasCompletedBefore && await this.isPacketInstanceCompleted(instance, image);
+        const justCompleted = !wasCompletedBefore && await this.isPacketInstanceCompleted(instance);
         
         return { success: true, modified: true, instance, justCompleted };
     },

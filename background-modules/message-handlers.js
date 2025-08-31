@@ -236,8 +236,11 @@ async function handleMarkUrlVisited(data, sendResponse) {
      const { packetId: instanceId, url } = data;
      if (!instanceId || !url) return sendResponse({ success: false, error: 'Missing instanceId or url' });
      try {
-          const result = await packetUtils.markUrlAsVisited(instance.instanceId, url);
+          const instance = await storage.getPacketInstance(instanceId);
+          if (!instance) return sendResponse({ success: false, error: 'Instance not found.' });
+          const result = await packetUtils.markUrlAsVisited(instance, url);
           if (result.success && !result.alreadyVisited && !result.notTrackable) {
+               await storage.savePacketInstance(result.instance);
                try { chrome.runtime.sendMessage({ action: 'url_visited', data: { packetId: instanceId, url } }); } catch (e) { /* ignore */ }
           }
           sendResponse({ success: result.success, error: result.error });
@@ -295,9 +298,9 @@ async function handlePlaybackActionRequest(data, sender, sendResponse) {
                 if (!mediaItem) throw new Error(`Could not find audio track with url ${url} in packet.`);
                 
                 const indexedDbKey = sanitizeForFileName(lrl);
-                const cachedAudio = await indexedDbStorage.getGeneratedContent(instance.imageId, indexedDbKey);
+                const cachedAudio = await indexedDbStorage.getGeneratedContent(instance.instanceId, indexedDbKey);
                 if (!cachedAudio || !cachedAudio[0]?.content) {
-                    throw new Error("Could not find cached audio data in IndexedDB.");
+                    throw new Error("Could not find cached audio data in IndexedDB for instance.");
                 }
 
                 const audioB64 = arrayBufferToBase64(cachedAudio[0].content);
@@ -405,7 +408,6 @@ const actionHandlers = {
         activeMediaPlayback.duration = data.duration;
 
         const instance = activeMediaPlayback.instance;
-        const image = await storage.getPacketImage(instance.imageId);
         let animateMomentMention = false;
         
         if (Array.isArray(instance.moments)) {
@@ -416,12 +418,10 @@ const actionHandlers = {
                     data.currentTime >= moment.timestamp &&
                     instance.momentsTripped[index] === 0) {
                     
-                    // --- START OF LOGGING ---
                     logger.log('MomentLogger:Media', `Tripping Moment #${index} for instance ${instance.instanceId}`, { 
                         currentTime: data.currentTime, 
                         requiredTimestamp: moment.timestamp 
                     });
-                    // --- END OF LOGGING ---
 
                     instance.momentsTripped[index] = 1;
                     momentTripped = true;
@@ -450,9 +450,12 @@ const actionHandlers = {
             mediaItem.currentTime = data.currentTime;
             mediaItem.duration = data.duration;
         }
-        debouncedSaveInstance(instance);
-
+        
         await notifyUIsOfStateChange({ animateMomentMention });
+       
+        if (animateMomentMention) {
+            activeMediaPlayback.lastTrippedMoment = null;
+        }
     },
     'overlay_setting_updated': async (data, sender, sendResponse) => {
         await notifyUIsOfStateChange();
@@ -554,10 +557,11 @@ const actionHandlers = {
             return sendResponse({ success: false, error: 'Missing active instance or URL.' });
         }
         try {
-            await setMediaPlaybackState({}, { animate: false, source: 'overlay_link_click' });
             const instance = await storage.getPacketInstance(instanceId);
-            if (!instance) { throw new Error(`Instance ${instanceId} not found.`); }
-            await handleOpenContent({ instance, url }, sender, sendResponse);
+            if (!instance) {
+                throw new Error(`Instance ${instanceId} not found.`);
+            }
+            return handleOpenContent({ instance, url }, sender, sendResponse);
         } catch (error) {
             logger.error('MessageHandler:open_content_from_overlay', 'Error opening content', error);
             sendResponse({ success: false, error: error.message });
@@ -571,7 +575,8 @@ const actionHandlers = {
     'page_interaction_complete': async (data, sender, sendResponse) => {
         const context = await getPacketContext(sender.tab.id);
         if (context?.instanceId && context?.canonicalPacketUrl) {
-            const visitResult = await packetUtils.markUrlAsVisited(context.instanceId, context.canonicalPacketUrl);
+            const instance = await storage.getPacketInstance(context.instanceId);
+            const visitResult = await packetUtils.markUrlAsVisited(instance, context.canonicalPacketUrl);
             if (visitResult.success && visitResult.modified) {
                 await storage.savePacketInstance(visitResult.instance);
                 sidebarHandler.notifySidebar('packet_instance_updated', { instance: visitResult.instance });

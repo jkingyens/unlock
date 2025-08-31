@@ -165,7 +165,6 @@ export async function generateDraftPacketFromTab(initiatorTabId) {
             format: 'html',
             access: 'private',
             lrl: `/pages/summary.html`,
-            url: null,
             title: `${title} Summary`,
             contentType: "text/html"
             // No revealedBy property - visible by default
@@ -236,7 +235,6 @@ export async function generateDraftPacketFromTab(initiatorTabId) {
                 format: 'audio',
                 access: 'private',
                 lrl: `/media/summary-audio.mp3`,
-                url: null,
                 title: `${title} Audio Summary`,
                 mimeType: normalizedAudioBlob.type,
                 // No revealedBy property - visible by default
@@ -455,55 +453,55 @@ export async function instantiatePacket(imageId, preGeneratedInstanceId, initiat
             contents: JSON.parse(JSON.stringify(packetImage.sourceContent)),
             visitedUrls: [],
             momentsTripped: [],
+            moments: JSON.parse(JSON.stringify(packetImage.moments || [])),
+            checkpoints: JSON.parse(JSON.stringify(packetImage.checkpoints || []))
         };
         
-        const originalMoments = packetImage.moments || [];
-        const originalCheckpoints = packetImage.checkpoints || [];
+        const originalMoments = packetInstance.moments;
+        const originalCheckpoints = packetInstance.checkpoints;
         
-        const usedMomentIndices = new Set();
-        packetInstance.contents.forEach(item => {
-            if (Array.isArray(item.revealedByMoments)) {
-                item.revealedByMoments.forEach(index => {
-                    if (index >= 0 && index < originalMoments.length) {
-                        usedMomentIndices.add(index);
-                    }
-                });
-            }
-        });
+        if (originalMoments && originalMoments.length > 0) {
+            const usedMomentIndices = new Set();
+            packetInstance.contents.forEach(item => {
+                if (Array.isArray(item.revealedByMoments)) {
+                    item.revealedByMoments.forEach(index => {
+                        if (index >= 0 && index < originalMoments.length) {
+                            usedMomentIndices.add(index);
+                        }
+                    });
+                }
+            });
 
-        const validMoments = [];
-        const momentIndexMap = new Map();
-        originalMoments.forEach((moment, oldIndex) => {
-            if (usedMomentIndices.has(oldIndex)) {
-                const newIndex = validMoments.length;
-                momentIndexMap.set(oldIndex, newIndex);
-                validMoments.push(moment);
-            }
-        });
+            const validMoments = [];
+            const momentIndexMap = new Map();
+            originalMoments.forEach((moment, oldIndex) => {
+                if (usedMomentIndices.has(oldIndex)) {
+                    const newIndex = validMoments.length;
+                    momentIndexMap.set(oldIndex, newIndex);
+                    validMoments.push(moment);
+                }
+            });
 
-        packetInstance.contents.forEach(item => {
-            if (Array.isArray(item.revealedByMoments)) {
-                item.revealedByMoments = item.revealedByMoments
-                    .map(oldIndex => momentIndexMap.get(oldIndex))
-                    .filter(newIndex => newIndex !== undefined);
-            }
-        });
+            packetInstance.contents.forEach(item => {
+                if (Array.isArray(item.revealedByMoments)) {
+                    item.revealedByMoments = item.revealedByMoments
+                        .map(oldIndex => momentIndexMap.get(oldIndex))
+                        .filter(newIndex => newIndex !== undefined);
+                }
+            });
+            packetInstance.moments = validMoments;
+            packetInstance.momentsTripped = Array(validMoments.length).fill(0);
+        }
+        
+        if (originalCheckpoints && originalCheckpoints.length > 0) {
+            const allContentUrls = new Set(packetInstance.contents.map(item => item.url).filter(Boolean));
+            const validCheckpoints = originalCheckpoints.filter(checkpoint =>
+                checkpoint.requiredItems.every(req => allContentUrls.has(req.url))
+            );
+            packetInstance.checkpoints = validCheckpoints;
+            packetInstance.checkpointsTripped = Array(validCheckpoints.length).fill(0);
+        }
 
-        const allContentUrls = new Set(packetInstance.contents.map(item => item.url).filter(Boolean));
-        const validCheckpoints = originalCheckpoints.filter(checkpoint =>
-            checkpoint.requiredItems.every(req => allContentUrls.has(req.url))
-        );
-
-        packetInstance.momentsTripped = Array(validMoments.length).fill(0);
-        packetInstance.checkpointsTripped = Array(validCheckpoints.length).fill(0);
-
-        packetInstance.moments = validMoments;
-        packetInstance.checkpoints = validCheckpoints;
-
-        logger.log('PacketProcessor:instantiate', 'Packet sanitized.', {
-            originalMomentCount: originalMoments.length,
-            validMomentCount: validMoments.length,
-        });
 
         const imageContentMap = new Map(packetImage.sourceContent.map(item => [item.lrl, item]));
 
@@ -549,6 +547,10 @@ export async function instantiatePacket(imageId, preGeneratedInstanceId, initiat
                     }
                     contentToUpload = mediaContent[0].content;
                     contentType = originalImageItem.mimeType;
+                    
+                    const instanceSpecificKey = sanitizeForFileName(lrl);
+                    await indexedDbStorage.saveGeneratedContent(instanceId, instanceSpecificKey, mediaContent);
+                    logger.log('PacketProcessor:instantiate', `Copied IndexedDB media for instance: ${instanceId}`, { lrl });
                 }
 
                 const uploadResult = await cloudStorage.uploadFile(cloudPath, contentToUpload, contentType, 'private');
@@ -556,12 +558,9 @@ export async function instantiatePacket(imageId, preGeneratedInstanceId, initiat
                 if (uploadResult.success) {
                     item.url = uploadResult.fileName;
                     item.published = true;
-                    // --- START OF FIX ---
-                    // Add a defensive check to ensure activeCloudConfig is valid before use.
                     if (!activeCloudConfig || !activeCloudConfig.id) {
                         throw new Error("Cloud configuration became invalid during the publishing process.");
                     }
-                    // --- END OF FIX ---
                     item.publishContext = {
                         storageConfigId: activeCloudConfig.id,
                         provider: activeCloudConfig.provider,
@@ -745,7 +744,6 @@ export async function processCreatePacketRequest(data, initiatorTabId) {
             format: 'html',
             access: 'private',
             lrl: "/pages/summary.html",
-            url: null,
             title: `${title} Summary`,
             contentType: "text/html"
         };
@@ -856,7 +854,6 @@ export async function processCreatePacketRequestFromTab(initiatorTabId) {
             format: 'html',
             access: 'private',
             lrl: `/pages/summary.html`,
-            url: null,
             title: `${title} Summary`,
             contentType: "text/html"
         };
@@ -889,7 +886,6 @@ export async function processCreatePacketRequestFromTab(initiatorTabId) {
                 format: 'audio',
                 access: 'private',
                 lrl: `/media/summary-audio.mp3`,
-                url: null,
                 title: `${title} Audio Summary`,
                 mimeType: normalizedAudioBlob.type,
             };
@@ -1091,7 +1087,6 @@ export async function processGenerateCustomPageRequest(data) {
             format: 'html',
             access: 'private',
             lrl: `/pages/custom_${sanitizeForFileName(pageTitle)}_${Date.now()}.html`,
-            url: null,
             title: pageTitle,
             contentType: 'text/html',
             contentB64: contentB64,

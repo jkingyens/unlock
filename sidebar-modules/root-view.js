@@ -130,23 +130,21 @@ export async function displayRootNavigation() {
             renderOrUpdateImageStencil(stencilData);
         });
         
-        const instancesWithImages = instances.map(inst => ({ inst, img: imagesMap[inst.imageId] })).filter(item => item.img);
-
         const inProgressItems = [];
         const completedItems = [];
 
-        for (const { inst, img } of instancesWithImages) {
+        for (const inst of instances) {
             if (inst.status !== 'creating') {
-                if (await packetUtils.isPacketInstanceCompleted(inst, img)) {
-                    completedItems.push({ inst, img });
+                if (await packetUtils.isPacketInstanceCompleted(inst)) {
+                    completedItems.push(inst);
                 } else {
-                    inProgressItems.push({ inst, img });
+                    inProgressItems.push(inst);
                 }
             }
         }
         
-        renderInstanceList(inProgressItems.sort((a,b) => sortFn(a.inst, b.inst)), domRefs.inProgressList, "No packets Started.");
-        renderInstanceList(completedItems.sort((a,b) => sortFn(a.inst, b.inst)), domRefs.completedList, "No completed packets yet.");
+        renderInstanceList(inProgressItems.sort(sortFn), domRefs.inProgressList, "No packets Started.");
+        renderInstanceList(completedItems.sort(sortFn), domRefs.completedList, "No completed packets yet.");
 
         updateActionButtonsVisibility();
     } catch (error) {
@@ -173,14 +171,14 @@ function renderImageList(images) {
     }
 }
 
-function renderInstanceList(items, listElement, emptyMessage) {
+function renderInstanceList(instances, listElement, emptyMessage) {
     listElement.innerHTML = '';
-    if (items.length === 0) {
+    if (instances.length === 0) {
         checkAndRenderEmptyState(listElement, emptyMessage);
     } else {
         const frag = document.createDocumentFragment();
-        items.forEach(({ inst, img }) => {
-            const row = createInstanceRow(inst, img);
+        instances.forEach(inst => {
+            const row = createInstanceRow(inst);
             row.dataset.created = inst.created || inst.instantiated || new Date(0).toISOString();
             frag.appendChild(row);
         });
@@ -201,7 +199,7 @@ function createImageRow(image) {
     return row;
 }
 
-function createInstanceRow(instance, image) {
+function createInstanceRow(instance) {
     const row = document.createElement('tr');
     row.dataset.instanceId = instance.instanceId;
 
@@ -209,7 +207,7 @@ function createInstanceRow(instance, image) {
     let progressPercentage = 0, progressBarTitle = '';
     
     if (!isStencil) {
-        const progressData = packetUtils.calculateInstanceProgress(instance, image);
+        const progressData = packetUtils.calculateInstanceProgress(instance);
         progressPercentage = progressData.progressPercentage;
         progressBarTitle = `${progressData.visitedCount}/${progressData.totalCount} - ${progressPercentage}% Complete`;
     }
@@ -258,14 +256,7 @@ function createInstanceRow(instance, image) {
 }
 
 export async function updateInstanceRowUI(instance) {
-    const image = await storage.getPacketImage(instance.imageId);
-    if (!image) {
-        logger.warn('RootView:updateInstanceRowUI', 'Could not find image for instance, removing row.', { instanceId: instance.instanceId });
-        removeInstanceRow(instance.instanceId);
-        return;
-    }
-    
-    const isCompleted = await packetUtils.isPacketInstanceCompleted(instance, image);
+    const isCompleted = await packetUtils.isPacketInstanceCompleted(instance);
     const targetList = isCompleted ? domRefs.completedList : domRefs.inProgressList;
 
     let sourceList = null;
@@ -278,7 +269,7 @@ export async function updateInstanceRowUI(instance) {
     if (!targetList) return;
 
     const existingRow = sourceList?.querySelector(`tr[data-instance-id="${instance.instanceId}"]`);
-    const newRow = createInstanceRow(instance, image);
+    const newRow = createInstanceRow(instance);
     newRow.dataset.created = instance.created || instance.instantiated || new Date(0).toISOString();
     
     if (existingRow) {
@@ -375,7 +366,7 @@ async function handleStartPacket(imageId) {
 
         let incompleteInstance = null;
         for (const inst of instancesForImage) {
-            if (!(await packetUtils.isPacketInstanceCompleted(inst, image))) {
+            if (!(await packetUtils.isPacketInstanceCompleted(inst))) {
                 incompleteInstance = inst;
                 break;
             }
