@@ -26,7 +26,7 @@ function createTabGroupHelper(tabId, instance) {
             } else {
                 const identifier = getIdentifierForGroupTitle(instance.instanceId);
                 const groupTitle = `${GROUP_TITLE_PREFIX}${identifier}`;
-                const groupColor = packetUtils.getColorForTopic(instance.topic);
+                const groupColor = packetUtils.getColorForTopic(instance.title);
                 chrome.tabGroups.update(groupId, { title: groupTitle, color: groupColor }, () => {
                     if (chrome.runtime.lastError) {
                          logger.warn('TabGroupHandler:createTabGroupHelper', 'Error updating new group', chrome.runtime.lastError);
@@ -345,14 +345,18 @@ export async function syncDraftGroup(desiredUrls) {
     }
     
     try {
+        const window = await chrome.windows.getLastFocused({ populate: false, windowTypes: ['normal'] });
+        if (!window) {
+            throw new Error("Could not find a normal window to sync the draft group.");
+        }
+        const targetWindowId = window.id;
+
         let [draftGroup] = await chrome.tabGroups.query({ title: DRAFT_GROUP_TITLE });
         let groupId = draftGroup ? draftGroup.id : null;
 
-        // Fetch the list of tabs in the group ONCE.
         const tabsInGroup = groupId ? await chrome.tabs.query({ groupId }) : [];
         const currentUrlsInGroup = new Set(tabsInGroup.map(t => t.url));
 
-        // Clean up any tabs that are no longer in the draft list
         if (groupId) {
             const tabsToClose = tabsInGroup.filter(tab => !desiredUrls.includes(tab.url));
             if (tabsToClose.length > 0) {
@@ -363,22 +367,19 @@ export async function syncDraftGroup(desiredUrls) {
         const urlsToHandle = desiredUrls.filter(url => !currentUrlsInGroup.has(url));
 
         if (urlsToHandle.length > 0 && !groupId) {
-            // Group doesn't exist, create it with the first new tab
-            const firstUrl = urlsToHandle.shift(); // Take the first URL off the list
-            const firstTab = await chrome.tabs.create({ url: firstUrl, active: false });
+            const firstUrl = urlsToHandle.shift();
+            const firstTab = await chrome.tabs.create({ url: firstUrl, active: false, windowId: targetWindowId });
             groupId = await chrome.tabs.group({ tabIds: [firstTab.id] });
             await chrome.tabGroups.update(groupId, { title: DRAFT_GROUP_TITLE, color: 'grey' });
         }
 
-        // Add any remaining new tabs to the now-guaranteed-to-exist group
         if (groupId) {
             for (const url of urlsToHandle) {
-                const newTab = await chrome.tabs.create({ url, active: false });
+                const newTab = await chrome.tabs.create({ url, active: false, windowId: targetWindowId });
                 await chrome.tabs.group({ tabIds: [newTab.id], groupId });
             }
         }
         
-        // Final ordering pass
         if (groupId) {
             try {
                 await orderDraftTabsInGroup(groupId);

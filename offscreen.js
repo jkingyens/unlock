@@ -28,7 +28,7 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
                         data: {
                             currentTime: audio.currentTime,
                             duration: audio.duration,
-                            url: audio.dataset.url // REFACTOR: Send url instead of pageId
+                            url: audio.dataset.url
                         }
                     });
                 }
@@ -46,7 +46,7 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
                     action: 'media_playback_complete',
                     data: {
                         instanceId: audio.dataset.instanceId,
-                        url: audio.dataset.url // REFACTOR: Send url instead of pageId
+                        url: audio.dataset.url
                     }
                 });
             }
@@ -58,7 +58,6 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
         const { command, data } = request;
         switch (command) {
             case 'play':
-                // REFACTOR: Check url instead of pageId
                 const needsSrcUpdate = audio.dataset.instanceId !== data.instanceId || audio.dataset.url !== data.url;
                 if (needsSrcUpdate) {
                     const audioBuffer = base64ToAb(data.audioB64);
@@ -68,7 +67,6 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
                         URL.revokeObjectURL(audio.src);
                     }
                     audio.src = audioUrl;
-                    // REFACTOR: Store url in dataset
                     audio.dataset.url = data.url;
                     audio.dataset.instanceId = data.instanceId;
                     audio.addEventListener('loadedmetadata', () => {
@@ -92,7 +90,6 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
                 }
                 audio.src = '';
                 audio.removeAttribute('src');
-                // REFACTOR: Clear url from dataset
                 audio.dataset.url = '';
                 audio.dataset.instanceId = '';
                 break;
@@ -180,13 +177,62 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
     function handleMessages(request, sender, sendResponse) {
         if (!chrome.runtime?.id) {
             console.warn("Offscreen document context invalidated. Ignoring message.", request.type);
-            // Do not return true here, as we cannot send a response.
             return false;
         }
 
         if (request.target !== 'offscreen') return false;
 
         switch (request.type) {
+        case 'parse-html-for-tts-and-links':
+                try {
+                    const parser = new DOMParser();
+                    const doc = parser.parseFromString(request.data.html, 'text/html');
+                    
+                    const context = {
+                        plainText: '',
+                        linkMappings: []
+                    };
+
+                    // --- START OF FIX: Replaced TreeWalker with a robust recursive parser ---
+                    function processNode(node) {
+                        if (node.nodeType === Node.TEXT_NODE) {
+                            // Append text content, normalizing whitespace
+                            context.plainText += node.textContent.replace(/\s+/g, ' ').trim() + ' ';
+                        } else if (node.nodeType === Node.ELEMENT_NODE) {
+                            // If it's a link, record its position BEFORE processing its children
+                            if (node.tagName === 'A' && node.hasAttribute('data-timestampable')) {
+                                const href = node.getAttribute('href');
+                                if (href && !context.linkMappings.some(m => m.href === href)) {
+                                    context.linkMappings.push({
+                                        href: href,
+                                        text: node.textContent.trim(),
+                                        charIndex: context.plainText.length
+                                    });
+                                }
+                            }
+                            
+                            // Recursively process child nodes
+                            node.childNodes.forEach(processNode);
+
+                            // Add a newline for block-level elements to simulate paragraph breaks
+                            const blockElements = ['P', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'DIV', 'LI'];
+                            if (blockElements.includes(node.tagName)) {
+                                context.plainText += '\n';
+                            }
+                        }
+                    }
+
+                    processNode(doc.body);
+                    // --- END OF FIX ---
+
+                    // Clean up extra whitespace for the final result
+                    context.plainText = context.plainText.replace(/\s+/g, ' ').trim();
+
+                    sendResponse({ success: true, data: { plainText: context.plainText, linkMappings: context.linkMappings } });
+                } catch (error) {
+                    sendResponse({ success: false, error: error.message });
+                }
+                return false; // Synchronous response
             case 'control-audio':
                 sendResponse(handleAudioControl(request.data));
                 return false; 
@@ -219,6 +265,27 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
                         const processedBase64 = btoa(new Uint8Array(processedBuffer).reduce((data, byte) => data + String.fromCharCode(byte), ''));
                         sendResponse({ success: true, data: { base64: processedBase64, type: 'audio/wav' } });
                     }).catch(error => sendResponse({ success: false, error: error.message }));
+                } else {
+                    sendResponse({ success: false, error: 'No audio data provided.' });
+                }
+                return true;
+            case 'get-audio-duration':
+                if (request.data && request.data.base64) {
+                    try {
+                        const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                        const audioBuffer = base64ToAb(request.data.base64);
+                        
+                        audioContext.decodeAudioData(audioBuffer)
+                            .then(decodedData => {
+                                sendResponse({ success: true, duration: decodedData.duration });
+                            })
+                            .catch(e => {
+                                console.error('[Offscreen] Audio decoding failed:', e);
+                                sendResponse({ success: false, error: 'Audio decoding failed.' });
+                            });
+                    } catch (e) {
+                        sendResponse({ success: false, error: e.message });
+                    }
                 } else {
                     sendResponse({ success: false, error: 'No audio data provided.' });
                 }

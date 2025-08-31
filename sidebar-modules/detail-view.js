@@ -161,9 +161,6 @@ async function redrawAllVisibleWaveforms(playbackState = {}) {
     const mediaCards = domRefs.packetDetailView.querySelectorAll('.card.media');
     if (mediaCards.length === 0) return;
     
-    const image = await storage.getPacketImage(currentDetailInstance.imageId);
-    if (!image) return;
-
     const settings = await storage.getSettings();
     const colorOptions = {
         accentColor: getComputedStyle(domRefs.packetDetailView).getPropertyValue('--packet-color-accent').trim(),
@@ -196,7 +193,11 @@ async function redrawAllVisibleWaveforms(playbackState = {}) {
                 audioSampleRate: sampleRate
             });
 
-            const relevantMoments = (image.moments || []).filter(m => m.sourceUrl === lrl);
+            // --- THE FIX ---
+            // This now uses the sanitized 'moments' array directly from the instance object,
+            // which was cleaned during instantiation, ensuring no markers are drawn for deleted items.
+            const relevantMoments = (currentDetailInstance.moments || []).filter(m => m.sourceUrl === lrl);
+            
             drawLinkMarkers(markerContainer, {
                 ...colorOptions,
                 moments: relevantMoments,
@@ -234,18 +235,7 @@ export async function displayPacketContent(instance, image, browserState, canoni
         const { progressPercentage, visitedCount, totalCount } = packetUtils.calculateInstanceProgress(instance, image);
 
         if (isAlreadyRendered) {
-            const visitedUrlsSet = new Set(instance.visitedUrls || []);
-
-            container.querySelectorAll('.card').forEach(card => {
-                const isVisited = card.dataset.url && visitedUrlsSet.has(card.dataset.url);
-                card.classList.toggle('visited', isVisited);
-                
-                const momentIndices = card.dataset.momentIndices ? JSON.parse(card.dataset.momentIndices) : [];
-                if (momentIndices.length > 0) {
-                    const isRevealed = momentIndices.some(index => instance.momentsTripped[index] === 1);
-                    card.classList.toggle('hidden-by-rule', !isRevealed);
-                }
-            });
+            updateCardVisibility(instance);
             updateActiveCardHighlight(canonicalPacketUrl);
             
             const progressBar = domRefs.detailProgressContainer?.querySelector('.progress-bar');
@@ -263,7 +253,7 @@ export async function displayPacketContent(instance, image, browserState, canoni
             await redrawAllVisibleWaveforms(currentState);
 
         } else {
-            const colorName = packetUtils.getColorForTopic(instance.topic);
+            const colorName = packetUtils.getColorForTopic(instance.title);
             const colors = { grey: { accent: '#90a4ae', progress: '#546e7a', link: '#FFFFFF' }, blue: { accent: '#64b5f6', progress: '#1976d2', link: '#FFFFFF' }, red: { accent: '#e57373', progress: '#d32f2f', link: '#FFFFFF' }, yellow: { accent: '#fff176', progress: '#fbc02d', link: '#000000' }, green: { accent: '#81c784', progress: '#388e3c', link: '#FFFFFF' }, pink: { accent: '#f06292', progress: '#c2185b', link: '#FFFFFF' }, purple: { accent: '#ba68c8', progress: '#7b1fa2', link: '#FFFFFF' }, cyan: { accent: '#4dd0e1', progress: '#0097a7', link: '#FFFFFF' }, orange: { accent: '#ffb74d', progress: '#f57c00', link: '#FFFFFF' } }[colorName] || { accent: '#90a4ae', progress: '#546e7a', link: '#FFFFFF' };
 
             container.style.setProperty('--packet-color-accent', colors.accent);
@@ -322,6 +312,39 @@ export async function displayPacketContent(instance, image, browserState, canoni
         isDisplayingPacketContent = false;
         processQueuedDisplayRequest();
     }
+}
+
+/**
+ * A lightweight function to update only the visibility and visited status of cards.
+ * Avoids a full re-render.
+ * @param {object} instance - The latest packet instance data.
+ */
+export function updateCardVisibility(instance) {
+    if (!domRefs.detailCardsContainer) return;
+    
+    currentDetailInstance = instance; // Ensure the view's state is up-to-date
+    const visitedUrlsSet = new Set(instance.visitedUrls || []);
+
+    domRefs.detailCardsContainer.querySelectorAll('.card').forEach(card => {
+        const cardUrl = card.dataset.url;
+        const isVisited = cardUrl && visitedUrlsSet.has(cardUrl);
+        card.classList.toggle('visited', isVisited);
+
+        const momentIndices = card.dataset.momentIndices ? JSON.parse(card.dataset.momentIndices) : [];
+        if (momentIndices.length > 0) {
+            const isRevealed = momentIndices.some(index => instance.momentsTripped && instance.momentsTripped[index] === 1);
+            
+            const wasHidden = card.classList.contains('hidden-by-rule');
+            if (isRevealed && wasHidden) {
+                logger.log('CardLogger:Reveal', `Revealing card: "${card.querySelector('.card-title')?.textContent.trim()}"`, {
+                    momentIndices: momentIndices,
+                    momentsTrippedState: instance.momentsTripped
+                });
+            }
+            
+            card.classList.toggle('hidden-by-rule', !isRevealed);
+        }
+    });
 }
 
 
@@ -396,7 +419,7 @@ async function createContentCard(contentItem, instance, image) {
 
     const card = document.createElement('div');
     card.className = 'card';
-    const { url, lrl, title = 'Untitled', relevance = '', format, origin } = contentItem;
+    const { url, lrl, title = 'Untitled', context = '', format, origin } = contentItem;
 
     if (url) card.dataset.url = url;
     if (lrl) card.dataset.lrl = lrl;
@@ -411,7 +434,7 @@ async function createContentCard(contentItem, instance, image) {
         } else {
             displayUrl = contentItem.published ? title : '(Not Published)';
         }
-        card.innerHTML = `<div class="card-icon">${iconHTML}</div><div class="card-text"><div class="card-title">${title}</div><div class="card-url">${displayUrl}</div>${relevance ? `<div class="card-relevance">${relevance}</div>` : ''}</div>`;
+        card.innerHTML = `<div class="card-icon">${iconHTML}</div><div class="card-text"><div class="card-title">${title}</div><div class="card-url">${displayUrl}</div>${context ? `<div class="card-relevance">${context}</div>` : ''}</div>`;
     } else if (format === 'audio') {
         card.classList.add('media');
         card.innerHTML = `
@@ -432,14 +455,19 @@ async function createContentCard(contentItem, instance, image) {
         card.classList.add('visited');
     }
     
-    const imageItem = image.sourceContent.find(item => item.lrl === lrl) || contentItem;
+    const imageItem = image.sourceContent.find(item => {
+        if (origin === 'external') {
+            return item.url === url;
+        } else { // 'internal'
+            return item.lrl === lrl;
+        }
+    }) || contentItem;
     if (!imageItem) {
         logger.error("DetailView", "Could not find matching image item for instance item", { contentItem });
         return card; // Return a partially rendered card to prevent a crash
     }
     
-    const momentIndices = Array.isArray(imageItem.revealedByMoments) ? imageItem.revealedByMoments :
-                          (typeof imageItem.revealedByMoment === 'number' ? [imageItem.revealedByMoment] : []);
+    const momentIndices = Array.isArray(contentItem.revealedByMoments) ? contentItem.revealedByMoments : [];
 
     if (momentIndices.length > 0) {
         card.dataset.momentIndices = JSON.stringify(momentIndices);

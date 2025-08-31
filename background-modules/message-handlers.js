@@ -311,7 +311,7 @@ async function handlePlaybackActionRequest(data, sender, sendResponse) {
                     url: url,
                     lrl: lrl,
                     instanceId: instanceId,
-                    topic: instance.topic,
+                    title: instance.title,
                     tabId: activeTab ? activeTab.id : null,
                     currentTime: startTime,
                     duration: mediaItem.duration || 0,
@@ -408,14 +408,21 @@ const actionHandlers = {
         const image = await storage.getPacketImage(instance.imageId);
         let animateMomentMention = false;
         
-        if (image && Array.isArray(image.moments)) {
+        if (Array.isArray(instance.moments)) {
             let momentTripped = false;
-            image.moments.forEach((moment, index) => {
+            instance.moments.forEach((moment, index) => {
                 if (moment.type === 'mediaTimestamp' && 
                     moment.sourceUrl === activeMediaPlayback.lrl &&
                     data.currentTime >= moment.timestamp &&
                     instance.momentsTripped[index] === 0) {
                     
+                    // --- START OF LOGGING ---
+                    logger.log('MomentLogger:Media', `Tripping Moment #${index} for instance ${instance.instanceId}`, { 
+                        currentTime: data.currentTime, 
+                        requiredTimestamp: moment.timestamp 
+                    });
+                    // --- END OF LOGGING ---
+
                     instance.momentsTripped[index] = 1;
                     momentTripped = true;
                     
@@ -431,12 +438,6 @@ const actionHandlers = {
                         };
                         animateMomentMention = true;
                     }
-                    
-                    sidebarHandler.notifySidebar('moment_tripped', { 
-                        instanceId: instance.instanceId, 
-                        instance: instance,
-                        mentionedItemId: revealedItem ? (revealedItem.url) : null
-                    });
                 }
             });
             if (momentTripped) {
@@ -589,7 +590,11 @@ const actionHandlers = {
         storage.setSession({ [PENDING_VIEW_KEY]: data }).then(success => sendResponse({ success }));
     },
     'publish_image_for_sharing': (data, sender, sendResponse) => publishImageForSharing(data.imageId).then(sendResponse),
-    'import_image_from_url': (data, sender, sendResponse) => importImageFromUrl(data.url).then(sendResponse)
+    'import_image_from_url': (data, sender, sendResponse) => importImageFromUrl(data.url).then(sendResponse),
+    'debug_dump_idb': (data, sender, sendResponse) => {
+        indexedDbStorage.debugDumpIndexedDb();
+        sendResponse({ success: true });
+    }
 };
 
 export function handleMessage(message, sender, sendResponse) {

@@ -100,7 +100,7 @@ export async function prepareCreateView(imageToEdit = null) {
     } else {
         isEditing = false;
         const draftId = `draft_${Date.now()}`;
-        draftPacket = { id: draftId, topic: '', sourceContent: [], moments: [] };
+        draftPacket = { id: draftId, title: '', sourceContent: [], moments: [] };
         domRefs.createViewSaveBtn.textContent = 'Save';
     }
     
@@ -264,33 +264,40 @@ function isDraftDirty() {
 async function toggleDraftAudioPlayback(item, card) {
     const iconElement = card.querySelector('.card-icon');
 
-    if (draftActiveAudio && draftActiveAudio.dataset.url === item.url && !draftActiveAudio.paused) {
-        draftActiveAudio.pause();
-        return;
+    // --- START OF FIX ---
+    // Check if the clicked item is the currently active one.
+    if (draftActiveAudio && draftActiveAudio.dataset.lrl === item.lrl) {
+        if (draftActiveAudio.paused) {
+            draftActiveAudio.play();
+        } else {
+            draftActiveAudio.pause();
+        }
+        return; // Action is complete, exit the function.
     }
+    // --- END OF FIX ---
 
+    // If another audio is playing, stop it first.
     if (draftActiveAudio) {
         draftActiveAudio.pause();
-        const oldCard = document.querySelector(`.card.media[data-url="${draftActiveAudio.dataset.url}"]`);
+        const oldCard = document.querySelector(`.card.media[data-lrl="${draftActiveAudio.dataset.lrl}"]`);
         if (oldCard) {
             oldCard.querySelector('.card-icon').textContent = '▶️';
         }
     }
 
     try {
-        // REFACTOR: Use the LRL to create the IndexedDB key
-        const indexedDbKey = sanitizeForFileName(item.url);
+        const indexedDbKey = sanitizeForFileName(item.lrl);
         const audioContent = await indexedDbStorage.getGeneratedContent(draftPacket.id, indexedDbKey);
         if (!audioContent || audioContent.length === 0) {
-            throw new Error(`Audio content not found in IndexedDB for url: ${item.url}`);
+            throw new Error(`Audio content not found in IndexedDB for lrl: ${item.lrl}`);
         }
         
-        const audioData = audioContent[0].content; // This is an ArrayBuffer
+        const audioData = audioContent[0].content;
         const blob = new Blob([audioData], { type: item.mimeType });
         const audioUrl = URL.createObjectURL(blob);
 
         const audio = new Audio(audioUrl);
-        audio.dataset.url = item.url; // Store LRL in dataset
+        audio.dataset.lrl = item.lrl;
         
         audio.onplay = () => { if (iconElement) iconElement.textContent = '⏸️'; };
         audio.onpause = () => { if (iconElement) iconElement.textContent = '▶️'; };
@@ -359,15 +366,15 @@ async function handleSaveDraftPacket() {
     if (packetToSave.id.startsWith('draft_')) {
         const originalDraftId = packetToSave.id;
         
-        const defaultTitle = packetToSave.topic || draftPacket?.sourceContent?.[0]?.title || 'Untitled Packet';
-        const topic = await showTitlePromptDialog(Promise.resolve(defaultTitle));
+        const defaultTitle = packetToSave.title || draftPacket?.sourceContent?.[0]?.title || 'Untitled Packet';
+        const title = await showTitlePromptDialog(Promise.resolve(defaultTitle));
 
-        if (!topic) {
+        if (!title) {
             showRootViewStatus("Save cancelled.", "info");
             return; 
         }
 
-        packetToSave.topic = topic;
+        packetToSave.title = title;
         packetToSave.id = `img_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
         packetToSave.created = new Date().toISOString();
         
@@ -379,7 +386,7 @@ async function handleSaveDraftPacket() {
     try {
         const response = await sendMessageToBackground({ action: 'save_packet_image', data: { image: packetToSave } });
         if (response && response.success) {
-            showRootViewStatus(`Packet "${packetToSave.topic}" saved.`, 'success');
+            showRootViewStatus(`Packet "${packetToSave.title}" saved.`, 'success');
             draftPacket = null;
             isEditing = false;
             initialDraftState = null;
@@ -415,7 +422,7 @@ async function handleAddCurrentPageToDraft() {
             access: 'public',
             url: currentUrl,
             title: title,
-            relevance: ''
+            context: ''
         });
         
         renderDraftContentList();
@@ -465,7 +472,7 @@ async function handleConfirmMakePage() {
     try {
         const response = await sendMessageToBackground({
             action: 'generate_custom_page',
-            data: { prompt: prompt, topic: draftPacket?.topic || 'Custom Packet', context: draftPacket?.sourceContent || [] }
+            data: { prompt: prompt, title: draftPacket?.title || 'Custom Packet', context: draftPacket?.sourceContent || [] }
         });
 
         if (response?.success && response.newItem) {
@@ -548,18 +555,19 @@ function handleFileDrop(e) {
         for (const file of e.dataTransfer.files) {
             const reader = new FileReader();
             reader.onload = async (event) => {
-                // REFACTOR: Use LRL for new media item
+                const lrl = `/media/${sanitizeForFileName(file.name)}`;
                 const newMediaItem = {
                     origin: 'internal',
                     format: 'audio',
                     access: 'private',
-                    url: `/media/${sanitizeForFileName(file.name)}`,
+                    url: null,
+                    lrl: lrl,
                     title: file.name,
                     mimeType: file.type,
                 };
                 
                 const audioBuffer = event.target.result;
-                const indexedDbKey = sanitizeForFileName(newMediaItem.url);
+                const indexedDbKey = sanitizeForFileName(newMediaItem.lrl);
                 await indexedDbStorage.saveGeneratedContent(draftPacket.id, indexedDbKey, [{
                     name: file.name,
                     content: audioBuffer,

@@ -172,18 +172,32 @@ async function processNavigationEvent(tabId, finalUrl, details) {
     const finalContext = await getPacketContext(tabId);
     logger.log(logPrefix, 'Final context after logic:', finalContext);
     let finalInstance = finalContext ? await storage.getPacketInstance(finalContext.instanceId) : null;
-    let image = finalInstance ? await storage.getPacketImage(finalInstance.imageId) : null;
+    
+    // --- START OF FIX ---
+    // If the instance being navigated to is the one with active media playback,
+    // use the in-memory version from activeMediaPlayback, as it's guaranteed
+    // to have the most up-to-the-millisecond state for moments. This prevents
+    // a race condition where a storage.save operation from a tripped moment has not completed yet.
+    if (finalInstance && activeMediaPlayback.instanceId === finalInstance.instanceId) {
+        finalInstance = activeMediaPlayback.instance;
+        logger.log(logPrefix, 'Using live instance data from activeMediaPlayback to avoid race condition.');
+    }
+    // --- END OF FIX ---
 
+    let image = finalInstance ? await storage.getPacketImage(finalInstance.imageId) : null;
 
     if (finalInstance && image) {
         const loadedItem = finalInstance.contents.find(item => item.url === finalContext.canonicalPacketUrl);
         if (loadedItem) {
             let momentTripped = false;
-            (image.moments || []).forEach((moment, index) => {
-                // REFACTOR: Check sourceUrl instead of sourcePageId
-                if (moment.type === 'visit' && moment.sourceUrl === loadedItem.url && finalInstance.momentsTripped[index] === 0) {
+            (finalInstance.moments || []).forEach((moment, index) => {
+                if (moment.type === 'visit' && moment.sourceUrl === loadedItem.lrl && finalInstance.momentsTripped[index] === 0) {
                     finalInstance.momentsTripped[index] = 1;
                     momentTripped = true;
+                    logger.log('MomentLogger:Visit', `Tripping Moment #${index} due to navigation`, {
+                        instanceId: finalInstance.instanceId,
+                        visitedUrl: loadedItem.url
+                    });
                     logger.log(logPrefix, `DECISION: Navigation to page with URL ${loadedItem.url} is tripping moment ${index}.`);
                 }
             });

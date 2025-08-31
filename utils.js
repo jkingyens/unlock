@@ -460,11 +460,15 @@ const packetUtils = {
         if (!instance) {
             return { visitedCount: 0, totalCount: 0, progressPercentage: 0 };
         }
-        if (image && Array.isArray(image.checkpoints) && Array.isArray(instance.checkpointsTripped)) {
-            const totalCount = image.checkpoints.length;
+        // --- START OF FIX ---
+        // Use the sanitized 'checkpoints' array directly from the instance, not the original image.
+        if (Array.isArray(instance.checkpoints) && Array.isArray(instance.checkpointsTripped)) {
+            const totalCount = instance.checkpoints.length;
+        // --- END OF FIX ---
             if (totalCount === 0) {
                 return { visitedCount: 0, totalCount: 0, progressPercentage: 100 };
             }
+            // Count how many of the (now guaranteed to be valid) checkpoints have been tripped.
             const visitedCount = instance.checkpointsTripped.filter(c => c === 1).length;
             return {
                 visitedCount,
@@ -550,12 +554,12 @@ const packetUtils = {
     return options.returnItem ? null : false;
   },
 
-  getColorForTopic(topic) {
+  getColorForTopic(title) {
     const colors = ['grey', 'blue', 'red', 'yellow', 'green', 'pink', 'purple', 'cyan', 'orange'];
-    if (!topic) return colors[0];
+    if (!title) return colors[0];
     let hash = 0;
-    for (let i = 0; i < topic.length; i++) {
-        hash = ((hash << 5) - hash) + topic.charCodeAt(i);
+    for (let i = 0; i < title.length; i++) {
+        hash = ((hash << 5) - hash) + title.charCodeAt(i);
         hash |= 0;
     }
     return colors[Math.abs(hash) % colors.length];
