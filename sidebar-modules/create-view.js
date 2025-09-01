@@ -3,7 +3,7 @@
 // by adding the current page or generating new pages from prompts.
 
 import { domRefs } from './dom-references.js';
-import { logger, storage, base64Decode, shouldUseTabGroups, indexedDbStorage, isChromeAiAvailable } from '../utils.js';
+import { logger, storage, base64Decode, shouldUseTabGroups, indexedDbStorage, sanitizeForFileName } from '../utils.js';
 import { showConfirmDialog, showTitlePromptDialog } from './dialog-handler.js';
 
 // --- Module-specific State & Dependencies ---
@@ -99,9 +99,8 @@ export async function prepareCreateView(imageToEdit = null) {
         domRefs.createViewSaveBtn.textContent = 'Save Changes';
     } else {
         isEditing = false;
-        // FIX: Assign a temporary ID to new drafts so media can be saved to IndexedDB immediately.
         const draftId = `draft_${Date.now()}`;
-        draftPacket = { id: draftId, topic: '', sourceContent: [], moments: [] };
+        draftPacket = { id: draftId, title: '', sourceContent: [], moments: [] };
         domRefs.createViewSaveBtn.textContent = 'Save';
     }
     
@@ -119,8 +118,8 @@ function getUrlForItem(item, index) {
     if (item.origin === 'external') {
         return item.url;
     }
-    if (item.origin === 'internal' && item.pageId) {
-        return chrome.runtime.getURL(`preview.html?pageId=${item.pageId}`);
+    if (item.origin === 'internal' && item.lrl) {
+        return chrome.runtime.getURL(`preview.html?rlr=${encodeURIComponent(item.lrl)}`);
     }
     return null;
 }
@@ -162,7 +161,6 @@ async function cleanupDraftGroup() {
         draftTabGroupId = null;
     }
     await storage.removeSession('draftPacketForPreview');
-    // Also clean up any temporary draft media from IndexedDB
     if (draftPacket && draftPacket.id.startsWith('draft_')) {
         await indexedDbStorage.deleteGeneratedContentForImage(draftPacket.id);
     }
@@ -213,6 +211,8 @@ function createDraftContentCard(contentItem, index) {
     let iconHTML = '?';
     let displayUrl = '';
     const itemUrl = getUrlForItem(contentItem, index);
+    
+    card.dataset.url = contentItem.url;
 
     if (format === 'html' && origin === 'external') {
         iconHTML = '🔗';
@@ -224,7 +224,6 @@ function createDraftContentCard(contentItem, index) {
         iconHTML = '▶️';
         displayUrl = "Audio Preview";
         card.classList.add('media');
-        card.dataset.pageId = contentItem.pageId;
     }
 
     card.title = `Click to open or focus tab: ${title}`;
@@ -263,31 +262,36 @@ function isDraftDirty() {
 async function toggleDraftAudioPlayback(item, card) {
     const iconElement = card.querySelector('.card-icon');
 
-    if (draftActiveAudio && draftActiveAudio.dataset.pageId === item.pageId && !draftActiveAudio.paused) {
-        draftActiveAudio.pause();
+    if (draftActiveAudio && draftActiveAudio.dataset.lrl === item.lrl) {
+        if (draftActiveAudio.paused) {
+            draftActiveAudio.play();
+        } else {
+            draftActiveAudio.pause();
+        }
         return;
     }
 
     if (draftActiveAudio) {
         draftActiveAudio.pause();
-        const oldCard = document.querySelector(`.card.media[data-page-id="${draftActiveAudio.dataset.pageId}"]`);
+        const oldCard = document.querySelector(`.card.media[data-lrl="${draftActiveAudio.dataset.lrl}"]`);
         if (oldCard) {
             oldCard.querySelector('.card-icon').textContent = '▶️';
         }
     }
 
     try {
-        const audioContent = await indexedDbStorage.getGeneratedContent(draftPacket.id, item.pageId);
+        const indexedDbKey = sanitizeForFileName(item.lrl);
+        const audioContent = await indexedDbStorage.getGeneratedContent(draftPacket.id, indexedDbKey);
         if (!audioContent || audioContent.length === 0) {
-            throw new Error(`Audio content not found in IndexedDB for pageId: ${item.pageId}`);
+            throw new Error(`Audio content not found in IndexedDB for lrl: ${item.lrl}`);
         }
         
-        const audioData = audioContent[0].content; // This is an ArrayBuffer
+        const audioData = audioContent[0].content;
         const blob = new Blob([audioData], { type: item.mimeType });
         const audioUrl = URL.createObjectURL(blob);
 
         const audio = new Audio(audioUrl);
-        audio.dataset.pageId = item.pageId;
+        audio.dataset.lrl = item.lrl;
         
         audio.onplay = () => { if (iconElement) iconElement.textContent = '⏸️'; };
         audio.onpause = () => { if (iconElement) iconElement.textContent = '▶️'; };
@@ -313,7 +317,7 @@ async function handleImproveAudio(mediaItem, button) {
             action: 'improve_draft_audio',
             data: {
                 draftId: draftPacket.id,
-                mediaPageId: mediaItem.pageId
+                mediaUrl: mediaItem.lrl 
             }
         });
 
@@ -356,15 +360,15 @@ async function handleSaveDraftPacket() {
     if (packetToSave.id.startsWith('draft_')) {
         const originalDraftId = packetToSave.id;
         
-        const defaultTitle = packetToSave.topic || draftPacket?.sourceContent?.[0]?.title || 'Untitled Packet';
-        const topic = await showTitlePromptDialog(Promise.resolve(defaultTitle));
+        const defaultTitle = packetToSave.title || draftPacket?.sourceContent?.[0]?.title || 'Untitled Packet';
+        const title = await showTitlePromptDialog(Promise.resolve(defaultTitle));
 
-        if (!topic) {
+        if (!title) {
             showRootViewStatus("Save cancelled.", "info");
             return; 
         }
 
-        packetToSave.topic = topic;
+        packetToSave.title = title;
         packetToSave.id = `img_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
         packetToSave.created = new Date().toISOString();
         
@@ -376,7 +380,7 @@ async function handleSaveDraftPacket() {
     try {
         const response = await sendMessageToBackground({ action: 'save_packet_image', data: { image: packetToSave } });
         if (response && response.success) {
-            showRootViewStatus(`Packet "${packetToSave.topic}" saved.`, 'success');
+            showRootViewStatus(`Packet "${packetToSave.title}" saved.`, 'success');
             draftPacket = null;
             isEditing = false;
             initialDraftState = null;
@@ -412,7 +416,7 @@ async function handleAddCurrentPageToDraft() {
             access: 'public',
             url: currentUrl,
             title: title,
-            relevance: ''
+            context: ''
         });
         
         renderDraftContentList();
@@ -462,7 +466,7 @@ async function handleConfirmMakePage() {
     try {
         const response = await sendMessageToBackground({
             action: 'generate_custom_page',
-            data: { prompt: prompt, topic: draftPacket?.topic || 'Custom Packet', context: draftPacket?.sourceContent || [] }
+            data: { prompt: prompt, title: draftPacket?.title || 'Custom Packet', context: draftPacket?.sourceContent || [] }
         });
 
         if (response?.success && response.newItem) {
@@ -545,18 +549,20 @@ function handleFileDrop(e) {
         for (const file of e.dataTransfer.files) {
             const reader = new FileReader();
             reader.onload = async (event) => {
+                const lrl = `/media/${sanitizeForFileName(file.name)}`;
                 const newMediaItem = {
                     origin: 'internal',
                     format: 'audio',
                     access: 'private',
-                    pageId: `media_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+                    lrl: lrl,
                     title: file.name,
                     mimeType: file.type,
                 };
                 
                 const audioBuffer = event.target.result;
-                await indexedDbStorage.saveGeneratedContent(draftPacket.id, newMediaItem.pageId, [{
-                    name: 'audio.mp3',
+                const indexedDbKey = sanitizeForFileName(newMediaItem.lrl);
+                await indexedDbStorage.saveGeneratedContent(draftPacket.id, indexedDbKey, [{
+                    name: file.name,
                     content: audioBuffer,
                     contentType: newMediaItem.mimeType
                 }]);

@@ -17,7 +17,7 @@ function validatePacketSchema(packetImage) {
   }
 
   // Check top-level keys
-  const requiredKeys = ['id', 'topic', 'created', 'sourceContent'];
+  const requiredKeys = ['id', 'title', 'created', 'sourceContent'];
   const missingKeys = requiredKeys.filter(key => !(key in packetImage));
   if (missingKeys.length > 0) {
     errors.push(`Missing required top-level keys: ${missingKeys.join(', ')}.`);
@@ -27,8 +27,8 @@ function validatePacketSchema(packetImage) {
   if (packetImage.id && typeof packetImage.id !== 'string') {
     errors.push('Key "id" must be a string.');
   }
-  if (packetImage.topic && typeof packetImage.topic !== 'string') {
-    errors.push('Key "topic" must be a string.');
+  if (packetImage.title && typeof packetImage.title !== 'string') {
+    errors.push('Key "title" must be a string.');
   }
   if (packetImage.created && typeof packetImage.created !== 'string') {
     errors.push('Key "created" must be a string.');
@@ -84,14 +84,14 @@ function validatePacketWinnability(packetImage) {
     const requiredItems = new Set();
     packetImage.checkpoints.forEach(cp => {
         cp.requiredItems.forEach(item => {
-            requiredItems.add(item.url || item.pageId);
+            requiredItems.add(item.url); // Now only uses URL
         });
     });
 
     const unlockedItems = new Set(
         packetImage.sourceContent
             .filter(item => typeof item.revealedByMoment !== 'number')
-            .map(item => item.url || item.pageId)
+            .map(item => item.url)
             .filter(Boolean)
     );
 
@@ -114,7 +114,7 @@ function validatePacketWinnability(packetImage) {
             newlyVisitedItems.forEach(visited => requiredItems.delete(visited));
 
             const momentsToTrip = (packetImage.moments || [])
-                .filter(moment => newlyVisitedItems.includes(moment.sourcePageId) && !trippedMoments.has(moment.id));
+                .filter(moment => newlyVisitedItems.includes(moment.sourceUrl) && !trippedMoments.has(moment.id));
 
             momentsToTrip.forEach(moment => {
                 trippedMoments.add(moment.id);
@@ -122,7 +122,7 @@ function validatePacketWinnability(packetImage) {
 
                 packetImage.sourceContent
                     .filter(item => item.revealedByMoment === momentIndex)
-                    .forEach(item => unlockedItems.add(item.url || item.pageId));
+                    .forEach(item => unlockedItems.add(item.url));
             });
         }
     }

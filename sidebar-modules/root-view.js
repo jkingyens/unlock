@@ -130,23 +130,21 @@ export async function displayRootNavigation() {
             renderOrUpdateImageStencil(stencilData);
         });
         
-        const instancesWithImages = instances.map(inst => ({ inst, img: imagesMap[inst.imageId] })).filter(item => item.img);
-
         const inProgressItems = [];
         const completedItems = [];
 
-        for (const { inst, img } of instancesWithImages) {
+        for (const inst of instances) {
             if (inst.status !== 'creating') {
-                if (await packetUtils.isPacketInstanceCompleted(inst, img)) {
-                    completedItems.push({ inst, img });
+                if (await packetUtils.isPacketInstanceCompleted(inst)) {
+                    completedItems.push(inst);
                 } else {
-                    inProgressItems.push({ inst, img });
+                    inProgressItems.push(inst);
                 }
             }
         }
         
-        renderInstanceList(inProgressItems.sort((a,b) => sortFn(a.inst, b.inst)), domRefs.inProgressList, "No packets Started.");
-        renderInstanceList(completedItems.sort((a,b) => sortFn(a.inst, b.inst)), domRefs.completedList, "No completed packets yet.");
+        renderInstanceList(inProgressItems.sort(sortFn), domRefs.inProgressList, "No packets Started.");
+        renderInstanceList(completedItems.sort(sortFn), domRefs.completedList, "No completed packets yet.");
 
         updateActionButtonsVisibility();
     } catch (error) {
@@ -173,14 +171,14 @@ function renderImageList(images) {
     }
 }
 
-function renderInstanceList(items, listElement, emptyMessage) {
+function renderInstanceList(instances, listElement, emptyMessage) {
     listElement.innerHTML = '';
-    if (items.length === 0) {
+    if (instances.length === 0) {
         checkAndRenderEmptyState(listElement, emptyMessage);
     } else {
         const frag = document.createDocumentFragment();
-        items.forEach(({ inst, img }) => {
-            const row = createInstanceRow(inst, img);
+        instances.forEach(inst => {
+            const row = createInstanceRow(inst);
             row.dataset.created = inst.created || inst.instantiated || new Date(0).toISOString();
             frag.appendChild(row);
         });
@@ -193,15 +191,15 @@ function createImageRow(image) {
     row.dataset.imageId = image.id;
     row.style.cursor = 'pointer';
     const nameCell = document.createElement('td');
-    nameCell.textContent = image.topic;
+    nameCell.textContent = image.title;
     row.appendChild(nameCell);
     row.addEventListener('click', () => {
-        showLibraryActionDialog(image.id, image.topic);
+        showLibraryActionDialog(image.id, image.title);
     });
     return row;
 }
 
-function createInstanceRow(instance, image) {
+function createInstanceRow(instance) {
     const row = document.createElement('tr');
     row.dataset.instanceId = instance.instanceId;
 
@@ -209,12 +207,12 @@ function createInstanceRow(instance, image) {
     let progressPercentage = 0, progressBarTitle = '';
     
     if (!isStencil) {
-        const progressData = packetUtils.calculateInstanceProgress(instance, image);
+        const progressData = packetUtils.calculateInstanceProgress(instance);
         progressPercentage = progressData.progressPercentage;
         progressBarTitle = `${progressData.visitedCount}/${progressData.totalCount} - ${progressPercentage}% Complete`;
     }
 
-    const colorName = packetUtils.getColorForTopic(instance.topic);
+    const colorName = packetUtils.getColorForTopic(instance.title);
     const colorHex = (packetColorMap[colorName] || defaultPacketColors).progress;
 
     const checkboxCell = document.createElement('td');
@@ -227,7 +225,7 @@ function createInstanceRow(instance, image) {
     checkboxCell.appendChild(checkbox);
 
     const nameCell = document.createElement('td');
-    nameCell.textContent = instance.topic;
+    nameCell.textContent = instance.title;
 
     const progressCell = document.createElement('td');
     progressCell.innerHTML = `
@@ -239,7 +237,7 @@ function createInstanceRow(instance, image) {
 
     if (isStencil) {
         row.classList.add('stencil-packet');
-        row.title = `Packet "${instance.topic}" is being created...`;
+        row.title = `Packet "${instance.title}" is being created...`;
     } else {
         setupInstanceContextMenu(row, instance);
         row.addEventListener('click', (e) => {
@@ -258,14 +256,7 @@ function createInstanceRow(instance, image) {
 }
 
 export async function updateInstanceRowUI(instance) {
-    const image = await storage.getPacketImage(instance.imageId);
-    if (!image) {
-        logger.warn('RootView:updateInstanceRowUI', 'Could not find image for instance, removing row.', { instanceId: instance.instanceId });
-        removeInstanceRow(instance.instanceId);
-        return;
-    }
-    
-    const isCompleted = await packetUtils.isPacketInstanceCompleted(instance, image);
+    const isCompleted = await packetUtils.isPacketInstanceCompleted(instance);
     const targetList = isCompleted ? domRefs.completedList : domRefs.inProgressList;
 
     let sourceList = null;
@@ -278,7 +269,7 @@ export async function updateInstanceRowUI(instance) {
     if (!targetList) return;
 
     const existingRow = sourceList?.querySelector(`tr[data-instance-id="${instance.instanceId}"]`);
-    const newRow = createInstanceRow(instance, image);
+    const newRow = createInstanceRow(instance);
     newRow.dataset.created = instance.created || instance.instantiated || new Date(0).toISOString();
     
     if (existingRow) {
@@ -375,7 +366,7 @@ async function handleStartPacket(imageId) {
 
         let incompleteInstance = null;
         for (const inst of instancesForImage) {
-            if (!(await packetUtils.isPacketInstanceCompleted(inst, image))) {
+            if (!(await packetUtils.isPacketInstanceCompleted(inst))) {
                 incompleteInstance = inst;
                 break;
             }
@@ -411,10 +402,10 @@ async function handleEditPacket(imageId) {
 
 async function handleDeletePacketImage(imageId) {
     const image = await storage.getPacketImage(imageId);
-    const topic = image?.topic || 'this packet';
+    const title = image?.title || 'this packet';
 
     const confirmed = await showConfirmDialog(
-        `Delete "${topic}" from your Library permanently?`,
+        `Delete "${title}" from your Library permanently?`,
         'Delete',
         'Cancel',
         true
@@ -422,16 +413,16 @@ async function handleDeletePacketImage(imageId) {
 
     if (confirmed) {
         await sendMessageToBackground({ action: 'delete_packet_image', data: { imageId } });
-        showRootViewStatus(`Packet "${topic}" deleted.`, 'success');
+        showRootViewStatus(`Packet "${title}" deleted.`, 'success');
     }
 }
 
 
-async function showLibraryActionDialog(imageId, topic) {
+async function showLibraryActionDialog(imageId, title) {
     currentActionImageId = imageId;
     const dialog = document.getElementById('library-action-dialog');
     if (dialog) {
-        dialog.querySelector('#library-action-title').textContent = topic;
+        dialog.querySelector('#library-action-title').textContent = title;
 
         const exportBtn = dialog.querySelector('#lib-action-export-btn');
         if (exportBtn) {
@@ -494,7 +485,7 @@ function setupInstanceContextMenu(row, instance) {
         addDivider(menu);
 
         addMenuItem(menu, 'Delete Packet', async () => {
-            const confirmed = await showConfirmDialog(`Delete packet "${instance.topic}"? This cannot be undone.`, 'Delete', 'Cancel', true);
+            const confirmed = await showConfirmDialog(`Delete packet "${instance.title}"? This cannot be undone.`, 'Delete', 'Cancel', true);
             if (confirmed) {
                 sendMessageToBackground({action:'delete_packets', data:{packetIds:[instance.instanceId]}});
             }
@@ -589,7 +580,7 @@ function insertRowSorted(row, listElement) {
 }
 
 export function renderOrUpdateImageStencil(data) {
-    const { imageId, topic, progressPercent, text } = data;
+    const { imageId, title, progressPercent, text } = data;
     const listElement = domRefs.inboxList;
     if (!listElement) return;
 
@@ -614,7 +605,7 @@ export function renderOrUpdateImageStencil(data) {
         contentCell.style.gap = '8px';
 
         contentCell.innerHTML = `
-            <span class="stencil-title" style="flex-grow: 1;">${topic || 'Creating...'}</span>
+            <span class="stencil-title" style="flex-grow: 1;">${title || 'Creating...'}</span>
             <span class="creation-stage-text" style="flex-shrink: 0;"></span>
             <div class="progress-bar-container" title="Creating..." style="width: 100px; flex-shrink: 0;">
                 <div class="progress-bar" style="width: 5%;"></div>
@@ -629,7 +620,7 @@ export function renderOrUpdateImageStencil(data) {
     const progressBarElement = row.querySelector('.progress-bar');
     const progressBarContainer = row.querySelector('.progress-bar-container');
 
-    if (titleElement && topic) titleElement.textContent = topic;
+    if (titleElement && title) titleElement.textContent = title;
     if (progressTextElement) progressTextElement.textContent = `(${text})`;
     if (progressBarElement) progressBarElement.style.width = `${progressPercent || 5}%`;
     if (progressBarContainer) progressBarContainer.title = `${text} - ${progressPercent || 5}%`;

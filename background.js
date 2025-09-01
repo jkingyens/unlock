@@ -30,175 +30,51 @@ import cloudStorage from '../cloud-storage.js';
 
 // --- START: New Migration Logic ---
 async function migratePacketImagesIfNecessary() {
-    const MIGRATION_FLAG_V2 = 'packetImageMigrationV2Complete';
-    const MIGRATION_FLAG_V3 = 'packetImageMigrationV3Complete';
-    const MIGRATION_FLAG_V4 = 'packetImageMigrationV4AudioCheckpoint';
-    const MIGRATION_FLAG_V5 = 'packetImageMigrationV5SummaryCheckpoint';
+    const MIGRATION_FLAG_LRL = 'packetImageMigrationLrlComplete';
+    const flags = await storage.getLocal([MIGRATION_FLAG_LRL]);
 
-    const flags = await storage.getLocal([MIGRATION_FLAG_V2, MIGRATION_FLAG_V3, MIGRATION_FLAG_V4, MIGRATION_FLAG_V5]);
-
-    if (flags[MIGRATION_FLAG_V2] && flags[MIGRATION_FLAG_V3] && flags[MIGRATION_FLAG_V4] && flags[MIGRATION_FLAG_V5]) {
+    if (flags[MIGRATION_FLAG_LRL]) {
         logger.log('Background:Migration', 'All migrations already completed. Skipping.');
         return;
     }
 
-    logger.log('Background:Migration', 'Running one-time migration check for packet images...');
+    logger.log('Background:Migration', 'Running one-time migration for LRL fields...');
     const allImages = await storage.getPacketImages();
     let imagesToUpdate = {};
     let migrationNeeded = false;
 
     for (const imageId in allImages) {
-        let image = { ...allImages[imageId] }; // Work on a copy
-        
-        // --- V2 Migration: Convert old format to new format ---
-        const isLegacyV2 = image.sourceContent && image.sourceContent.some(item => 'type' in item);
-        if (isLegacyV2 && !flags[MIGRATION_FLAG_V2]) {
-            migrationNeeded = true;
-            logger.log('Background:Migration', `Found legacy V2 packet image, converting: ${imageId}`);
-            const newSourceContent = [];
-            const newMoments = image.moments || [];
-            let mediaItemForTimestamps = null;
+        let image = { ...allImages[imageId] };
+        let wasModified = false;
 
-            const flatSourceContent = image.sourceContent.flatMap(item =>
-                item.type === 'alternative' ? item.alternatives : item
-            );
-            const externalLinks = flatSourceContent.filter(item => item.type === 'external');
-
-            flatSourceContent.forEach(item => {
-                let newItem;
-                if (item.type === 'media') {
-                    newItem = { origin: 'internal', format: 'audio', access: 'private', ...item };
-                    mediaItemForTimestamps = newItem;
-                } else if (item.type === 'generated') {
-                    newItem = { origin: 'internal', format: 'html', access: 'private', ...item };
-                } else { // external
-                    newItem = { origin: 'external', format: 'html', access: 'public', ...item };
+        if (image.sourceContent && Array.isArray(image.sourceContent)) {
+            image.sourceContent.forEach(item => {
+                // If an item is internal and has a URL but no LRL, it's from the old format.
+                if (item.origin === 'internal' && item.url && !item.lrl) {
+                    item.lrl = item.url; // The old URL is the new LRL.
+                    item.url = null;      // The new URL should be null until published.
+                    wasModified = true;
                 }
-                delete newItem.type;
-                newSourceContent.push(newItem);
             });
-
-            if (mediaItemForTimestamps && Array.isArray(mediaItemForTimestamps.timestamps)) {
-                mediaItemForTimestamps.timestamps.forEach(ts => {
-                    const momentIndex = newMoments.length;
-                    newMoments.push({
-                        id: `moment_${momentIndex}`,
-                        type: 'mediaTimestamp',
-                        sourcePageId: mediaItemForTimestamps.pageId,
-                        timestamp: ts.startTime
-                    });
-                    const linkedItem = externalLinks.find(link => link.url === ts.url);
-                    if (linkedItem) {
-                        const itemInNewContent = newSourceContent.find(i => i.url === linkedItem.url);
-                        if (itemInNewContent) itemInNewContent.revealedByMoment = momentIndex;
-                    }
-                });
-                delete mediaItemForTimestamps.timestamps;
-            }
-            image = { ...image, sourceContent: newSourceContent, moments: newMoments, migratedV2: true };
         }
 
-        // --- V3 Migration: Add summary page visit as a reveal mechanism ---
-        if (!flags[MIGRATION_FLAG_V3]) {
-            const hasHiddenItems = image.sourceContent.some(item => item.revealedByMoment || item.revealedByMoments);
-            const summaryPage = image.sourceContent.find(item => item.pageId === 'summary-page');
-
-            if (hasHiddenItems && summaryPage) {
-                migrationNeeded = true;
-                logger.log('Background:Migration', `Found V3 candidate packet image, ensuring summary page reveal: ${imageId}`);
-                
-                let summaryVisitMomentIndex = image.moments.findIndex(m => m.type === 'visit' && m.sourcePageId === summaryPage.pageId);
-                
-                if (summaryVisitMomentIndex === -1) {
-                    summaryVisitMomentIndex = image.moments.length;
-                    image.moments.push({
-                        id: `moment_${summaryVisitMomentIndex}`,
-                        type: 'visit',
-                        sourcePageId: summaryPage.pageId
-                    });
-                }
-
-                image.sourceContent.forEach(item => {
-                    if (item.revealedByMoment || item.revealedByMoments) {
-                        let momentIndices = new Set(item.revealedByMoments || []);
-                        if (typeof item.revealedByMoment === 'number') {
-                            momentIndices.add(item.revealedByMoment);
-                        }
-                        momentIndices.add(summaryVisitMomentIndex);
-                        
-                        item.revealedByMoments = Array.from(momentIndices);
-                        delete item.revealedByMoment;
-                    }
-                });
-                image.migratedV3 = true;
-            }
+        if (wasModified) {
+            migrationNeeded = true;
+            logger.log('Background:Migration', `Migrated LRL fields for packet image: ${imageId}`);
         }
-
-        // --- V4 Migration: Ensure audio files do not contribute to progress ---
-        if (!flags[MIGRATION_FLAG_V4]) {
-            const hasAudio = image.sourceContent.some(item => item.format === 'audio');
-            if (hasAudio) {
-                migrationNeeded = true;
-                logger.log('Background:Migration', `Found V4 candidate packet image, adjusting checkpoints for audio: ${imageId}`);
-
-                if (!image.checkpoints) {
-                    // If no checkpoints exist, create them for all non-audio items.
-                    image.checkpoints = image.sourceContent
-                        .filter(item => item.format === 'html')
-                        .map(item => ({
-                            title: `Visit ${item.title}`,
-                            requiredItems: [{ url: item.url, pageId: item.pageId }]
-                        }));
-                } else {
-                    // If checkpoints exist, filter out any audio requirements.
-                    image.checkpoints.forEach(checkpoint => {
-                        checkpoint.requiredItems = checkpoint.requiredItems.filter(req => {
-                            const item = image.sourceContent.find(i => i.url === req.url || i.pageId === req.pageId);
-                            return item && item.format !== 'audio';
-                        });
-                    });
-                    // Remove any checkpoints that are now empty
-                    image.checkpoints = image.checkpoints.filter(cp => cp.requiredItems.length > 0);
-                }
-                image.migratedV4 = true;
-            }
-        }
-
-        // --- V5 Migration: Ensure summary page does not contribute to progress ---
-        if (!flags[MIGRATION_FLAG_V5]) {
-            const summaryPage = image.sourceContent.find(item => item.pageId === 'summary-page');
-            if (summaryPage) {
-                migrationNeeded = true;
-                logger.log('Background:Migration', `Found V5 candidate packet image, adjusting checkpoints for summary page: ${imageId}`);
-
-                if (!image.checkpoints) {
-                    image.checkpoints = image.sourceContent
-                        .filter(item => item.format === 'html' && item.pageId !== 'summary-page')
-                        .map(item => ({
-                            title: `Visit ${item.title}`,
-                            requiredItems: [{ url: item.url, pageId: item.pageId }]
-                        }));
-                } else {
-                    image.checkpoints.forEach(checkpoint => {
-                        checkpoint.requiredItems = checkpoint.requiredItems.filter(req => req.pageId !== 'summary-page');
-                    });
-                    image.checkpoints = image.checkpoints.filter(cp => cp.requiredItems.length > 0);
-                }
-                image.migratedV5 = true;
-            }
-        }
-
+        
         imagesToUpdate[imageId] = image;
     }
 
     if (migrationNeeded) {
         await storage.setLocal({ [CONFIG.STORAGE_KEYS.PACKET_IMAGES]: imagesToUpdate });
-        logger.log('Background:Migration', 'All necessary packet image migrations have been completed.');
+        logger.log('Background:Migration', 'Completed LRL field migration for all applicable Packet Images.');
     }
 
-    await storage.setLocal({ [MIGRATION_FLAG_V2]: true, [MIGRATION_FLAG_V3]: true, [MIGRATION_FLAG_V4]: true, [MIGRATION_FLAG_V5]: true });
+    await storage.setLocal({ [MIGRATION_FLAG_LRL]: true });
 }
 // --- END: New Migration Logic ---
+
 
 attachNavigationListeners();
 const reorderDebounceTimers = new Map();
@@ -254,11 +130,11 @@ const initializationPromise = new Promise(resolve => {
 const AUDIO_KEEP_ALIVE_ALARM = 'audio-keep-alive';
 
 export let activeMediaPlayback = {
-    tabId: null,
     instanceId: null,
-    pageId: null,
+    url: null,
+    lrl: null,
     isPlaying: false,
-    topic: '',
+    title: '',
     currentTime: 0,
     duration: 0,
     instance: null,
@@ -268,11 +144,11 @@ export let activeMediaPlayback = {
 export async function resetActiveMediaPlayback() {
     await controlAudioInOffscreen('stop', {});
     if (activeMediaPlayback.isPlaying && activeMediaPlayback.instance) {
-        await saveCurrentTime(activeMediaPlayback.instanceId, activeMediaPlayback.pageId, 0, true);
+        await saveCurrentTime(activeMediaPlayback.instanceId, activeMediaPlayback.url, 0, true);
     }
     logger.log('Background', 'CRITICAL LOG: Resetting global activeMediaPlayback state.');
     activeMediaPlayback = {
-        tabId: null, instanceId: null, pageId: null, isPlaying: false, topic: '',
+        instanceId: null, url: null, lrl: null, isPlaying: false, title: '',
         currentTime: 0, duration: 0, instance: null, lastTrippedMoment: null,
     };
     await storage.removeSession(CONFIG.STORAGE_KEYS.ACTIVE_MEDIA_KEY);
@@ -347,57 +223,74 @@ async function injectOverlayScripts(tabId) {
     }
 }
 
-function findMediaItemInInstance(instance, pageId) {
-    if (!instance || !instance.contents || !pageId) return null;
-    return instance.contents.find(item => item.pageId === pageId && item.format === 'audio');
+function findMediaItemInInstance(instance, url) {
+    if (!instance || !instance.contents || !url) return null;
+    return instance.contents.find(item => item.url === url && item.format === 'audio');
 }
 
-export async function saveCurrentTime(instanceId, pageId, providedCurrentTime, isStopping = false) {
+export async function saveCurrentTime(instanceId, url, providedCurrentTime, isStopping = false) {
     try {
         const instance = await storage.getPacketInstance(instanceId);
         if (!instance) return;
-        const mediaItem = findMediaItemInInstance(instance, pageId);
+        const mediaItem = findMediaItemInInstance(instance, url);
         if (!mediaItem) return;
         let timeToSave = providedCurrentTime;
         if (typeof timeToSave === 'undefined') {
-            const response = await controlAudioInOffscreen('get_current_time', { pageId });
+            const response = await controlAudioInOffscreen('get_current_time', { url });
             if (response.success) timeToSave = response.currentTime;
         }
         if (typeof timeToSave === 'number') {
             mediaItem.currentTime = isStopping ? 0 : timeToSave;
             await storage.savePacketInstance(instance);
-            logger.log('Background:saveCurrentTime', `Saved currentTime ${mediaItem.currentTime} for ${pageId}`);
+            logger.log('Background:saveCurrentTime', `Saved currentTime ${mediaItem.currentTime} for ${url}`);
         }
     } catch (error) {
         logger.error('Background:saveCurrentTime', 'Error saving playback time', error);
     }
 }
 
-export async function notifyUIsOfStateChange(options = {}) {
-    let instance = activeMediaPlayback.instance;
-    if (!instance) {
-        const emptyState = { ...activeMediaPlayback, isPlaying: false, currentTime: 0, duration: 0, momentsTripped: [], lastTrippedMoment: null };
-        sidebarHandler.notifySidebar('playback_state_updated', emptyState);
-        const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-        if (activeTab) {
-             try {
-                 await injectOverlayScripts(activeTab.id);
-                 await chrome.tabs.sendMessage(activeTab.id, { action: 'sync_overlay_state', data: { isVisible: false } });
-             } catch(e) {}
-        }
-        return;
-    }
-    const playbackStateForUI = { ...activeMediaPlayback, momentsTripped: instance.momentsTripped || [], ...options };
+export async function notifyUIsOfStateChange(options) {
+    const effectiveOptions = options || {};
     const { isSidebarOpen } = await storage.getSession({ isSidebarOpen: false });
-    const overlayEnabled = await shouldShowOverlay();
-    playbackStateForUI.isVisible = !!activeMediaPlayback.pageId && !isSidebarOpen && overlayEnabled;
-    if (activeMediaPlayback.tabId) {
+
+    const fullStateForSidebar = {
+        ...activeMediaPlayback,
+        instance: activeMediaPlayback.instance,
+        momentsTripped: activeMediaPlayback.instance?.momentsTripped || [],
+        ...effectiveOptions
+    };
+    sidebarHandler.notifySidebar('playback_state_updated', fullStateForSidebar);
+
+    if (!isSidebarOpen) {
         try {
-            await injectOverlayScripts(activeMediaPlayback.tabId);
-            await chrome.tabs.sendMessage(activeMediaPlayback.tabId, { action: 'sync_overlay_state', data: playbackStateForUI });
-        } catch (e) {}
+            const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+            if (!activeTab || !activeTab.id) return;
+
+            const overlayEnabled = await shouldShowOverlay();
+            let isPathBlocked = false;
+            if (activeTab.url) {
+                try {
+                    const url = new URL(activeTab.url);
+                    if (url.pathname === '/item') isPathBlocked = true;
+                } catch (e) {}
+            }
+
+            const lightweightStateForOverlay = {
+                isVisible: !!activeMediaPlayback.url && overlayEnabled && !isPathBlocked,
+                isPlaying: activeMediaPlayback.isPlaying,
+                title: activeMediaPlayback.title,
+                lastTrippedMoment: effectiveOptions.animateMomentMention ? activeMediaPlayback.lastTrippedMoment : null,
+                showVisitedAnimation: !!effectiveOptions.showVisitedAnimation
+            };
+
+            await injectOverlayScripts(activeTab.id);
+            await chrome.tabs.sendMessage(activeTab.id, { action: 'update_overlay_state', data: lightweightStateForOverlay });
+        } catch (e) {
+            if (!e.message.toLowerCase().includes('no tab with id')) {
+                logger.error('Background:notifyUIs', 'Error notifying overlay', e);
+            }
+        }
     }
-    sidebarHandler.notifySidebar('playback_state_updated', playbackStateForUI);
 }
 
 export async function setMediaPlaybackState(newState, options = { animate: false, source: 'unknown' }) {
@@ -415,7 +308,7 @@ export async function setMediaPlaybackState(newState, options = { animate: false
         }
     }
     const isPlaying = activeMediaPlayback.isPlaying;
-    const hasActiveTrack = !!activeMediaPlayback.pageId;
+    const hasActiveTrack = !!activeMediaPlayback.url;
     if (!isPlaying && hasActiveTrack) {
         chrome.alarms.create(AUDIO_KEEP_ALIVE_ALARM, { periodInMinutes: 0.4 });
     } else {
@@ -443,7 +336,8 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     try {
         logger.log('Background:onInstalled', `Extension ${details.reason}`);
         await initializeStorageAndSettings();
-        await migratePacketImagesIfNecessary(); // <-- MIGRATION CALL
+        await migratePacketImagesIfNecessary();
+        await indexedDbStorage.debugDumpIndexedDb();
         await restoreMediaStateOnStartup();
         await cloudStorage.initialize().catch(err => logger.error('Background:onInstalled', 'Initial cloud storage init failed', err));
         await ruleManager.refreshAllRules();
@@ -472,7 +366,8 @@ chrome.runtime.onStartup.addListener(async () => {
     try {
         logger.log('Background:onStartup', 'Browser startup detected. Navigation processing is paused.');
         await initializeStorageAndSettings();
-        await migratePacketImagesIfNecessary(); // <-- MIGRATION CALL
+        await migratePacketImagesIfNecessary();
+        await indexedDbStorage.debugDumpIndexedDb();
         await restoreMediaStateOnStartup();
         await cloudStorage.initialize().catch(err => {});
         await restoreContextOnStartup();
@@ -547,49 +442,53 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
         logger.log('Background:onActivated', 'Ignoring tab activation event due to tab group closure in progress.');
         return;
     }
+    
     const tabId = activeInfo.tabId;
-    try {
-        const tab = await chrome.tabs.get(tabId);
-        if (tab.groupId && reorderDebounceTimers.has(tab.groupId)) {
-            await reorderGroupFromChangeEvent(tab.groupId);
-            reorderDebounceTimers.delete(tab.groupId); 
-        }
-    } catch (e) {}
-    if (activeMediaPlayback.pageId) {
-        activeMediaPlayback.tabId = tabId;
-        await notifyUIsOfStateChange();
-    }
     await sidebarHandler.updateActionForTab(tabId);
-    const context = await getPacketContext(tabId);
-    let instance = context ? await storage.getPacketInstance(context.instanceId) : null;
-    if (instance && activeMediaPlayback.instanceId === instance.instanceId) {
-        instance = activeMediaPlayback.instance;
+
+    let context_to_send = {};
+
+    const tabContext = await getPacketContext(tabId);
+    if (tabContext && tabContext.instanceId) {
+        context_to_send = {
+            instanceId: tabContext.instanceId,
+            instance: await storage.getPacketInstance(tabContext.instanceId),
+            packetUrl: tabContext.canonicalPacketUrl,
+            currentUrl: tabContext.currentBrowserUrl,
+        };
+    } 
+    else if (activeMediaPlayback.url && activeMediaPlayback.instance) {
+        context_to_send = {
+            instanceId: activeMediaPlayback.instanceId,
+            instance: activeMediaPlayback.instance,
+            packetUrl: null,
+            currentUrl: (await chrome.tabs.get(tabId)).url,
+        };
+    } 
+    else {
+        context_to_send = { instanceId: null, instance: null, packetUrl: null, currentUrl: null };
     }
+
     if (sidebarHandler.isSidePanelAvailable()) {
         sidebarHandler.notifySidebar('update_sidebar_context', {
             tabId,
-            instanceId: instance ? instance.instanceId : null,
-            instance,
-            packetUrl: context ? context.canonicalPacketUrl : null,
-            currentUrl: instance ? context.currentBrowserUrl : null
+            ...context_to_send
         });
     }
-    if (instance && context?.canonicalPacketUrl) {
-        const itemForVisitTimer = instance.contents.find(i => i.url === context.canonicalPacketUrl);
-        if (itemForVisitTimer && !itemForVisitTimer.interactionBasedCompletion) {
-            clearPendingVisitTimer(tabId);
-            startVisitTimer(tabId, instance.instanceId, itemForVisitTimer.url, '[onActivated]');
+
+    if (tabContext && tabContext.instanceId) {
+        const instance = await storage.getPacketInstance(tabContext.instanceId);
+        if (instance) {
+             const itemForVisitTimer = instance.contents.find(i => i.url === tabContext.canonicalPacketUrl);
+             if (itemForVisitTimer && !itemForVisitTimer.interactionBasedCompletion) {
+                 clearPendingVisitTimer(tabId);
+                 startVisitTimer(tabId, instance.instanceId, itemForVisitTimer.url, '[onActivated]');
+             }
         }
     }
 });
 
 chrome.tabs.onRemoved.addListener(async (tabId, removeInfo) => {
-    if (tabId === activeMediaPlayback.tabId) {
-        logger.log('Background', `Playback tab ${tabId} was closed. Stopping media.`);
-        if (typeof msgHandler.handlePlaybackActionRequest === 'function') {
-            await msgHandler.handlePlaybackActionRequest({ data: { intent: 'stop' } }, {}, () => {});
-        }
-    }
     await tabGroupHandler.handleTabRemovalCleanup(tabId, removeInfo);
 });
 
@@ -636,17 +535,7 @@ chrome.runtime.onConnect.addListener(async (port) => {
     await notifyUIsOfStateChange();
     port.onDisconnect.addListener(async () => {
       await storage.setSession({ isSidebarOpen: false });
-      if (activeMediaPlayback.pageId) {
-          try {
-              const [activeTab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-              if (activeTab && activeTab.id) {
-                  activeMediaPlayback.tabId = activeTab.id;
-              }
-          } catch (e) {
-              logger.warn('Background:onDisconnect', 'Could not get active tab when sidebar closed.', e);
-          }
-      }
-      await notifyUIsOfStateChange(null, { animate: true });
+      await notifyUIsOfStateChange({ animate: true });
     });
   }
 });

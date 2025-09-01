@@ -1,17 +1,15 @@
 {
   "id": "img_test_checkpoint_1662758400000",
-  "topic": "Checkpoint Progress Test",
+  "title": "Checkpoint Progress Test",
   "created": "2025-09-09T21:20:00Z",
   "sourceContent": [
     {
       "origin": "internal",
       "format": "html",
       "access": "private",
-      "pageId": "summary-page",
+      "lrl": "/pages/summary-page.html",
       "title": "Packet Summary (Does Not Grant Progress)",
-      "relevance": "An overview of this test packet.",
-      "contentType": "text/html",
-      "contentB64": "PGgxPlBhY2tldCBTdW1tYXJ5PC9oMT48cD5UaGlzIGlzIGEgdGVzdCBwYWNrZXQgZm9yIHRoZSBjaGVja3BvaW50IHN5c3RlbS4gVmlzaXRpbmcgdGhpcyBwYWdlIGl0c2VsZiBkb2VzIG5vdCBncmFudCBwcm9ncmVzcy48L3A+"
+      "context": "An overview of this test packet."
     },
     {
       "origin": "external",
@@ -19,7 +17,7 @@
       "access": "public",
       "url": "https://en.wikipedia.org/wiki/Test_case",
       "title": "Core Concept A (Part 1 of Checkpoint 1)",
-      "relevance": "The first required item to complete the first checkpoint."
+      "context": "The first required item to complete the first checkpoint."
     },
     {
       "origin": "external",
@@ -27,7 +25,7 @@
       "access": "public",
       "url": "https://en.wikipedia.org/wiki/Unit_testing",
       "title": "Core Concept B (Part 2 of Checkpoint 1)",
-      "relevance": "The second required item to complete the first checkpoint."
+      "context": "The second required item to complete the first checkpoint."
     },
     {
       "origin": "external",
@@ -35,7 +33,7 @@
       "access": "public",
       "url": "https://en.wikipedia.org/wiki/Software_testing",
       "title": "Key Example (Completes Checkpoint 2)",
-      "relevance": "Visiting this single item will complete the second checkpoint."
+      "context": "Visiting this single item will complete the second checkpoint."
     },
     {
       "origin": "external",
@@ -43,7 +41,7 @@
       "access": "public",
       "url": "https://en.wikipedia.org/wiki/Test-driven_development",
       "title": "Further Reading (Optional)",
-      "relevance": "This item is not part of any checkpoint and will not affect progress."
+      "context": "This item is not part of any checkpoint and will not affect progress."
     }
   ],
   "checkpoints": [

@@ -67,9 +67,8 @@ async function initialize() {
             navigateTo(pendingViewData.targetView, pendingViewData.instanceId);
             await storage.removeSession(PENDING_VIEW_KEY);
         } else {
-            const response = await sendMessageToBackground({ action: 'get_current_tab_context' });
+            const response = await sendMessageToBackground({ action: 'get_initial_sidebar_context' });
             if (response?.success) {
-                // --- FIX: Ensure context is fully updated before navigating ---
                 await updateSidebarContext(response);
                 if (!response.instanceId) {
                     navigateTo('root');
@@ -127,27 +126,23 @@ export async function navigateTo(viewName, instanceId = null, data = null) {
     try {
         switch(viewName) {
             case 'packet-detail':
-                const [instanceData, browserState] = await Promise.all([
-                    storage.getPacketInstance(instanceId),
-                    storage.getPacketBrowserState(instanceId)
-                ]);
+                const instanceData = await storage.getPacketInstance(instanceId);
 
                 if (!instanceData) throw new Error(`Packet instance ${instanceId} not found.`);
                 
-                const imageData = await storage.getPacketImage(instanceData.imageId);
-                if (!imageData) throw new Error(`Packet image ${instanceData.imageId} for instance ${instanceId} not found.`);
+                const browserState = await storage.getPacketBrowserState(instanceId);
 
                 currentView = 'packet-detail';
                 currentInstanceId = instanceData.instanceId;
                 currentInstanceData = instanceData;
-                newSidebarTitle = instanceData.topic || 'Packet Details';
+                newSidebarTitle = instanceData.title || 'Packet Details';
                 domRefs.packetDetailView.classList.remove('hidden');
                 
-                await detailView.displayPacketContent(instanceData, imageData, browserState, currentPacketUrl);
+                await detailView.displayPacketContent(instanceData, browserState, currentPacketUrl);
                 break;
             case 'create':
                 currentView = 'create';
-                newSidebarTitle = data?.topic ? `Editing: ${data.topic}` : 'Packet Builder';
+                newSidebarTitle = data?.title ? `Editing: ${data.title}` : 'Packet Builder';
                 domRefs.settingsBtn?.classList.add('hidden');
                 domRefs.createView.classList.remove('hidden');
                 await createView.prepareCreateView(data);
@@ -209,18 +204,11 @@ async function updateSidebarContext(contextData) {
             return; 
         }
 
-        const newImageData = await storage.getPacketImage(newInstanceData.imageId);
-        if (!newImageData) {
-            logger.error('Sidebar:updateSidebarContext', `Could not find image for instance ${newInstanceId}.`);
-            navigateTo('root');
-            return;
-        }
-
         currentInstanceData = newInstanceData;
         currentPacketUrl = newPacketUrl;
         
         const browserState = await storage.getPacketBrowserState(currentInstanceId);
-        await detailView.displayPacketContent(currentInstanceData, newImageData, browserState, currentPacketUrl);
+        await detailView.displayPacketContent(currentInstanceData, browserState, currentPacketUrl);
     }
 }
 
@@ -283,28 +271,24 @@ async function handleBackgroundMessage(message) {
             showRootViewStatus(`Creation failed: ${data?.error || 'Unknown'}`, 'error');
             break;
         case 'playback_state_updated':
+            // --- START OF FIX: Ensure the latest instance data is used for rendering ---
             if (currentView === 'packet-detail' && currentInstanceId === data.instanceId) {
-                detailView.updatePlaybackUI(data);
-            }
-            break;
-        case 'moment_tripped':
-            if (currentView === 'packet-detail' && currentInstanceId === data.instanceId) {
+                // Update the sidebar's master copy of the instance state
                 currentInstanceData = data.instance;
-                const image = await storage.getPacketImage(data.instance.imageId);
-                const browserState = await storage.getPacketBrowserState(data.instanceId);
-                await detailView.displayPacketContent(data.instance, image, browserState, currentPacketUrl);
 
-                if (data.mentionedItemId) {
-                    const cardToHighlight = domRefs.packetDetailView.querySelector(
-                        `.card[data-page-id="${data.mentionedItemId}"], .card[data-url="${data.mentionedItemId}"]`
-                    );
-                    if (cardToHighlight) {
-                        cardToHighlight.classList.remove('link-mentioned'); // Reset animation
-                        void cardToHighlight.offsetWidth; // Trigger reflow
-                        cardToHighlight.classList.add('link-mentioned');
+                // Pass the fresh instance data directly to the UI update functions
+                detailView.updatePlaybackUI(data, currentInstanceData); 
+                detailView.updateCardVisibility(currentInstanceData);
+
+                if (data.lastTrippedMoment?.url) {
+                    const cardToAnimate = domRefs.packetDetailView.querySelector(`.card[data-url="${data.lastTrippedMoment.url}"]`);
+                    if (cardToAnimate) {
+                        cardToAnimate.classList.add('link-mentioned');
+                        setTimeout(() => cardToAnimate.classList.remove('link-mentioned'), 1500);
                     }
                 }
             }
+            // --- END OF FIX ---
             break;
         case 'navigate_to_view':
             if (data?.viewName) {
@@ -324,7 +308,7 @@ async function handleBackgroundMessage(message) {
             if (currentView === 'root') {
                 await rootView.displayRootNavigation();
             }
-            showRootViewStatus(`New packet "${data.image.topic}" ready in Library.`, 'success');
+            showRootViewStatus(`New packet "${data.image.title}" ready in Library.`, 'success');
             break;
         case 'packet_image_deleted':
             if (currentView === 'root') {
@@ -332,7 +316,7 @@ async function handleBackgroundMessage(message) {
             }
             break;
         case 'packet_instance_created':
-            showRootViewStatus(`Started packet '${data.instance.topic}'.`, 'success');
+            showRootViewStatus(`Started packet '${data.instance.title}'.`, 'success');
             if (currentView !== 'create') {
                 navigateTo('packet-detail', data.instance.instanceId);
             }
@@ -341,9 +325,9 @@ async function handleBackgroundMessage(message) {
             if (currentView === 'root') {
                 rootView.updateInstanceRowUI(data.instance);
             } else if (currentView === 'packet-detail' && currentInstanceId === data.instance.instanceId) {
-                const browserState = await storage.getPacketBrowserState(data.instance.instanceId);
-                const image = await storage.getPacketImage(data.instance.imageId);
-                await detailView.displayPacketContent(data.instance, image, browserState, currentPacketUrl);
+                storage.getPacketBrowserState(data.instance.instanceId).then(browserState => {
+                    detailView.displayPacketContent(data.instance, browserState, currentPacketUrl);
+                });
             }
             break;
         case 'packet_instance_deleted':
@@ -367,7 +351,7 @@ async function handleBackgroundMessage(message) {
             dialogHandler.showCloseGroupDialog(data);
             break;
         case 'show_confetti':
-            showConfetti(data.topic);
+            showConfetti(data.title);
             break;
         case 'theme_preference_updated':
             await applyThemeMode();
@@ -413,13 +397,13 @@ function showSettingsStatus(message, type, autoClear) {
 
 // --- Confetti Animation ---
 
-async function showConfetti(topic) {
+async function showConfetti(title) {
     const settings = await storage.getSettings();
     if (settings.confettiEnabled === false) {
         return; 
     }
 
-    const colorName = packetUtils.getColorForTopic(topic);
+    const colorName = packetUtils.getColorForTopic(title);
     const colorMap = { grey: '#78909c', blue: '#42a5f5', red: '#ef5350', yellow: '#ffee58', green: '#66bb6a', pink: '#ec407a', purple: '#ab47bc', cyan: '#26c6da', orange: '#ffa726' };
     const color = colorMap[colorName] || '#78909c';
 

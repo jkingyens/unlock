@@ -22,6 +22,7 @@ import * as tabGroupHandler from './tab-group-handler.js';
 
 const pendingVisits = {};
 const pendingNavigationActionTimers = new Map();
+let mostRecentInstance = null; // Cache for the most recently handled instance
 
 export function clearPendingVisitTimer(tabId) {
     if (pendingVisits[tabId]?.timerId) {
@@ -72,24 +73,28 @@ export async function checkAndPromptForCompletion(logPrefix, visitResult, instan
             return;
         }
         logger.log('NavigationHandler', 'Packet just completed. Acknowledging and showing prompt.', instanceId);
-        instanceData.completionAcknowledged = true;
-        await storage.savePacketInstance(instanceData);
-        sidebarHandler.notifySidebar('packet_instance_updated', { instance: instanceData, source: 'completion_ack' });
-        if (activeMediaPlayback.instanceId === instanceId) {
-            await resetActiveMediaPlayback();
-        }
+
         if (sidebarHandler.isSidePanelAvailable()) {
-            sidebarHandler.notifySidebar('show_confetti', { topic: instanceData.topic || '', instanceId: instanceId });
+            sidebarHandler.notifySidebar('show_confetti', { title: instanceData.title || '', instanceId: instanceId });
+            
             if (await shouldUseTabGroups()) {
                 const browserState = await storage.getPacketBrowserState(instanceId);
                 if (browserState?.tabGroupId) {
                     sidebarHandler.notifySidebar('prompt_close_tab_group', {
                         instanceId: instanceId,
                         tabGroupId: browserState.tabGroupId,
-                        topic: instanceData.topic || 'this packet'
+                        topic: instanceData.title || 'this packet'
                     });
                 }
             }
+        }
+
+        instanceData.completionAcknowledged = true;
+        await storage.savePacketInstance(instanceData);
+        sidebarHandler.notifySidebar('packet_instance_updated', { instance: instanceData, source: 'completion_ack' });
+        
+        if (activeMediaPlayback.instanceId === instanceId) {
+            await resetActiveMediaPlayback();
         }
     }
 }
@@ -172,18 +177,29 @@ async function processNavigationEvent(tabId, finalUrl, details) {
     const finalContext = await getPacketContext(tabId);
     logger.log(logPrefix, 'Final context after logic:', finalContext);
     let finalInstance = finalContext ? await storage.getPacketInstance(finalContext.instanceId) : null;
-    let image = finalInstance ? await storage.getPacketImage(finalInstance.imageId) : null;
+    
+    if (finalInstance && activeMediaPlayback.instanceId === finalInstance.instanceId) {
+        finalInstance = activeMediaPlayback.instance;
+        logger.log(logPrefix, 'Using live instance data from activeMediaPlayback to avoid race condition.');
+    }
+    
+    mostRecentInstance = finalInstance;
 
+    let image = finalInstance ? await storage.getPacketImage(finalInstance.imageId) : null;
 
     if (finalInstance && image) {
         const loadedItem = finalInstance.contents.find(item => item.url === finalContext.canonicalPacketUrl);
         if (loadedItem) {
             let momentTripped = false;
-            (image.moments || []).forEach((moment, index) => {
-                if (moment.type === 'visit' && moment.sourcePageId === loadedItem.pageId && finalInstance.momentsTripped[index] === 0) {
+            (finalInstance.moments || []).forEach((moment, index) => {
+                if (moment.type === 'visit' && moment.sourceUrl === loadedItem.lrl && finalInstance.momentsTripped[index] === 0) {
                     finalInstance.momentsTripped[index] = 1;
                     momentTripped = true;
-                    logger.log(logPrefix, `DECISION: Navigation to page ${loadedItem.pageId} is tripping moment ${index}.`);
+                    logger.log('MomentLogger:Visit', `Tripping Moment #${index} due to navigation`, {
+                        instanceId: finalInstance.instanceId,
+                        visitedUrl: loadedItem.url
+                    });
+                    logger.log(logPrefix, `DECISION: Navigation to page with URL ${loadedItem.url} is tripping moment ${index}.`);
                 }
             });
             if (momentTripped) {
@@ -263,10 +279,14 @@ export async function startVisitTimer(tabId, instanceId, canonicalPacketUrl, log
             if (tab && tab.active) {
                 logger.log(logPrefix, 'Visit timer fired for active tab. Marking as visited.');
                 
-                // --- START OF THE FIX ---
-                let instanceToUpdate = (activeMediaPlayback.instanceId === instanceId)
-                    ? activeMediaPlayback.instance
-                    : await storage.getPacketInstance(instanceId);
+                let instanceToUpdate = null;
+                if (mostRecentInstance && mostRecentInstance.instanceId === instanceId) {
+                    instanceToUpdate = mostRecentInstance;
+                } else if (activeMediaPlayback.instanceId === instanceId) {
+                    instanceToUpdate = activeMediaPlayback.instance;
+                } else {
+                    instanceToUpdate = await storage.getPacketInstance(instanceId);
+                }
                 
                 if (!instanceToUpdate) {
                     logger.warn(logPrefix, "Instance not found when visit timer fired.", { instanceId });
@@ -280,18 +300,15 @@ export async function startVisitTimer(tabId, instanceId, canonicalPacketUrl, log
                     
                     await storage.savePacketInstance(updatedInstance);
                     
+                    mostRecentInstance = updatedInstance;
                     if (activeMediaPlayback.instanceId === instanceId) {
                         activeMediaPlayback.instance = updatedInstance;
                     }
 
                     sidebarHandler.notifySidebar('packet_instance_updated', { instance: updatedInstance, source: 'dwell_visit' });
                     
-                    if (activeMediaPlayback.instanceId !== instanceId) {
-                        await setMediaPlaybackState({ instanceId: instanceId, tabId: tabId, topic: updatedInstance.topic }, { showVisitedAnimation: true, source: 'dwell_visit' });
-                    }
                     await checkAndPromptForCompletion(logPrefix, visitResult, instanceId);
                 }
-                 // --- END OF THE FIX ---
             } else {
                  logger.log(logPrefix, 'Visit timer fired, but tab was not active. Visit not marked.');
             }

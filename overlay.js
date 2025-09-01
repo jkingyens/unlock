@@ -10,6 +10,7 @@ if (!window.unlockOverlayInitialized) {
     // --- Globals ---
     let overlay, playPauseBtn, playIcon, pauseIcon, overlayText, linkMention;
     let isVisible = false;
+    let momentTimeout = null;
 
     // --- Main Initialization ---
     function createOverlay() {
@@ -34,7 +35,7 @@ if (!window.unlockOverlayInitialized) {
                     </div>
                     <div class="unlock-overlay-text"></div>
                 </div>
-                <div class="unlock-overlay-link-mention" style="display: none;">
+                <div class="unlock-overlay-link-mention">
                      <div class="icon"></div>
                      <div class="link-text"></div>
                 </div>
@@ -54,13 +55,9 @@ if (!window.unlockOverlayInitialized) {
             e.stopPropagation();
             chrome.runtime.sendMessage({ action: 'request_playback_action', data: { intent: 'toggle' } });
         });
-
-        overlay.addEventListener('click', () => {
-            // This is now a no-op, but the listener is kept for potential future use.
-        });
         
         linkMention.addEventListener('click', (e) => {
-            e.stopPropagation(); // Prevents the main overlay click
+            e.stopPropagation();
             const urlToOpen = linkMention.dataset.url;
             if (urlToOpen) {
                 chrome.runtime.sendMessage({
@@ -76,89 +73,90 @@ if (!window.unlockOverlayInitialized) {
      * @param {object} state - The playback state from background.js
      */
     function syncState(state) {
-        if (!overlay) return;
+        if (!overlay || !state) return;
 
-        // --- Animation Control ---
         if (state.animate === false) {
             overlay.classList.add('no-transition');
         } else {
             overlay.classList.remove('no-transition');
         }
 
-        // --- Visibility ---
         if (state.isVisible !== isVisible) {
             isVisible = state.isVisible;
             overlay.classList.toggle('visible', isVisible);
         }
 
-        // After changing visibility, remove the transition class so the next change can animate.
         if (state.animate === false) {
             setTimeout(() => {
                 overlay.classList.remove('no-transition');
             }, 50);
         }
         
-        // Remove the inline style after the first state sync to hand control to the CSS.
         if (overlay.style.opacity !== '') {
             overlay.style.opacity = '';
         }
 
-        // --- Play/Pause State ---
         const isPlaying = state.isPlaying;
         playIcon.style.display = isPlaying ? 'none' : 'block';
         pauseIcon.style.display = isPlaying ? 'block' : 'none';
         overlay.classList.toggle('playing', isPlaying);
 
-        // --- Text Content ---
-        overlayText.textContent = state.topic || 'Unlock Media';
+        overlayText.textContent = state.title || 'Unlock Media';
 
-        // --- Moment Mention ---
-        const hasMoment = state.lastTrippedMoment;
-
-        if (hasMoment) {
-            // Always update the content if a moment is present
+        if (state.lastTrippedMoment) {
             linkMention.querySelector('.link-text').textContent = state.lastTrippedMoment.title;
             linkMention.dataset.url = state.lastTrippedMoment.url;
-            linkMention.style.display = 'flex';
+            
+            clearTimeout(momentTimeout);
+            overlay.classList.add('moment-visible');
+            linkMention.classList.add('visible');
 
-            // Only add the animation class if explicitly told to
-            if (state.animateMomentMention) {
-                linkMention.classList.add('animate');
-                setTimeout(() => linkMention.classList.remove('animate'), 500);
-            }
-        } else {
-            // Hide the link mention if no moment is present
-            linkMention.style.display = 'none';
-            delete linkMention.dataset.url;
+            momentTimeout = setTimeout(() => {
+                overlay.classList.remove('moment-visible');
+                if (!overlay.classList.contains('moment-visible')) {
+                    linkMention.classList.remove('visible');
+                }
+            }, 5000);
         }
 
-        // --- Visited Animation ---
         if (state.showVisitedAnimation) {
             overlay.classList.add('visited-complete');
             setTimeout(() => {
                 overlay.classList.remove('visited-complete');
-            }, 1500); // Duration of the animation
+            }, 1500);
         }
     }
 
 
     // --- Message Listener from Background Script ---
     chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-        if (message.action === 'sync_overlay_state') {
+        if (message.action === 'update_overlay_state' || message.action === 'sync_overlay_state') {
             syncState(message.data);
+        }
+        return true;
+    });
+    
+    // --- Visibility Change Listener ---
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') {
+            chrome.runtime.sendMessage({ action: 'get_playback_state' }, (state) => {
+                if (!chrome.runtime.lastError && state) {
+                    syncState(state);
+                }
+            });
         }
     });
 
 
     // --- Initial Setup ---
-    // Create the overlay elements as soon as the script is injected.
     createOverlay();
 
-    // Request the initial state from the background script once ready.
     chrome.runtime.sendMessage({ action: 'get_playback_state' }, (initialState) => {
-        if (initialState) {
+        if (chrome.runtime.lastError) {
+            // Suppress "Receiving end does not exist" error during page load
+        } else if (initialState) {
             syncState(initialState);
         }
     });
 
-} // End of idempotency check block
+}

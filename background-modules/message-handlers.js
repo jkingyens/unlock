@@ -14,7 +14,8 @@ import {
     CONFIG,
     arrayBufferToBase64,
     base64Decode,
-    indexedDbStorage
+    indexedDbStorage,
+    sanitizeForFileName
 } from '../utils.js';
 import * as tabGroupHandler from './tab-group-handler.js';
 import * as sidebarHandler from './sidebar-handler.js';
@@ -235,8 +236,11 @@ async function handleMarkUrlVisited(data, sendResponse) {
      const { packetId: instanceId, url } = data;
      if (!instanceId || !url) return sendResponse({ success: false, error: 'Missing instanceId or url' });
      try {
-          const result = await packetUtils.markUrlAsVisited(instance.instanceId, url);
+          const instance = await storage.getPacketInstance(instanceId);
+          if (!instance) return sendResponse({ success: false, error: 'Instance not found.' });
+          const result = await packetUtils.markUrlAsVisited(instance, url);
           if (result.success && !result.alreadyVisited && !result.notTrackable) {
+               await storage.savePacketInstance(result.instance);
                try { chrome.runtime.sendMessage({ action: 'url_visited', data: { packetId: instanceId, url } }); } catch (e) { /* ignore */ }
           }
           sendResponse({ success: result.success, error: result.error });
@@ -270,68 +274,71 @@ async function handleSidebarReady(data, sender, sendResponse) {
     }
 }
 
-function findMediaItemInInstance(instance, pageId) {
-    if (!instance || !instance.contents || !pageId) return null;
-    return instance.contents.find(item => item.pageId === pageId && item.format === 'audio');
+function findMediaItemInInstance(instance, url) {
+    if (!instance || !instance.contents || !url) return null;
+    return instance.contents.find(item => item.url === url && item.format === 'audio');
 }
 
 async function handlePlaybackActionRequest(data, sender, sendResponse) {
-    const { intent, instanceId, pageId } = data;
+    const { intent, instanceId, url, lrl } = data;
     try {
         switch (intent) {
             case 'play':
-                if (!instanceId || !pageId) throw new Error('instanceId and pageId required for play intent.');
+                if (!instanceId || !url || !lrl) throw new Error('instanceId, url, and lrl required for play intent.');
 
-                if (activeMediaPlayback.isPlaying && (activeMediaPlayback.instanceId !== instanceId || activeMediaPlayback.pageId !== pageId)) {
-                    await saveCurrentTime(activeMediaPlayback.instanceId, activeMediaPlayback.pageId);
+                if (activeMediaPlayback.isPlaying && (activeMediaPlayback.instanceId !== instanceId || activeMediaPlayback.url !== url)) {
+                    await saveCurrentTime(activeMediaPlayback.instanceId, activeMediaPlayback.url);
                     await controlAudioInOffscreen('stop', {});
                 }
 
                 const instance = await storage.getPacketInstance(instanceId);
                 if (!instance) throw new Error(`Could not find instance ${instanceId}.`);
 
-                const mediaItem = findMediaItemInInstance(instance, pageId);
-                if (!mediaItem) throw new Error(`Could not find audio track ${pageId} in packet.`);
-
-                const cachedAudio = await indexedDbStorage.getGeneratedContent(instance.imageId, pageId);
-                if (!cachedAudio || !cachedAudio[0]?.content) throw new Error("Could not find cached audio data.");
+                const mediaItem = findMediaItemInInstance(instance, url);
+                if (!mediaItem) throw new Error(`Could not find audio track with url ${url} in packet.`);
+                
+                const indexedDbKey = sanitizeForFileName(lrl);
+                const cachedAudio = await indexedDbStorage.getGeneratedContent(instance.instanceId, indexedDbKey);
+                if (!cachedAudio || !cachedAudio[0]?.content) {
+                    throw new Error("Could not find cached audio data in IndexedDB for instance.");
+                }
 
                 const audioB64 = arrayBufferToBase64(cachedAudio[0].content);
                 const startTime = mediaItem.currentTime || 0;
 
-                await controlAudioInOffscreen('play', { audioB64, mimeType: mediaItem.mimeType, pageId, instanceId, startTime });
+                await controlAudioInOffscreen('play', { audioB64, mimeType: mediaItem.mimeType, url: url, instanceId, startTime });
 
                 const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
                 await setMediaPlaybackState({
                     isPlaying: true,
-                    pageId: pageId,
+                    url: url,
+                    lrl: lrl,
                     instanceId: instanceId,
-                    topic: instance.topic,
+                    title: instance.title,
                     tabId: activeTab ? activeTab.id : null,
                     currentTime: startTime,
                     duration: mediaItem.duration || 0,
-                    instance: instance, // Load the live instance into the state
+                    instance: instance,
                     lastTrippedMoment: null,
                 });
                 break;
             
             case 'pause':
             case 'toggle':
-                if (!activeMediaPlayback.pageId || !activeMediaPlayback.instance) {
+                if (!activeMediaPlayback.url || !activeMediaPlayback.instance) {
                     return sendResponse({ success: true, message: "No active media to toggle/pause." });
                 }
                 await controlAudioInOffscreen(intent, {});
                 const isNowPlaying = intent === 'toggle' ? !activeMediaPlayback.isPlaying : false;
                 
                 if (!isNowPlaying) {
-                    // Use the live currentTime from the state object for saving
-                    await saveCurrentTime(activeMediaPlayback.instanceId, activeMediaPlayback.pageId, activeMediaPlayback.currentTime);
+                    await saveCurrentTime(activeMediaPlayback.instanceId, activeMediaPlayback.url, activeMediaPlayback.currentTime);
                 }
                 await setMediaPlaybackState({ isPlaying: isNowPlaying });
                 break;
             
             case 'stop':
-                if (activeMediaPlayback.pageId) {
+                if (activeMediaPlayback.url) {
                     await resetActiveMediaPlayback();
                 }
                 break;
@@ -375,6 +382,42 @@ const actionHandlers = {
         })();
         return true;
     },
+    'get_initial_sidebar_context': async (data, sender, sendResponse) => {
+        try {
+            const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+            if (!activeTab) {
+                return sendResponse({ success: true, instanceId: null, instance: null });
+            }
+
+            let context_to_send = {};
+            const tabContext = await getPacketContext(activeTab.id);
+
+            if (tabContext && tabContext.instanceId) {
+                // Tier 1: Tab context takes precedence
+                context_to_send = {
+                    instanceId: tabContext.instanceId,
+                    instance: await storage.getPacketInstance(tabContext.instanceId),
+                    packetUrl: tabContext.canonicalPacketUrl,
+                    currentUrl: tabContext.currentBrowserUrl,
+                };
+            } else if (activeMediaPlayback.url && activeMediaPlayback.instance) {
+                // Tier 2: Fallback to active media context
+                context_to_send = {
+                    instanceId: activeMediaPlayback.instanceId,
+                    instance: activeMediaPlayback.instance,
+                    packetUrl: null,
+                    currentUrl: activeTab.url,
+                };
+            } else {
+                // Default: No context
+                context_to_send = { instanceId: null, instance: null };
+            }
+            sendResponse({ success: true, ...context_to_send });
+        } catch (error) {
+            logger.error('MessageHandler:get_initial_sidebar_context', 'Error getting initial context', error);
+            sendResponse({ success: false, error: error.message });
+        }
+    },
     'request_playback_action': handlePlaybackActionRequest,
     'get_playback_state': async (data, sender, sendResponse) => {
         const instance = activeMediaPlayback.instance;
@@ -384,7 +427,7 @@ const actionHandlers = {
         const state = {
             ...activeMediaPlayback,
             momentsTripped: instance?.momentsTripped || [],
-            isVisible: !!activeMediaPlayback.pageId && !isSidebarOpen && overlayEnabled,
+            isVisible: !!activeMediaPlayback.url && !isSidebarOpen && overlayEnabled,
             animate: false
         };
         sendResponse(state);
@@ -393,7 +436,7 @@ const actionHandlers = {
         sendResponse({ success: true, message: "User should open side panel via action icon." });
     },
     'audio_time_update': async (data) => {
-        if (!activeMediaPlayback.instance || activeMediaPlayback.pageId !== data.pageId || !activeMediaPlayback.isPlaying) {
+        if (!activeMediaPlayback.instance || activeMediaPlayback.url !== data.url || !activeMediaPlayback.isPlaying) {
             return;
         }
 
@@ -401,17 +444,21 @@ const actionHandlers = {
         activeMediaPlayback.duration = data.duration;
 
         const instance = activeMediaPlayback.instance;
-        const image = await storage.getPacketImage(instance.imageId);
         let animateMomentMention = false;
         
-        if (image && Array.isArray(image.moments)) {
+        if (Array.isArray(instance.moments)) {
             let momentTripped = false;
-            image.moments.forEach((moment, index) => {
+            instance.moments.forEach((moment, index) => {
                 if (moment.type === 'mediaTimestamp' && 
-                    moment.sourcePageId === data.pageId &&
+                    moment.sourceUrl === activeMediaPlayback.lrl &&
                     data.currentTime >= moment.timestamp &&
                     instance.momentsTripped[index] === 0) {
                     
+                    logger.log('MomentLogger:Media', `Tripping Moment #${index} for instance ${instance.instanceId}`, { 
+                        currentTime: data.currentTime, 
+                        requiredTimestamp: moment.timestamp 
+                    });
+
                     instance.momentsTripped[index] = 1;
                     momentTripped = true;
                     
@@ -427,12 +474,6 @@ const actionHandlers = {
                         };
                         animateMomentMention = true;
                     }
-                    
-                    sidebarHandler.notifySidebar('moment_tripped', { 
-                        instanceId: instance.instanceId, 
-                        instance: instance,
-                        mentionedItemId: revealedItem ? (revealedItem.pageId || revealedItem.url) : null
-                    });
                 }
             });
             if (momentTripped) {
@@ -440,14 +481,17 @@ const actionHandlers = {
             }
         }
         
-        const mediaItem = findMediaItemInInstance(instance, data.pageId);
+        const mediaItem = findMediaItemInInstance(instance, data.url);
         if (mediaItem) {
             mediaItem.currentTime = data.currentTime;
             mediaItem.duration = data.duration;
         }
-        debouncedSaveInstance(instance);
-
+        
         await notifyUIsOfStateChange({ animateMomentMention });
+       
+        if (animateMomentMention) {
+            activeMediaPlayback.lastTrippedMoment = null;
+        }
     },
     'overlay_setting_updated': async (data, sender, sendResponse) => {
         await notifyUIsOfStateChange();
@@ -474,10 +518,10 @@ const actionHandlers = {
         return true; // Indicate that the response will be sent asynchronously
     },
     'get_draft_item_for_preview': async (data, sender, sendResponse) => {
-        const { pageId } = data;
+        const { rlr } = data; // Use 'rlr' (local resource locator)
         const sessionData = await storage.getSession('draftPacketForPreview');
         const draftPacket = sessionData?.draftPacketForPreview;
-        const item = draftPacket?.sourceContent.find(i => i.pageId === pageId);
+        const item = draftPacket?.sourceContent.find(i => i.lrl === rlr);
         if (item?.contentB64) {
             const htmlContent = new TextDecoder().decode(base64Decode(item.contentB64));
             sendResponse({ success: true, htmlContent, title: item.title });
@@ -529,10 +573,10 @@ const actionHandlers = {
     'mark_url_visited': handleMarkUrlVisited,
     'media_playback_complete': async (data, sender, sendResponse) => {
         const liveInstance = activeMediaPlayback.instance;
-        await saveCurrentTime(data.instanceId, data.pageId, 0, true);
+        await saveCurrentTime(data.instanceId, data.url, 0, true);
         activeMediaPlayback.isPlaying = false;
         
-        const visitResult = await packetUtils.markPageIdAsVisited(data.instanceId, data.pageId, liveInstance);
+        const visitResult = await packetUtils.markUrlAsVisited(liveInstance, data.url);
         
         if (visitResult.success && visitResult.modified) {
             await storage.savePacketInstance(visitResult.instance);
@@ -549,10 +593,11 @@ const actionHandlers = {
             return sendResponse({ success: false, error: 'Missing active instance or URL.' });
         }
         try {
-            await setMediaPlaybackState({}, { animate: false, source: 'overlay_link_click' });
             const instance = await storage.getPacketInstance(instanceId);
-            if (!instance) { throw new Error(`Instance ${instanceId} not found.`); }
-            await handleOpenContent({ instance, url }, sender, sendResponse);
+            if (!instance) {
+                throw new Error(`Instance ${instanceId} not found.`);
+            }
+            return handleOpenContent({ instance, url }, sender, sendResponse);
         } catch (error) {
             logger.error('MessageHandler:open_content_from_overlay', 'Error opening content', error);
             sendResponse({ success: false, error: error.message });
@@ -566,7 +611,8 @@ const actionHandlers = {
     'page_interaction_complete': async (data, sender, sendResponse) => {
         const context = await getPacketContext(sender.tab.id);
         if (context?.instanceId && context?.canonicalPacketUrl) {
-            const visitResult = await packetUtils.markUrlAsVisited(context.instanceId, context.canonicalPacketUrl);
+            const instance = await storage.getPacketInstance(context.instanceId);
+            const visitResult = await packetUtils.markUrlAsVisited(instance, context.canonicalPacketUrl);
             if (visitResult.success && visitResult.modified) {
                 await storage.savePacketInstance(visitResult.instance);
                 sidebarHandler.notifySidebar('packet_instance_updated', { instance: visitResult.instance });
@@ -585,7 +631,11 @@ const actionHandlers = {
         storage.setSession({ [PENDING_VIEW_KEY]: data }).then(success => sendResponse({ success }));
     },
     'publish_image_for_sharing': (data, sender, sendResponse) => publishImageForSharing(data.imageId).then(sendResponse),
-    'import_image_from_url': (data, sender, sendResponse) => importImageFromUrl(data.url).then(sendResponse)
+    'import_image_from_url': (data, sender, sendResponse) => importImageFromUrl(data.url).then(sendResponse),
+    'debug_dump_idb': (data, sender, sendResponse) => {
+        indexedDbStorage.debugDumpIndexedDb();
+        sendResponse({ success: true });
+    }
 };
 
 export function handleMessage(message, sender, sendResponse) {
