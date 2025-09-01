@@ -67,7 +67,7 @@ async function initialize() {
             navigateTo(pendingViewData.targetView, pendingViewData.instanceId);
             await storage.removeSession(PENDING_VIEW_KEY);
         } else {
-            const response = await sendMessageToBackground({ action: 'get_current_tab_context' });
+            const response = await sendMessageToBackground({ action: 'get_initial_sidebar_context' });
             if (response?.success) {
                 await updateSidebarContext(response);
                 if (!response.instanceId) {

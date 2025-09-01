@@ -16,18 +16,14 @@ let titlePromptKeyListener = null;
 
 let sendMessageToBackground;
 let showRootViewStatus;
-// --- START OF THE FIX ---
 let navigateTo;
-// --- END OF THE FIX ---
 
 
 // --- Initialization ---
 export function init(dependencies) {
     sendMessageToBackground = dependencies.sendMessageToBackground;
     showRootViewStatus = dependencies.showRootViewStatus;
-    // --- START OF THE FIX ---
     navigateTo = dependencies.navigateTo;
-    // --- END OF THE FIX ---
 }
 
 /**
@@ -206,13 +202,13 @@ async function handleImportPacket() {
 }
 
 export function showCloseGroupDialog(data) {
-    const { topic } = data;
+    const { topic, tabGroupId, instanceId } = data;
     if (!domRefs.closeGroupDialog) return;
     
     removeCloseGroupDialogListeners();
     domRefs.closeGroupDialogMessage.textContent = `Packet '${topic || 'this packet'}' complete!`;
     
-    closeGroupConfirmListener = () => handleConfirmCloseGroup(data.tabGroupId);
+    closeGroupConfirmListener = () => handleConfirmCloseGroup(tabGroupId, instanceId);
     closeGroupCancelListener = hideCloseGroupDialog;
     closeGroupOverlayClickListener = (e) => { if (e.target === domRefs.closeGroupDialog) hideCloseGroupDialog(); };
 
@@ -240,32 +236,23 @@ function removeCloseGroupDialogListeners() {
     closeGroupConfirmListener = closeGroupCancelListener = closeGroupOverlayClickListener = null;
 }
 
-function handleConfirmCloseGroup(tabGroupId) {
+async function handleConfirmCloseGroup(tabGroupId, instanceIdToClose) {
     hideCloseGroupDialog();
 
-    // --- START OF THE FIX ---
-    // 1. Immediately reset the sidebar's internal state. This is the most
-    //    critical step to prevent race conditions. The sidebar no longer
-    //    "knows" about the packet it was just viewing.
     if (typeof navigateTo === 'function') {
-        // This is a stand-in for the actual reset function which should be
-        // called from the main sidebar module.
-        // For now, we navigate, which implicitly handles part of the reset.
         navigateTo('root'); 
     }
     
-    // 2. Stop any active media playback.
-    sendMessageToBackground({
-        action: 'request_playback_action',
-        data: { intent: 'stop' }
-    });
+    const playbackState = await sendMessageToBackground({ action: 'get_playback_state' });
+    if (playbackState && playbackState.instanceId === instanceIdToClose) {
+        sendMessageToBackground({
+            action: 'request_playback_action',
+            data: { intent: 'stop' }
+        });
+    }
 
-    // 3. Now, safely send the command to the background to close the tabs.
-    //    Any context updates that arrive will be correctly handled because
-    //    the sidebar's state has already been cleared.
     sendMessageToBackground({ action: 'remove_tab_groups', data: { groupIds: [tabGroupId] } })
         .catch(err => logger.error("DialogHandler", `Error sending close group message: ${err.message}`));
-    // --- END OF THE FIX ---
 }
 
 export function showConfirmDialog(message, confirmText = 'Confirm', cancelText = 'Cancel', isDangerAction = false) {

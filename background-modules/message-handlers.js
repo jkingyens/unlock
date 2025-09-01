@@ -382,6 +382,42 @@ const actionHandlers = {
         })();
         return true;
     },
+    'get_initial_sidebar_context': async (data, sender, sendResponse) => {
+        try {
+            const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+            if (!activeTab) {
+                return sendResponse({ success: true, instanceId: null, instance: null });
+            }
+
+            let context_to_send = {};
+            const tabContext = await getPacketContext(activeTab.id);
+
+            if (tabContext && tabContext.instanceId) {
+                // Tier 1: Tab context takes precedence
+                context_to_send = {
+                    instanceId: tabContext.instanceId,
+                    instance: await storage.getPacketInstance(tabContext.instanceId),
+                    packetUrl: tabContext.canonicalPacketUrl,
+                    currentUrl: tabContext.currentBrowserUrl,
+                };
+            } else if (activeMediaPlayback.url && activeMediaPlayback.instance) {
+                // Tier 2: Fallback to active media context
+                context_to_send = {
+                    instanceId: activeMediaPlayback.instanceId,
+                    instance: activeMediaPlayback.instance,
+                    packetUrl: null,
+                    currentUrl: activeTab.url,
+                };
+            } else {
+                // Default: No context
+                context_to_send = { instanceId: null, instance: null };
+            }
+            sendResponse({ success: true, ...context_to_send });
+        } catch (error) {
+            logger.error('MessageHandler:get_initial_sidebar_context', 'Error getting initial context', error);
+            sendResponse({ success: false, error: error.message });
+        }
+    },
     'request_playback_action': handlePlaybackActionRequest,
     'get_playback_state': async (data, sender, sendResponse) => {
         const instance = activeMediaPlayback.instance;
