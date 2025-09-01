@@ -119,7 +119,7 @@ function _parseJsonArticleResponse(contentStr, providerNameForLog) {
             logger.warn(`LLMService:_parseJsonArticleResponse[${providerNameForLog}]`, `Returned JSON array directly for articles. Wrapping it.`);
             return { contents: parsedJson };
         }
-        if (parsedJson.topic && parsedJson.contentSummary) { // For extract_topic_from_html
+        if (parsedJson.title && parsedJson.contentSummary) { // For extract_title_from_html
             return parsedJson;
         }
 
@@ -141,12 +141,12 @@ function getExtractTopicPromptText(htmlContent) {
     const systemPrompt = `You are an expert web page analyzer. Your task is to analyze the provided text content of a webpage to identify its main topic and create a concise summary.
 Your response MUST be a single, valid JSON object.
 This JSON object MUST have exactly two keys:
-- "topic": A string representing a short, descriptive title for the main subject of the page (e.g., "The History of Quantum Computing").
+- "title": A string representing a short, descriptive title for the main subject of the page (e.g., "The History of Quantum Computing").
 - "contentSummary": A string (2-3 sentences) summarizing the key points of the page's content.
 Do NOT include any introductory text, apologies, or markdown formatting like \`\`\`json around your JSON output.
 Adhere strictly to this JSON output format.`;
 
-    const userPrompt = `Analyze the following webpage content and return the 'topic' and 'contentSummary' in the specified JSON format.
+    const userPrompt = `Analyze the following webpage content and return the 'title' and 'contentSummary' in the specified JSON format.
 Page Content:
 ---
 ${htmlContent.substring(0, 15000)}
@@ -156,19 +156,19 @@ ${htmlContent.substring(0, 15000)}
 
 
 function getArticlePromptText(context) {
-      const { topic, contentSummary } = context;
-      const systemPrompt = `You are a helpful assistant that curates Wikipedia learning guides. Based on the topic and summary of a source web page, you will return a list of 5-7 highly relevant English Wikipedia articles that expand on the topic.
+      const { title, contentSummary } = context;
+      const systemPrompt = `You are a helpful assistant that curates Wikipedia learning guides. Based on the title and summary of a source web page, you will return a list of 5-7 highly relevant English Wikipedia articles that expand on the topic.
 Your response MUST be a single, valid JSON object.
 This JSON object MUST have a single top-level key named "contents".
 The value of "contents" MUST be an array of article objects.
 Each article object in the "contents" array must have exactly these keys:
 - "url": A string representing the canonical Wikipedia URL (starting with https://en.wikipedia.org/wiki/). The URL must resolve directly to the article and must NOT contain fragments (#) or query parameters (?). Verify page existence.
 - "title": A string representing the exact title of the Wikipedia article.
-- "relevance": A string (1-2 sentences) explaining the article's direct relevance to the topic and its role in the learning guide (e.g., overview, sub-topic, application).
+- "context": A string (1-2 sentences) explaining the article's direct relevance to the topic and its role in the learning guide (e.g., overview, sub-topic, application).
 Do NOT include disambiguation pages or "List of..." pages unless truly central.
 Do NOT include any introductory text, explanations, apologies, or markdown formatting like \`\`\`json around your JSON output.
 Adhere strictly to this JSON output format.`;
-      const userPrompt = `The source page's topic is: "${topic}".
+      const userPrompt = `The source page's title is: "${title}".
 The summary of the source page is: "${contentSummary}".
 Generate the Wikipedia learning guide.
 Follow ALL instructions and formatting requirements precisely.
@@ -178,13 +178,14 @@ Your entire response must be a single JSON object as specified.`;
 }
 
 function getSummaryPromptText(context) {
-    const { topic, allPacketContents } = context;
-    // This already correctly includes the original source page since its type is 'external'
-    const externalArticlesForSynthesis = allPacketContents.filter(item => item.type === 'external' && item.url);
-    const articleSynthesisInfo = externalArticlesForSynthesis.map(a => `- ${a.title}: ${a.url} (Relevance: ${a.relevance || 'N/A'})`).join('\n');
+    const { title, allPacketContents } = context;
+    // --- START OF FIX ---
+    // The filter was incorrectly using 'item.type' instead of 'item.origin'.
+    const externalArticlesForSynthesis = allPacketContents.filter(item => item.origin === 'external' && item.url);
+    // --- END OF FIX ---
+    const articleSynthesisInfo = externalArticlesForSynthesis.map(a => `- ${a.title}: ${a.url} (Context: ${a.context || 'N/A'})`).join('\n');
 
-    // Find the original source page to give it special instructions in the prompt
-    const originalSourcePage = allPacketContents.find(item => item.relevance === 'The original source page this packet was created from.');
+    const originalSourcePage = allPacketContents.find(item => item.context === 'The original source page this packet was created from.');
 
     const systemPrompt = `You are an expert content creator and a knowledgeable guide. Your task is to generate the BODY HTML for a summary page that acts as a narrative guide to a topic, using a set of provided articles.
 
@@ -196,7 +197,7 @@ CRITICAL REQUIREMENTS:
 5.  **Link to All Content:** You MUST naturally link to every article provided in the user prompt.
 6.  **Conclude with the Source Article:** The final paragraph of your narrative must provide a transition to the original source article, framing it as the culmination of the context you've provided.`;
 
-    let userPrompt = `Generate the HTML body content for a narrative guide on "${topic}".
+    let userPrompt = `Generate the HTML body content for a narrative guide on "${title}".
 
 Your guide should naturally introduce and link to all of the following articles as part of the text. Remember to add \`data-timestampable="true"\` to each link's \`<a>\` tag.
 ${articleSynthesisInfo || "No external articles provided."}
@@ -211,8 +212,8 @@ Follow ALL instructions from the system prompt precisely.`;
 }
 
 function getQuizPromptText(context) {
-    const { topic, articlesData } = context;
-    const articleInfo = articlesData.map(a => `- ${a.title}: ${a.url} (Relevance: ${a.relevance || 'N/A'})`).join('\n');
+    const { title, articlesData } = context;
+    const articleInfo = articlesData.map(a => `- ${a.title}: ${a.url} (Context: ${a.context || 'N/A'})`).join('\n');
   
     const systemPrompt = `You are an expert educational content creator and web developer. Your task is to generate the BODY HTML content for an interactive, client-side quiz.
 CRITICAL REQUIREMENTS:
@@ -222,7 +223,7 @@ CRITICAL REQUIREMENTS:
 4.  **Embedded JavaScript:** All JavaScript logic MUST be embedded directly within a single \`<script>\` tag at the end of your HTML output. Use plain, vanilla JavaScript.
 5.  **Completion Event (Most Important):** The script you write MUST contain the full definition of the \`notifyExtensionOnCompletion()\` function, and you must call this function when the quiz is successfully completed. This is the ONLY way the extension knows the user is done.`;
   
-    const userPrompt = `Generate the HTML body content (including an embedded script with the function definition) for an interactive quiz on the topic "${topic}".
+    const userPrompt = `Generate the HTML body content (including an embedded script with the function definition) for an interactive quiz on the topic "${title}".
 Base the quiz questions on the key information from these Wikipedia articles:
 ${articleInfo}
 
@@ -349,7 +350,7 @@ const llmService = {
         let responseFormat = undefined;
         let maxTokensForTask = 8192;
 
-        if (promptType === 'extract_topic_from_html') {
+        if (promptType === 'extract_title_from_html') {
             ({ systemPrompt, userPrompt } = getExtractTopicPromptText(context.htmlContent));
             responseFormat = { type: "json_object" };
             maxTokensForTask = 1024;
@@ -388,7 +389,7 @@ const llmService = {
         if (promptType === 'custom_page' || promptType === 'modify_html_for_completion') {
             return _cleanFullHtmlOutput(contentStr);
         }
-        if (promptType === 'article_suggestions' || promptType === 'extract_topic_from_html' || promptType === 'extract_media') {
+        if (promptType === 'article_suggestions' || promptType === 'extract_title_from_html' || promptType === 'extract_media') {
             return _parseJsonArticleResponse(contentStr, `OpenAI (${responseData.model || ''})`);
         }
         if (promptType === 'summary_page' || promptType === 'quiz_page') {
@@ -402,7 +403,7 @@ const llmService = {
         let generationConfig = { temperature: CONFIG.TEMPERATURE, maxOutputTokens: maxOutputTokensForTask };
         let responseMimeType = "text/plain"; 
         
-        if (promptType === 'extract_topic_from_html') {
+        if (promptType === 'extract_title_from_html') {
             ({ systemPrompt, userPrompt } = getExtractTopicPromptText(context.htmlContent));
             responseMimeType = "application/json";
         } else if (promptType === 'article_suggestions') {
@@ -447,14 +448,14 @@ const llmService = {
         if (promptType === 'custom_page' || promptType === 'modify_html_for_completion') {
             return _cleanFullHtmlOutput(contentStr);
         }
-        if (promptType === 'article_suggestions' || promptType === 'extract_topic_from_html' || promptType === 'extract_media') return _parseJsonArticleResponse(contentStr, `Gemini (${responseData.model || ''})`);
+        if (promptType === 'article_suggestions' || promptType === 'extract_title_from_html' || promptType === 'extract_media') return _parseJsonArticleResponse(contentStr, `Gemini (${responseData.model || ''})`);
         else if (promptType === 'summary_page' || promptType === 'quiz_page') return _cleanHtmlOutput(contentStr);
         else if (promptType === 'generate_packet_title') return contentStr.trim().replace(/["']/g, '');
         else throw new Error(`Invalid promptType for Gemini parsing: ${promptType}`);
     },
     prepareChromeAiPayload(promptType, context, activeModelConfig) {
         let systemPrompt, userPrompt, fullPrompt;
-        if (promptType === 'extract_topic_from_html') {
+        if (promptType === 'extract_title_from_html') {
             ({ systemPrompt, userPrompt } = getExtractTopicPromptText(context.htmlContent));
             userPrompt += "\n\nIMPORTANT: Your entire response MUST be only the valid JSON object as described, without any surrounding text or markdown.";
         } else if (promptType === 'article_suggestions') {
@@ -482,7 +483,7 @@ const llmService = {
         if (promptType === 'custom_page' || promptType === 'modify_html_for_completion') {
             return _cleanFullHtmlOutput(responseString);
         }
-        if (promptType === 'article_suggestions' || promptType === 'extract_topic_from_html' || promptType === 'extract_media') return _parseJsonArticleResponse(responseString, 'ChromeAI-Nano');
+        if (promptType === 'article_suggestions' || promptType === 'extract_title_from_html' || promptType === 'extract_media') return _parseJsonArticleResponse(responseString, 'ChromeAI-Nano');
         else if (promptType === 'summary_page' || promptType === 'quiz_page') return _cleanHtmlOutput(responseString);
         else if (promptType === 'generate_packet_title') {
             // The response for a title is a simple string, clean it up.
@@ -500,7 +501,7 @@ const llmService = {
         let systemPromptText = ""; let userMessages = [];
         let maxTokensForTask = 8192;  
 
-        if (promptType === 'extract_topic_from_html') {
+        if (promptType === 'extract_title_from_html') {
             const { systemPrompt, userPrompt } = getExtractTopicPromptText(context.htmlContent);
             systemPromptText = systemPrompt;
             userMessages = [{role: "user", content: userPrompt }];
@@ -564,7 +565,7 @@ const llmService = {
         if (promptType === 'custom_page' || promptType === 'modify_html_for_completion') {
             return _cleanFullHtmlOutput(contentStr);
         }
-        if (promptType === 'article_suggestions' || promptType === 'extract_topic_from_html' || promptType === 'extract_media') return _parseJsonArticleResponse(contentStr, `Anthropic (${responseData.model || ''})`);
+        if (promptType === 'article_suggestions' || promptType === 'extract_title_from_html' || promptType === 'extract_media') return _parseJsonArticleResponse(contentStr, `Anthropic (${responseData.model || ''})`);
         else if (promptType === 'summary_page' || promptType === 'quiz_page') return _cleanHtmlOutput(contentStr);
         else throw new Error(`Invalid promptType for Anthropic parsing: ${promptType}`);
     },

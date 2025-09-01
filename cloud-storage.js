@@ -338,51 +338,6 @@ const cloudStorage = {
       return { success: false, error: error.message || 'Unknown upload error' }; 
     }
   },
-
-  async uploadPacketFiles(instanceId, pageId, files, acl = 'private') { 
-    if (!(await this.initialize())) { return { success: false, error: 'Client not initialized' }; }
-    if (!files || !files.length) { 
-      logger.error('CloudStorage:uploadPacketFiles', `No files provided to upload for ${pageId} (instance ${instanceId}).`);
-      return { success: false, error: 'No files provided' }; 
-    }
-    if (!instanceId || !pageId) { return { success: false, error: 'Missing instanceId or pageId for path' }; }
-    try {
-      const pageDir = `packets/${instanceId}/${pageId}/`;
-      const uploadResults = []; 
-      let mainHtmlS3Key = null; 
-      const totalFiles = files.length;
-      logger.log('CloudStorage:uploadPacketFiles', `Starting upload for pageId: ${pageId} (instance ${instanceId}). Total files: ${totalFiles}, ACL: ${acl}`, { files });
-      for (let i = 0; i < files.length; i++) {
-        const file = files[i];
-        if (!file || !file.name || typeof file.content === 'undefined' || !file.contentType) { continue; }
-        const filePath = `${pageDir}${file.name}`; 
-        const result = await this.uploadFile(filePath, file.content, file.contentType, acl);
-        if (!result.success) {
-          logger.error('CloudStorage', 'Failed to upload packet instance file', { instanceId, pageId, fileName: file.name, error: result.error });
-          await this.deletePacketFiles(instanceId, pageId); 
-          return { success: false, error: `Failed to upload ${file.name}: ${result.error}` };
-        }
-        uploadResults.push(result); 
-        if (file.name === 'index.html') {
-          mainHtmlS3Key = result.fileName; 
-        }
-      } 
-      if (!mainHtmlS3Key && files.some(f => f.name === 'index.html')) {
-         mainHtmlS3Key = `${pageDir}index.html`; 
-         logger.warn('CloudStorage:uploadPacketFiles', 'index.html S3 key constructed as fallback.', { mainHtmlS3Key });
-      } else if (!files.some(f => f.name === 'index.html')) {
-         logger.error('CloudStorage', 'No index.html file found in the list of files to upload for instance page', { instanceId, pageId });
-         await this.deletePacketFiles(instanceId, pageId); 
-         return { success: false, error: 'No index.html file found in generated page files' };
-      }
-      logger.log('CloudStorage', 'Packet instance files uploaded successfully', { instanceId, pageId, fileCount: files.length, mainHtmlS3Key: mainHtmlS3Key });
-      return { success: true, files: uploadResults, url: mainHtmlS3Key }; 
-    } catch (error) {
-      logger.error('CloudStorage', 'Error uploading packet instance files', { instanceId, pageId, error });
-      try { await this.deletePacketFiles(instanceId, pageId); } catch (cleanupError) {} 
-      return { success: false, error: error.message || 'Unknown error uploading packet instance files' };
-    }
-  },
   
   async deleteFile(filePath) {
      if (!(await this.initialize())) { return { success: false, error: 'Client not initialized.' }; }
@@ -435,33 +390,6 @@ const cloudStorage = {
     } catch (error) { 
       logger.error('CloudStorage', 'Delete error', { filePath, error }); 
       return { success: false, error: error.message || 'Unknown delete error' }; 
-    }
-  },
-
-  async deletePacketFiles(instanceId, pageId) { 
-     if (!(await this.initialize())) { return { success: false, error: 'Client not initialized.' }; }
-     if (!instanceId || !pageId) { return { success: false, error: 'Missing required instanceId or pageId for deletePacketFiles.' }; }
-    try {
-      const pageDir = `packets/${instanceId}/${pageId}/`;
-      const filesToDelete = [ `${pageDir}index.html` ]; 
-      let deletedCount = 0; 
-      const results = [];
-      for (const file of filesToDelete) {
-         try {
-             const result = await this.deleteFile(file); 
-             results.push({ file, success: result.success, status: result.status, error: result.error });
-             if (result.success || result.status === 404) { 
-                 deletedCount++; 
-             }
-         } catch (error) { 
-            results.push({ file, success: false, error: error.message }); 
-         }
-      }
-      logger.log('CloudStorage', 'Packet instance files deletion attempted', { instanceId, pageId, results });
-      return { success: true, deletedFilesCount: deletedCount, results: results };
-    } catch (error) {
-      logger.error('CloudStorage', 'Error deleting packet instance files', { instanceId, pageId, error });
-      return { success: false, error: error.message || 'Unknown error deleting packet instance files' };
     }
   },
 

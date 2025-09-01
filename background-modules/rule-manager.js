@@ -12,7 +12,7 @@ const RULE_PRIORITY = 1;
 /**
  * Creates a deterministic 32-bit integer hash from a string.
  * This is used to generate a unique, stable integer ID for a rule.
- * @param {string} str The input string (e.g., "instanceId_pageId").
+ * @param {string} str The input string (e.g., "instanceId_itemUrl").
  * @returns {number} A positive integer hash of the string.
  */
 function hashStringToInt(str) {
@@ -31,11 +31,11 @@ function hashStringToInt(str) {
 /**
  * Generates a unique integer rule ID for a specific piece of generated content.
  * @param {string} instanceId - The ID of the packet instance.
- * @param {string} pageId - The pageId of the generated content.
+ * @param {string} itemUrl - The canonical URL of the generated content.
  * @returns {number} The unique, positive integer rule ID.
  */
-function getRuleId(instanceId, pageId) {
-    const uniqueString = `${instanceId}_${pageId}`;
+function getRuleId(instanceId, itemUrl) {
+    const uniqueString = `${instanceId}_${itemUrl}`;
     return hashStringToInt(uniqueString);
 }
 
@@ -68,7 +68,7 @@ export async function addOrUpdatePacketRules(instance) {
     }
 
     const privateContentItems = instance.contents.filter(item =>
-        item.access === 'private' && item.published && item.url && item.pageId && item.publishContext
+        item.access === 'private' && item.published && item.url && item.publishContext
     );
 
     if (privateContentItems.length === 0) {
@@ -81,7 +81,7 @@ export async function addOrUpdatePacketRules(instance) {
     const ruleIdsToRemove = [];
 
     for (const item of privateContentItems) {
-        ruleIdsToRemove.push(getRuleId(instance.instanceId, item.pageId));
+        ruleIdsToRemove.push(getRuleId(instance.instanceId, item.url));
     }
 
     for (const item of privateContentItems) {
@@ -107,7 +107,7 @@ export async function addOrUpdatePacketRules(instance) {
         }
 
         const newRule = {
-            id: getRuleId(instance.instanceId, item.pageId),
+            id: getRuleId(instance.instanceId, item.url),
             priority: RULE_PRIORITY,
             action: {
                 type: 'redirect',
@@ -145,8 +145,8 @@ export async function removePacketRules(instanceId) {
     const ruleIdsToRemove = [];
     if (instance && instance.contents) {
         instance.contents.forEach(item => {
-            if (item.access === 'private' && item.pageId) {
-                ruleIdsToRemove.push(getRuleId(instanceId, item.pageId));
+            if (item.access === 'private' && item.url) {
+                ruleIdsToRemove.push(getRuleId(instanceId, item.url));
             }
         });
     }
@@ -188,8 +188,8 @@ export async function refreshAllRules() {
         for (const instanceId in allInstances) {
             await addOrUpdatePacketRules(allInstances[instanceId]);
             allInstances[instanceId].contents.forEach(item => {
-                if(item.access === 'private' && item.pageId) {
-                    ruleIdsForExistingInstances.add(getRuleId(instanceId, item.pageId));
+                if(item.access === 'private' && item.url) {
+                    ruleIdsForExistingInstances.add(getRuleId(instanceId, item.url));
                 }
             });
         }
