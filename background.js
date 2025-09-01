@@ -130,7 +130,6 @@ const initializationPromise = new Promise(resolve => {
 const AUDIO_KEEP_ALIVE_ALARM = 'audio-keep-alive';
 
 export let activeMediaPlayback = {
-    tabId: null,
     instanceId: null,
     url: null,
     lrl: null,
@@ -149,7 +148,7 @@ export async function resetActiveMediaPlayback() {
     }
     logger.log('Background', 'CRITICAL LOG: Resetting global activeMediaPlayback state.');
     activeMediaPlayback = {
-        tabId: null, instanceId: null, url: null, lrl: null, isPlaying: false, title: '',
+        instanceId: null, url: null, lrl: null, isPlaying: false, title: '',
         currentTime: 0, duration: 0, instance: null, lastTrippedMoment: null,
     };
     await storage.removeSession(CONFIG.STORAGE_KEYS.ACTIVE_MEDIA_KEY);
@@ -254,7 +253,6 @@ export async function notifyUIsOfStateChange(options) {
     const effectiveOptions = options || {};
     const { isSidebarOpen } = await storage.getSession({ isSidebarOpen: false });
 
-    // --- Path for Sidebar: Always send the full state object ---
     const fullStateForSidebar = {
         ...activeMediaPlayback,
         instance: activeMediaPlayback.instance,
@@ -263,7 +261,6 @@ export async function notifyUIsOfStateChange(options) {
     };
     sidebarHandler.notifySidebar('playback_state_updated', fullStateForSidebar);
 
-    // --- Path for Overlay: Statelessly find the active tab and send a lightweight object ---
     if (!isSidebarOpen) {
         try {
             const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -274,10 +271,8 @@ export async function notifyUIsOfStateChange(options) {
             if (activeTab.url) {
                 try {
                     const url = new URL(activeTab.url);
-                    if (url.pathname === '/item') {
-                        isPathBlocked = true;
-                    }
-                } catch (e) { /* Ignore invalid URLs */ }
+                    if (url.pathname === '/item') isPathBlocked = true;
+                } catch (e) {}
             }
 
             const lightweightStateForOverlay = {
@@ -290,11 +285,10 @@ export async function notifyUIsOfStateChange(options) {
 
             await injectOverlayScripts(activeTab.id);
             await chrome.tabs.sendMessage(activeTab.id, { action: 'update_overlay_state', data: lightweightStateForOverlay });
-
         } catch (e) {
-             if (!e.message.toLowerCase().includes('no tab with id')) {
-                 logger.error('Background:notifyUIs', 'Error notifying overlay', e);
-             }
+            if (!e.message.toLowerCase().includes('no tab with id')) {
+                logger.error('Background:notifyUIs', 'Error notifying overlay', e);
+            }
         }
     }
 }
@@ -448,49 +442,53 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
         logger.log('Background:onActivated', 'Ignoring tab activation event due to tab group closure in progress.');
         return;
     }
+    
     const tabId = activeInfo.tabId;
-    try {
-        const tab = await chrome.tabs.get(tabId);
-        if (tab.groupId && reorderDebounceTimers.has(tab.groupId)) {
-            await reorderGroupFromChangeEvent(tab.groupId);
-            reorderDebounceTimers.delete(tab.groupId); 
-        }
-    } catch (e) {}
-    
     await sidebarHandler.updateActionForTab(tabId);
-    const context = await getPacketContext(tabId);
-    let instance = context ? await storage.getPacketInstance(context.instanceId) : null;
-    
-    if (instance && activeMediaPlayback.instanceId === instance.instanceId) {
-        instance = activeMediaPlayback.instance;
+
+    let context_to_send = {};
+
+    const tabContext = await getPacketContext(tabId);
+    if (tabContext && tabContext.instanceId) {
+        context_to_send = {
+            instanceId: tabContext.instanceId,
+            instance: await storage.getPacketInstance(tabContext.instanceId),
+            packetUrl: tabContext.canonicalPacketUrl,
+            currentUrl: tabContext.currentBrowserUrl,
+        };
+    } 
+    else if (activeMediaPlayback.url && activeMediaPlayback.instance) {
+        context_to_send = {
+            instanceId: activeMediaPlayback.instanceId,
+            instance: activeMediaPlayback.instance,
+            packetUrl: null,
+            currentUrl: (await chrome.tabs.get(tabId)).url,
+        };
+    } 
+    else {
+        context_to_send = { instanceId: null, instance: null, packetUrl: null, currentUrl: null };
     }
 
     if (sidebarHandler.isSidePanelAvailable()) {
         sidebarHandler.notifySidebar('update_sidebar_context', {
             tabId,
-            instanceId: instance ? instance.instanceId : null,
-            instance,
-            packetUrl: context ? context.canonicalPacketUrl : null,
-            currentUrl: instance ? context.currentBrowserUrl : null
+            ...context_to_send
         });
     }
 
-    if (instance && context?.canonicalPacketUrl) {
-        const itemForVisitTimer = instance.contents.find(i => i.url === context.canonicalPacketUrl);
-        if (itemForVisitTimer && !itemForVisitTimer.interactionBasedCompletion) {
-            clearPendingVisitTimer(tabId);
-            startVisitTimer(tabId, instance.instanceId, itemForVisitTimer.url, '[onActivated]');
+    if (tabContext && tabContext.instanceId) {
+        const instance = await storage.getPacketInstance(tabContext.instanceId);
+        if (instance) {
+             const itemForVisitTimer = instance.contents.find(i => i.url === tabContext.canonicalPacketUrl);
+             if (itemForVisitTimer && !itemForVisitTimer.interactionBasedCompletion) {
+                 clearPendingVisitTimer(tabId);
+                 startVisitTimer(tabId, instance.instanceId, itemForVisitTimer.url, '[onActivated]');
+             }
         }
     }
 });
 
 chrome.tabs.onRemoved.addListener(async (tabId, removeInfo) => {
-    if (tabId === activeMediaPlayback.tabId) {
-        logger.log('Background', `Playback tab ${tabId} was closed. Stopping media.`);
-        if (typeof msgHandler.handlePlaybackActionRequest === 'function') {
-            await msgHandler.handlePlaybackActionRequest({ data: { intent: 'stop' } }, {}, () => {});
-        }
-    }
     await tabGroupHandler.handleTabRemovalCleanup(tabId, removeInfo);
 });
 
@@ -537,16 +535,6 @@ chrome.runtime.onConnect.addListener(async (port) => {
     await notifyUIsOfStateChange();
     port.onDisconnect.addListener(async () => {
       await storage.setSession({ isSidebarOpen: false });
-      if (activeMediaPlayback.url) {
-          try {
-              const [activeTab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-              if (activeTab && activeTab.id) {
-                  activeMediaPlayback.tabId = activeTab.id;
-              }
-          } catch (e) {
-              logger.warn('Background:onDisconnect', 'Could not get active tab when sidebar closed.', e);
-          }
-      }
       await notifyUIsOfStateChange({ animate: true });
     });
   }

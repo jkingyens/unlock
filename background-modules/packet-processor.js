@@ -416,12 +416,10 @@ export function enhanceHtml(bodyHtml, pageTitle) {
 }
 
 // --- Main Processing Functions ---
-// ext/background-modules/packet-processor.js
-
-// ext/background-modules/packet-processor.js
 
 export async function instantiatePacket(imageId, preGeneratedInstanceId, initiatorTabId = null) {
     const instanceId = preGeneratedInstanceId;
+    const successfullyUploadedFiles = [];
     logger.log('PacketProcessor:instantiatePacket', 'Starting INSTANCE finalization', { imageId, instanceId });
 
     try {
@@ -502,7 +500,6 @@ export async function instantiatePacket(imageId, preGeneratedInstanceId, initiat
             packetInstance.checkpointsTripped = Array(validCheckpoints.length).fill(0);
         }
 
-
         const imageContentMap = new Map(packetImage.sourceContent.map(item => [item.lrl, item]));
 
         for (let i = 0; i < packetInstance.contents.length; i++) {
@@ -529,9 +526,7 @@ export async function instantiatePacket(imageId, preGeneratedInstanceId, initiat
                 if (item.format === 'html') {
                     if (!originalImageItem.contentB64) {
                         logger.warn('PacketProcessor:instantiate', `Internal item ${lrl} is missing Base64 content. Cannot publish.`);
-                        item.published = false;
-                        item.url = null;
-                        continue;
+                        throw new Error(`Cannot instantiate: Content for ${lrl} is missing.`);
                     }
                     contentToUpload = new TextDecoder().decode(base64Decode(originalImageItem.contentB64));
                     contentType = originalImageItem.contentType;
@@ -541,9 +536,7 @@ export async function instantiatePacket(imageId, preGeneratedInstanceId, initiat
                     const mediaContent = await indexedDbStorage.getGeneratedContent(imageId, indexedDbKey);
                     if (!mediaContent || !mediaContent[0]?.content) {
                         logger.warn('PacketProcessor:instantiate', `Internal audio item ${lrl} is missing IndexedDB content. Cannot publish.`);
-                        item.published = false;
-                        item.url = null;
-                        continue;
+                        throw new Error(`Cannot instantiate: Audio content for ${lrl} is missing.`);
                     }
                     contentToUpload = mediaContent[0].content;
                     contentType = originalImageItem.mimeType;
@@ -556,6 +549,7 @@ export async function instantiatePacket(imageId, preGeneratedInstanceId, initiat
                 const uploadResult = await cloudStorage.uploadFile(cloudPath, contentToUpload, contentType, 'private');
                 
                 if (uploadResult.success) {
+                    successfullyUploadedFiles.push(uploadResult.fileName);
                     item.url = uploadResult.fileName;
                     item.published = true;
                     if (!activeCloudConfig || !activeCloudConfig.id) {
@@ -568,8 +562,6 @@ export async function instantiatePacket(imageId, preGeneratedInstanceId, initiat
                         bucket: activeCloudConfig.bucket
                     };
                 } else {
-                    item.published = false;
-                    item.url = null;
                     throw new Error(`Failed to publish ${lrl}: ${uploadResult.error}`);
                 }
             }
@@ -589,9 +581,16 @@ export async function instantiatePacket(imageId, preGeneratedInstanceId, initiat
 
     } catch (error) {
         logger.error('PacketProcessor:instantiatePacket', 'Error during final instantiation/publishing', { imageId, instanceId, error });
-        if (instanceId) {
-            await ruleManager.removePacketRules(instanceId);
+        
+        if (successfullyUploadedFiles.length > 0) {
+            logger.warn('PacketProcessor:instantiatePacket', `Rolling back ${successfullyUploadedFiles.length} successfully uploaded files due to instantiation failure.`);
+            for (const fileUrl of successfullyUploadedFiles) {
+                await cloudStorage.deleteFile(fileUrl).catch(e => logger.error('PacketProcessor:instantiatePacket', `Failed to delete uploaded file during rollback: ${fileUrl}`, e));
+            }
         }
+        
+        await ruleManager.removePacketRules(instanceId);
+        
         return { success: false, error: error.message || 'Unknown instantiation error' };
     }
 }
