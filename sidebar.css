@@ -716,3 +716,62 @@ body.dark-mode .waveform-link-marker {
 body.dark-mode .waveform-link-marker.visited {
      background-color: var(--status-success-color);
 }
+
+/* --- START: Download Placeholder & Shimmer Styles --- */
+.media-waveform-container.needs-download .waveform-canvas {
+    /* Use a repeating gradient for a generic, greyed-out waveform look */
+    background: repeating-linear-gradient(
+      90deg,
+      var(--bg-tertiary),
+      var(--bg-tertiary) 1px,
+      transparent 1px,
+      transparent 3px
+    );
+    opacity: 0.5;
+}
+
+.media-waveform-container .download-icon {
+    display: none; /* Hidden by default */
+    position: absolute;
+    z-index: 3;
+    width: 32px;
+    height: 32px;
+    background-color: var(--text-primary);
+    -webkit-mask-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM17 13l-5 5-5-5h3V9h4v4h3z"/></svg>');
+    mask-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM17 13l-5 5-5-5h3V9h4v4h3z"/></svg>');
+    background-repeat: no-repeat;
+    background-position: center;
+    opacity: 0.6;
+}
+
+.media-waveform-container.needs-download .download-icon {
+    display: block;
+}
+
+.media-waveform-container.loading::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(
+        90deg,
+        transparent,
+        var(--text-accent, #8ab4f8) 50%,
+        transparent 100%
+    );
+    opacity: 0.3;
+    animation: loading-shine 1.5s infinite linear;
+    z-index: 2;
+}
+
+@keyframes loading-shine {
+    0% {
+        transform: translateX(-100%);
+    }
+    100% {
+        transform: translateX(100%);
+    }
+}
+/* --- END: Download Placeholder & Shimmer Styles --- */

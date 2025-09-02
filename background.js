@@ -73,6 +73,66 @@ async function migratePacketImagesIfNecessary() {
 
     await storage.setLocal({ [MIGRATION_FLAG_LRL]: true });
 }
+
+async function migrateHtmlContentToIndexedDb() {
+    const MIGRATION_FLAG_HTML = 'htmlContentMigrationToIndexedDbComplete';
+    const flags = await storage.getLocal([MIGRATION_FLAG_HTML]);
+
+    if (flags[MIGRATION_FLAG_HTML]) {
+        logger.log('Background:Migration', 'HTML content migration already completed. Skipping.');
+        return;
+    }
+
+    logger.log('Background:Migration', 'Running one-time migration for embedded HTML content...');
+    const allImages = await storage.getPacketImages();
+    let imagesToUpdate = { ...allImages };
+    let migrationNeeded = false;
+
+    for (const imageId in imagesToUpdate) {
+        let image = imagesToUpdate[imageId];
+        let wasModified = false;
+
+        if (image.sourceContent && Array.isArray(image.sourceContent)) {
+            for (const item of image.sourceContent) {
+                // Check for internal HTML items with the old base64 property
+                if (item.origin === 'internal' && item.format === 'html' && item.contentB64) {
+                    try {
+                        const htmlBuffer = base64Decode(item.contentB64);
+                        const indexedDbKey = sanitizeForFileName(item.lrl);
+
+                        await indexedDbStorage.saveGeneratedContent(imageId, indexedDbKey, [{
+                            name: 'index.html',
+                            content: htmlBuffer,
+                            contentType: item.contentType || 'text/html'
+                        }]);
+                        
+                        // Clean the property from the image object
+                        delete item.contentB64;
+                        
+                        wasModified = true;
+                        logger.log('Background:Migration', `Migrated HTML content for item "${item.lrl}" in image: ${imageId}`);
+
+                    } catch (error) {
+                        logger.error('Background:Migration', `Failed to migrate HTML content for item in image ${imageId}`, { item, error });
+                    }
+                }
+            }
+        }
+
+        if (wasModified) {
+            migrationNeeded = true;
+        }
+    }
+
+    if (migrationNeeded) {
+        await storage.setLocal({ [CONFIG.STORAGE_KEYS.PACKET_IMAGES]: imagesToUpdate });
+        logger.log('Background:Migration', 'Completed saving all packet images after HTML content migration.');
+    } else {
+        logger.log('Background:Migration', 'No embedded HTML content found to migrate.');
+    }
+
+    await storage.setLocal({ [MIGRATION_FLAG_HTML]: true });
+}
 // --- END: New Migration Logic ---
 
 
@@ -336,7 +396,11 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     try {
         logger.log('Background:onInstalled', `Extension ${details.reason}`);
         await initializeStorageAndSettings();
+        
+        // **MODIFICATION**: Add the new migration function call here
         await migratePacketImagesIfNecessary();
+        await migrateHtmlContentToIndexedDb(); 
+
         await indexedDbStorage.debugDumpIndexedDb();
         await restoreMediaStateOnStartup();
         await cloudStorage.initialize().catch(err => logger.error('Background:onInstalled', 'Initial cloud storage init failed', err));
@@ -366,7 +430,11 @@ chrome.runtime.onStartup.addListener(async () => {
     try {
         logger.log('Background:onStartup', 'Browser startup detected. Navigation processing is paused.');
         await initializeStorageAndSettings();
+
+        // **MODIFICATION**: And add it here as well
         await migratePacketImagesIfNecessary();
+        await migrateHtmlContentToIndexedDb();
+
         await indexedDbStorage.debugDumpIndexedDb();
         await restoreMediaStateOnStartup();
         await cloudStorage.initialize().catch(err => {});

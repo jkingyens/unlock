@@ -23,19 +23,20 @@ import cloudStorage from '../cloud-storage.js';
 import llmService from '../llm_service.js';
 
 import {
-    processCreatePacketRequest,
-    processCreatePacketRequestFromTab,
-    processGenerateCustomPageRequest,
-    processRepublishRequest,
+    instantiatePacket,
     processDeletePacketsRequest,
     publishImageForSharing,
     importImageFromUrl,
-    instantiatePacket,
-    processDeletePacketImageRequest,
-    enhanceHtml,
-    processImproveDraftAudio,
-    generateDraftPacketFromTab
+    processDeletePacketImageRequest
 } from './packet-processor.js';
+
+import {
+    generateDraftPacketFromTab,
+    processCreatePacketRequestFromTab,
+    processCreatePacketRequest,
+    enhanceHtml
+} from './create-utils.js';
+
 
 import {
     setMediaPlaybackState,
@@ -279,6 +280,38 @@ function findMediaItemInInstance(instance, url) {
     return instance.contents.find(item => item.url === url && item.format === 'audio');
 }
 
+async function ensureMediaIsCached(instanceId, url, lrl) {
+    const indexedDbKey = sanitizeForFileName(lrl);
+    const cachedAudio = await indexedDbStorage.getGeneratedContent(instanceId, indexedDbKey);
+    
+    if (cachedAudio && cachedAudio[0]?.content) {
+        logger.log("CacheHelper", `Cache HIT for ${lrl} in instance ${instanceId}`);
+        return { success: true, wasCached: true, content: cachedAudio[0].content };
+    }
+
+    logger.log("CacheHelper", `Cache MISS for ${lrl}. Fetching from cloud: ${url}`);
+    const instance = await storage.getPacketInstance(instanceId);
+    const mediaItem = findMediaItemInInstance(instance, url);
+    if (!mediaItem) {
+        throw new Error(`Media item with url ${url} not found in instance.`);
+    }
+
+    const downloadResult = await cloudStorage.downloadFile(url);
+    if (!downloadResult.success) {
+        throw new Error(`Failed to download audio from cloud: ${downloadResult.error}`);
+    }
+
+    const audioBuffer = await downloadResult.content.arrayBuffer();
+    await indexedDbStorage.saveGeneratedContent(instanceId, indexedDbKey, [{
+        name: lrl.split('/').pop(),
+        content: audioBuffer,
+        contentType: mediaItem.mimeType
+    }]);
+    
+    logger.log("CacheHelper", `Successfully fetched and cached ${lrl} for instance ${instanceId}`);
+    return { success: true, wasCached: false, content: audioBuffer };
+}
+
 async function handlePlaybackActionRequest(data, sender, sendResponse) {
     const { intent, instanceId, url, lrl } = data;
     try {
@@ -297,15 +330,10 @@ async function handlePlaybackActionRequest(data, sender, sendResponse) {
                 const mediaItem = findMediaItemInInstance(instance, url);
                 if (!mediaItem) throw new Error(`Could not find audio track with url ${url} in packet.`);
                 
-                const indexedDbKey = sanitizeForFileName(lrl);
-                const cachedAudio = await indexedDbStorage.getGeneratedContent(instance.instanceId, indexedDbKey);
-                if (!cachedAudio || !cachedAudio[0]?.content) {
-                    throw new Error("Could not find cached audio data in IndexedDB for instance.");
-                }
+                const cacheResult = await ensureMediaIsCached(instanceId, url, lrl);
+                const audioB64 = arrayBufferToBase64(cacheResult.content);
 
-                const audioB64 = arrayBufferToBase64(cachedAudio[0].content);
                 const startTime = mediaItem.currentTime || 0;
-
                 await controlAudioInOffscreen('play', { audioB64, mimeType: mediaItem.mimeType, url: url, instanceId, startTime });
 
                 const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -351,6 +379,7 @@ async function handlePlaybackActionRequest(data, sender, sendResponse) {
         sendResponse({ success: false, error: err.message });
     }
 }
+
 
 const actionHandlers = {
     'is_current_tab_packetizable': async (data, sender, sendResponse) => {
@@ -497,7 +526,6 @@ const actionHandlers = {
         await notifyUIsOfStateChange();
         sendResponse({success: true});
     },
-    'improve_draft_audio': (data, sender, sendResponse) => processImproveDraftAudio(data).then(sendResponse),
     'generate_packet_title': (data, sender, sendResponse) => {
         (async () => {
             try {
@@ -518,15 +546,23 @@ const actionHandlers = {
         return true; // Indicate that the response will be sent asynchronously
     },
     'get_draft_item_for_preview': async (data, sender, sendResponse) => {
-        const { rlr } = data; // Use 'rlr' (local resource locator)
+        const { rlr } = data;
         const sessionData = await storage.getSession('draftPacketForPreview');
         const draftPacket = sessionData?.draftPacketForPreview;
-        const item = draftPacket?.sourceContent.find(i => i.lrl === rlr);
-        if (item?.contentB64) {
-            const htmlContent = new TextDecoder().decode(base64Decode(item.contentB64));
-            sendResponse({ success: true, htmlContent, title: item.title });
+        
+        if (draftPacket && rlr) {
+            const item = draftPacket.sourceContent.find(i => i.lrl === rlr);
+            const indexedDbKey = sanitizeForFileName(rlr);
+            const storedContent = await indexedDbStorage.getGeneratedContent(draftPacket.id, indexedDbKey);
+            
+            if (item && storedContent && storedContent[0]?.content) {
+                const htmlContent = new TextDecoder().decode(storedContent[0].content);
+                sendResponse({ success: true, htmlContent, title: item.title });
+            } else {
+                sendResponse({ success: false, error: 'Item content not found in IndexedDB.' });
+            }
         } else {
-            sendResponse({ success: false, error: 'Item not found or has no content.' });
+            sendResponse({ success: false, error: 'Draft packet or RLR not found.' });
         }
     },
     'get_presigned_url': async (data, sender, sendResponse) => {
@@ -544,7 +580,6 @@ const actionHandlers = {
     'sync_draft_group': (data, sender, sendResponse) => tabGroupHandler.syncDraftGroup(data.desiredUrls).then(sendResponse),
     'focus_or_create_draft_tab': (data, sender, sendResponse) => tabGroupHandler.focusOrCreateDraftTab(data.url).then(sendResponse),
     'cleanup_draft_group': (data, sender, sendResponse) => tabGroupHandler.cleanupDraftGroup().then(sendResponse),
-    'generate_custom_page': (data, sender, sendResponse) => processGenerateCustomPageRequest(data).then(sendResponse),
     'delete_packet_image': (data, sender, sendResponse) => processDeletePacketImageRequest(data).then(sendResponse),
     'save_packet_image': async (data, sender, sendResponse) => {
         await storage.savePacketImage(data.image);
@@ -554,8 +589,10 @@ const actionHandlers = {
     'initiate_packet_creation_from_tab': (data, sender, sendResponse) => processCreatePacketRequestFromTab(sender.tab.id).then(sendResponse),
     'initiate_packet_creation': (data, sender, sendResponse) => processCreatePacketRequest(data, sender.tab?.id).then(sendResponse),
     'instantiate_packet': async (data, sender, sendResponse) => {
-        const newInstanceId = `inst_${Date.now()}_${Math.random().toString(36).substring(2, 10)}`;
-        const result = await instantiatePacket(data.imageId, newInstanceId, sender.tab?.id);
+        // --- START OF FIX ---
+        // Use the instanceId provided by the frontend, don't generate a new one.
+        const result = await instantiatePacket(data.imageId, data.instanceId, sender.tab?.id);
+        // --- END OF FIX ---
         if (result.success) {
             chrome.runtime.sendMessage({ action: 'packet_instance_created', data: { instance: result.instance } });
         }
@@ -635,7 +672,18 @@ const actionHandlers = {
     'debug_dump_idb': (data, sender, sendResponse) => {
         indexedDbStorage.debugDumpIndexedDb();
         sendResponse({ success: true });
-    }
+    },
+    'ensure_media_is_cached': async (data, sender, sendResponse) => {
+        const { instanceId, url, lrl } = data;
+        try {
+            await ensureMediaIsCached(instanceId, url, lrl);
+            sidebarHandler.notifySidebar('media_cache_populated', { instanceId, lrl });
+            sendResponse({ success: true });
+        } catch (error) {
+            logger.error("MessageHandler:ensure_media_is_cached", "Failed to cache media", error);
+            sendResponse({ success: false, error: error.message });
+        }
+    },
 };
 
 export function handleMessage(message, sender, sendResponse) {

@@ -263,23 +263,28 @@ async function handleBackgroundMessage(message) {
                 navigateTo('create', null, data.draft);
             }
             break;
-
         case 'packet_creation_failed':
             dialogHandler.hideCreateSourceDialog();
             dialogHandler.hideImportDialog();
-            rootView.removeInProgressStencil(data.imageId);
+            rootView.removeInstanceRow(data.instanceId);
+            rootView.removeImageRow(data.imageId);
             showRootViewStatus(`Creation failed: ${data?.error || 'Unknown'}`, 'error');
             break;
+        case 'packet_instantiation_progress':
+            if (currentView === 'root') {
+                rootView.renderOrUpdateInstanceStencil(data);
+            }
+            break;
+        case 'packet_creation_progress':
+            if (currentView === 'root') {
+                 rootView.renderOrUpdateImageStencil(data);
+            }
+            break;
         case 'playback_state_updated':
-            // --- START OF FIX: Ensure the latest instance data is used for rendering ---
             if (currentView === 'packet-detail' && currentInstanceId === data.instanceId) {
-                // Update the sidebar's master copy of the instance state
                 currentInstanceData = data.instance;
-
-                // Pass the fresh instance data directly to the UI update functions
                 detailView.updatePlaybackUI(data, currentInstanceData); 
                 detailView.updateCardVisibility(currentInstanceData);
-
                 if (data.lastTrippedMoment?.url) {
                     const cardToAnimate = domRefs.packetDetailView.querySelector(`.card[data-url="${data.lastTrippedMoment.url}"]`);
                     if (cardToAnimate) {
@@ -288,7 +293,6 @@ async function handleBackgroundMessage(message) {
                     }
                 }
             }
-            // --- END OF FIX ---
             break;
         case 'navigate_to_view':
             if (data?.viewName) {
@@ -298,9 +302,6 @@ async function handleBackgroundMessage(message) {
             break;
         case 'update_sidebar_context':
             await updateSidebarContext(data);
-            break;
-        case 'packet_creation_progress':
-            rootView.addOrUpdateInProgressStencil(data);
             break;
         case 'packet_image_created':
             dialogHandler.hideImportDialog();
@@ -317,7 +318,9 @@ async function handleBackgroundMessage(message) {
             break;
         case 'packet_instance_created':
             showRootViewStatus(`Started packet '${data.instance.title}'.`, 'success');
-            if (currentView !== 'create') {
+            if (currentView === 'root') {
+                rootView.updateInstanceRowUI(data.instance);
+            } else {
                 navigateTo('packet-detail', data.instance.instanceId);
             }
             break;
@@ -332,11 +335,9 @@ async function handleBackgroundMessage(message) {
             break;
         case 'packet_instance_deleted':
             const wasViewingDeletedPacket = data?.packetId === currentInstanceId;
-
             if (currentView === 'root') {
                 rootView.removeInstanceRow(data.packetId);
             }
-            
             if (wasViewingDeletedPacket) {
                 resetSidebarState();
                 detailView.stopAudioIfPacketDeleted(data.packetId);
@@ -355,6 +356,11 @@ async function handleBackgroundMessage(message) {
             break;
         case 'theme_preference_updated':
             await applyThemeMode();
+            break;
+        case 'media_cache_populated':
+            if (currentView === 'packet-detail' && currentInstanceId === data.instanceId) {
+                detailView.redrawSingleWaveform(data.lrl);
+            }
             break;
     }
 }
