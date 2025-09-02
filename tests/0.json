@@ -9,7 +9,8 @@
       "access": "private",
       "lrl": "/pages/summary-page.html",
       "title": "Packet Summary (Does Not Grant Progress)",
-      "context": "An overview of this test packet."
+      "context": "An overview of this test packet.",
+      "cacheable": true
     },
     {
       "origin": "external",

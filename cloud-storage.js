@@ -127,9 +127,18 @@ const cloudStorage = {
         return { success: false, error: `Download failed (${response.status}): ${errorText || response.statusText}`, status: response.status };
       }
 
-      let content; const contentType = response.headers.get('content-type');
-      if (contentType && contentType.includes('application/json')) { content = await response.json(); }
-      else { content = await response.text(); } 
+      const contentType = response.headers.get('content-type');
+      let content;
+      if (contentType && (contentType.includes('application/json') || contentType.includes('text/'))) {
+        content = await response.text();
+        if (contentType.includes('application/json')) {
+            try {
+                content = JSON.parse(content);
+            } catch(e) { /* It might be a text file claiming to be json */ }
+        }
+      } else {
+        content = response;
+      }
 
       logger.log('CloudStorage', 'File downloaded successfully using V4 signature', { filePath: cleanedFilePath });
       return { success: true, content: content };
