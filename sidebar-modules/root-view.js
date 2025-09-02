@@ -10,7 +10,8 @@ import { showConfirmDialog, showImportDialog, exportPacketAndShowDialog, showCre
 let activeListTab = 'library';
 let currentContextMenuCloseHandler = null;
 let currentActionImageId = null; // To hold the ID for the dialog
-let inProgressStencils = new Map(); // Stateful tracking for in-progress creations
+let inProgressImageStencils = new Map(); // For image creation
+let inProgressInstanceStencils = new Map(); // **FIX**: Single source of truth for instance stencils
 
 // Functions to be imported from the new, lean sidebar.js
 let navigateTo;
@@ -102,13 +103,14 @@ async function handleCreateButtonClick() {
 // --- View Rendering & Management ---
 
 export async function displayRootNavigation() {
+    console.log('[rv_debug] displayRootNavigation START');
     const { inboxList, inProgressList, completedList } = domRefs;
     if (!inboxList || !inProgressList || !completedList) return;
     
-    const loadingHTML = `<tr><td colspan="3" class="empty-state">Loading...</td></tr>`;
-    inboxList.innerHTML = loadingHTML;
-    inProgressList.innerHTML = loadingHTML;
-    completedList.innerHTML = loadingHTML;
+    inProgressList.innerHTML = '';
+    completedList.innerHTML = '';
+    inboxList.innerHTML = '';
+
 
     try {
         const [imagesMap, instancesMap] = await Promise.all([
@@ -118,33 +120,38 @@ export async function displayRootNavigation() {
 
         const images = Object.values(imagesMap);
         const instances = Object.values(instancesMap);
+        
+        console.log(`[rv_debug] displayRootNavigation: Found ${instances.length} instances in storage. Stencil count: ${inProgressInstanceStencils.size}`);
 
         const sortFn = (a, b) => {
             const dateA = new Date(a.created || a.instantiated || 0).getTime();
             const dateB = new Date(b.created || b.instantiated || 0).getTime();
             return dateB - dateA;
         };
-
-        renderImageList(images.sort(sortFn));
-        inProgressStencils.forEach(stencilData => {
-            renderOrUpdateImageStencil(stencilData);
-        });
         
         const inProgressItems = [];
         const completedItems = [];
 
         for (const inst of instances) {
-            if (inst.status !== 'creating') {
-                if (await packetUtils.isPacketInstanceCompleted(inst)) {
-                    completedItems.push(inst);
-                } else {
-                    inProgressItems.push(inst);
-                }
+            if (inProgressInstanceStencils.has(inst.instanceId)) {
+                console.log(`[rv_debug] displayRootNavigation: Skipping render for instance ${inst.instanceId} because a stencil already exists.`);
+                continue;
+            }
+
+            if (await packetUtils.isPacketInstanceCompleted(inst)) {
+                completedItems.push(inst);
+            } else {
+                inProgressItems.push(inst);
             }
         }
         
+        renderImageList(images.sort(sortFn));
         renderInstanceList(inProgressItems.sort(sortFn), domRefs.inProgressList, "No packets Started.");
         renderInstanceList(completedItems.sort(sortFn), domRefs.completedList, "No completed packets yet.");
+        
+        console.log('[rv_debug] displayRootNavigation: Re-rendering all stencils.');
+        inProgressImageStencils.forEach(renderOrUpdateImageStencil);
+        inProgressInstanceStencils.forEach(renderOrUpdateInstanceStencil);
 
         updateActionButtonsVisibility();
     } catch (error) {
@@ -154,36 +161,29 @@ export async function displayRootNavigation() {
         inProgressList.innerHTML = errorHTML;
         completedList.innerHTML = errorHTML;
     }
+    console.log('[rv_debug] displayRootNavigation END');
 }
 
 function renderImageList(images) {
     const listElement = domRefs.inboxList;
-    listElement.innerHTML = '';
-    if (images.length === 0) {
-        checkAndRenderEmptyState(listElement, "Library is empty. Create a packet!");
-    } else {
-        const frag = document.createDocumentFragment();
-        images.forEach(img => {
-            const row = createImageRow(img);
-            frag.appendChild(row);
-        });
-        listElement.appendChild(frag);
-    }
+    const frag = document.createDocumentFragment();
+    images.forEach(img => {
+        const row = createImageRow(img);
+        frag.appendChild(row);
+    });
+    listElement.appendChild(frag);
+    checkAndRenderEmptyState(listElement, "Library is empty. Create a packet!");
 }
 
 function renderInstanceList(instances, listElement, emptyMessage) {
-    listElement.innerHTML = '';
-    if (instances.length === 0) {
-        checkAndRenderEmptyState(listElement, emptyMessage);
-    } else {
-        const frag = document.createDocumentFragment();
-        instances.forEach(inst => {
-            const row = createInstanceRow(inst);
-            row.dataset.created = inst.created || inst.instantiated || new Date(0).toISOString();
-            frag.appendChild(row);
-        });
-        listElement.appendChild(frag);
-    }
+    const frag = document.createDocumentFragment();
+    instances.forEach(inst => {
+        const row = createInstanceRow(inst);
+        row.dataset.created = inst.created || inst.instantiated || new Date(0).toISOString();
+        frag.appendChild(row);
+    });
+    listElement.appendChild(frag);
+    checkAndRenderEmptyState(listElement, emptyMessage);
 }
 
 function createImageRow(image) {
@@ -203,14 +203,7 @@ function createInstanceRow(instance) {
     const row = document.createElement('tr');
     row.dataset.instanceId = instance.instanceId;
 
-    const isStencil = instance.status === 'creating';
-    let progressPercentage = 0, progressBarTitle = '';
-    
-    if (!isStencil) {
-        const progressData = packetUtils.calculateInstanceProgress(instance);
-        progressPercentage = progressData.progressPercentage;
-        progressBarTitle = `${progressData.visitedCount}/${progressData.totalCount} - ${progressPercentage}% Complete`;
-    }
+    const { progressPercentage, visitedCount, totalCount } = packetUtils.calculateInstanceProgress(instance);
 
     const colorName = packetUtils.getColorForTopic(instance.title);
     const colorHex = (packetColorMap[colorName] || defaultPacketColors).progress;
@@ -229,83 +222,69 @@ function createInstanceRow(instance) {
 
     const progressCell = document.createElement('td');
     progressCell.innerHTML = `
-        <div class="progress-bar-container" title="${progressBarTitle}">
+        <div class="progress-bar-container" title="${visitedCount}/${totalCount} - ${progressPercentage}% Complete">
             <div class="progress-bar" style="width: ${progressPercentage}%; background-color: ${colorHex};"></div>
         </div>`;
     
     row.append(checkboxCell, nameCell, progressCell);
 
-    if (isStencil) {
-        row.classList.add('stencil-packet');
-        row.title = `Packet "${instance.title}" is being created...`;
-    } else {
-        setupInstanceContextMenu(row, instance);
-        row.addEventListener('click', (e) => {
-            if (e.target !== checkbox && e.target !== checkboxCell) {
-                navigateTo('packet-detail', instance.instanceId);
-            }
-        });
-        if (progressPercentage >= 100) {
-            row.style.opacity = '0.8';
-            row.title = "Packet completed!";
-        } else {
-            row.title = "Click to view packet details";
+    setupInstanceContextMenu(row, instance);
+    row.addEventListener('click', (e) => {
+        if (e.target !== checkbox && e.target !== checkboxCell) {
+            navigateTo('packet-detail', instance.instanceId);
         }
+    });
+    if (progressPercentage >= 100) {
+        row.style.opacity = '0.8';
+        row.title = "Packet completed!";
+    } else {
+        row.title = "Click to view packet details";
     }
+    
     return row;
 }
 
-export async function updateInstanceRowUI(instance) {
-    const isCompleted = await packetUtils.isPacketInstanceCompleted(instance);
-    const targetList = isCompleted ? domRefs.completedList : domRefs.inProgressList;
+export function updateInstanceRowUI(instance) {
+    const instanceId = instance.instanceId;
+    console.log(`[rv_debug] updateInstanceRowUI START for instanceId: ${instanceId}`);
+    
+    inProgressInstanceStencils.delete(instanceId);
+    console.log(`[rv_debug] updateInstanceRowUI: Deleted stencil from map. Current stencil count: ${inProgressInstanceStencils.size}`);
 
-    let sourceList = null;
-    if (domRefs.inProgressList.querySelector(`tr[data-instance-id="${instance.instanceId}"]`)) {
-        sourceList = domRefs.inProgressList;
-    } else if (domRefs.completedList.querySelector(`tr[data-instance-id="${instance.instanceId}"]`)) {
-        sourceList = domRefs.completedList;
+    const listElement = domRefs.inProgressList;
+    if (!listElement) {
+        console.warn(`[rv_debug] updateInstanceRowUI: inProgressList DOM element not found. Falling back to full refresh.`);
+        displayRootNavigation();
+        return;
     }
 
-    if (!targetList) return;
+    const stencilRow = listElement.querySelector(`tr.stencil-packet[data-instance-id="${instanceId}"]`);
+    const newInstanceRow = createInstanceRow(instance);
 
-    const existingRow = sourceList?.querySelector(`tr[data-instance-id="${instance.instanceId}"]`);
-    const newRow = createInstanceRow(instance);
-    newRow.dataset.created = instance.created || instance.instantiated || new Date(0).toISOString();
-    
-    if (existingRow) {
-        if (sourceList === targetList) {
-            existingRow.replaceWith(newRow);
-        } else {
-            existingRow.remove();
-            insertRowSorted(newRow, targetList);
-            checkAndRenderEmptyState(sourceList, sourceList === domRefs.inProgressList ? "No packets Started." : "No completed packets yet.");
-        }
+    if (stencilRow) {
+        console.log(`[rv_debug] updateInstanceRowUI: Found stencil row in DOM. Replacing it now.`);
+        stencilRow.replaceWith(newInstanceRow);
     } else {
-        insertRowSorted(newRow, targetList);
+        console.warn(`[rv_debug] updateInstanceRowUI: Stencil row for ${instanceId} NOT found in DOM. A full refresh might have already removed it. Appending new row as a fallback.`);
+        listElement.appendChild(newInstanceRow);
     }
-    
-    checkAndRenderEmptyState(targetList, isCompleted ? "No completed packets yet." : "No packets Started.");
-    updateActionButtonsVisibility();
+    console.log(`[rv_debug] updateInstanceRowUI END for instanceId: ${instanceId}`);
 }
 
 export function removeInstanceRow(instanceId) {
-    const rowInProgress = domRefs.inProgressList?.querySelector(`tr[data-instance-id="${instanceId}"]`);
-    const rowCompleted = domRefs.completedList?.querySelector(`tr[data-instance-id="${instanceId}"]`);
-
-    if (rowInProgress) {
-        const list = rowInProgress.parentElement;
-        rowInProgress.remove();
-        checkAndRenderEmptyState(list, "No packets Started.");
-    }
-    if (rowCompleted) {
-        const list = rowCompleted.parentElement;
-        rowCompleted.remove();
-        checkAndRenderEmptyState(list, "No completed packets yet.");
+    inProgressInstanceStencils.delete(instanceId);
+    const row = domRefs.rootView.querySelector(`tr[data-instance-id="${instanceId}"]`);
+    if (row) {
+        const list = row.parentElement;
+        row.remove();
+        if (list === domRefs.inProgressList) checkAndRenderEmptyState(list, "No packets Started.");
+        if (list === domRefs.completedList) checkAndRenderEmptyState(list, "No completed packets yet.");
     }
     updateActionButtonsVisibility();
 }
 
 export function removeImageRow(imageId) {
+    inProgressImageStencils.delete(imageId);
     const row = domRefs.inboxList?.querySelector(`tr[data-image-id="${imageId}"]`);
     if (row) {
         const list = row.parentElement;
@@ -331,62 +310,38 @@ function switchListTab(tabName) {
 }
 
 async function handleStartPacket(imageId) {
+    console.log(`[rv_debug] handleStartPacket: User clicked start for imageId: ${imageId}`);
     if (!imageId) return;
-
-    showRootViewStatus('Checking for existing packet...', 'info', false);
-
     try {
         const image = await storage.getPacketImage(imageId);
-        if (!image) {
-            throw new Error("Packet not found in the library.");
-        }
-
-        const needsPublishing = image.sourceContent.some(item =>
-            item.type === 'generated' || item.type === 'media' ||
-            (item.type === 'alternative' && item.alternatives.some(alt => alt.type === 'generated' || alt.type === 'media'))
-        );
-
-        if (needsPublishing) {
-            const isCloudConfigured = await storage.isCloudStorageEnabled();
-            if (!isCloudConfigured) {
-                const goToSettings = await showConfirmDialog(
-                    "This packet contains content that needs to be published. Please configure Cloud Storage in Settings to continue.",
-                    "Go to Settings",
-                    "Cancel"
-                );
-                if (goToSettings) {
-                    navigateTo('settings');
-                }
-                return;
-            }
-        }
-
-        const allInstances = await storage.getPacketInstances();
-        const instancesForImage = Object.values(allInstances).filter(inst => inst.imageId === imageId);
-
-        let incompleteInstance = null;
-        for (const inst of instancesForImage) {
-            if (!(await packetUtils.isPacketInstanceCompleted(inst))) {
-                incompleteInstance = inst;
-                break;
-            }
-        }
-
-        if (incompleteInstance) {
-            showRootViewStatus('Navigating to your in-progress packet.', 'success');
-            navigateTo('packet-detail', incompleteInstance.instanceId);
-        } else {
-            showRootViewStatus(`Starting new packet...`, 'info', false);
-            await sendMessageToBackground({
-                action: 'instantiate_packet',
-                data: { imageId }
-            });
-        }
+        if (!image) throw new Error("Packet not found in library.");
+        
+        const tempInstanceId = `inst_${Date.now()}_${Math.random().toString(36).substring(2, 10)}`;
+        console.log(`[rv_debug] handleStartPacket: Generated temporary instanceId: ${tempInstanceId}`);
+        
+        inProgressInstanceStencils.set(tempInstanceId, { imageId: imageId, instanceId: tempInstanceId, title: image.title });
+        console.log(`[rv_debug] handleStartPacket: Added stencil to map. Current stencil count: ${inProgressInstanceStencils.size}`);
+        
+        renderOrUpdateInstanceStencil({
+            instanceId: tempInstanceId,
+            title: image.title,
+            progressPercent: 5,
+            text: "Preparing..."
+        });
+        switchListTab('in-progress');
+        
+        await sendMessageToBackground({
+            action: 'instantiate_packet',
+            data: { imageId, instanceId: tempInstanceId }
+        });
+        console.log(`[rv_debug] handleStartPacket: Sent 'instantiate_packet' message to background for ${tempInstanceId}`);
     } catch (err) {
         showRootViewStatus(`Error: ${err.message}`, 'error');
         logger.error('RootView:handleStartPacket', 'Error during start packet logic', err);
     }
 }
+
+
 async function handleEditPacket(imageId) {
     try {
         const image = await storage.getPacketImage(imageId);
@@ -557,14 +512,17 @@ async function updateActionButtonsVisibility() {
 function checkAndRenderEmptyState(listElement, emptyMessage) {
     if (!listElement) return;
     const hasRows = listElement.querySelector('tr[data-instance-id], tr[data-image-id]');
+    const hasStencils = listElement.querySelector('tr.stencil-packet');
     const emptyStateRow = listElement.querySelector('tr > td.empty-state');
-    if (!hasRows && !emptyStateRow) {
-        const colSpan = listElement.parentElement.querySelectorAll('thead th').length || 1;
+
+    if (!hasRows && !hasStencils && !emptyStateRow) {
+        const colSpan = listElement.closest('table').querySelectorAll('thead th').length || 1;
         listElement.innerHTML = `<tr><td colspan="${colSpan}" class="empty-state">${emptyMessage}</td></tr>`;
-    } else if (hasRows && emptyStateRow) {
+    } else if ((hasRows || hasStencils) && emptyStateRow) {
         emptyStateRow.parentElement.remove();
     }
 }
+
 
 function insertRowSorted(row, listElement) {
     const rows = Array.from(listElement.querySelectorAll('tr[data-created]'));
@@ -583,17 +541,14 @@ export function renderOrUpdateImageStencil(data) {
     const { imageId, title, progressPercent, text } = data;
     const listElement = domRefs.inboxList;
     if (!listElement) return;
-
-    if (activeListTab !== 'library') {
-        switchListTab('library');
-    }
-    
-    const emptyStateRow = listElement.querySelector('tr > td.empty-state');
-    if (emptyStateRow) emptyStateRow.parentElement.remove();
+    inProgressImageStencils.set(imageId, data);
 
     let row = listElement.querySelector(`tr[data-image-id="${imageId}"].stencil-packet`);
 
     if (!row) {
+        const emptyStateRow = listElement.querySelector('tr > td.empty-state');
+        if (emptyStateRow) emptyStateRow.parentElement.remove();
+        
         row = document.createElement('tr');
         row.dataset.imageId = imageId;
         row.classList.add('stencil-packet');
@@ -626,30 +581,67 @@ export function renderOrUpdateImageStencil(data) {
     if (progressBarContainer) progressBarContainer.title = `${text} - ${progressPercent || 5}%`;
 }
 
-export function removeImageStencil(imageId) {
-    const listElement = domRefs.inboxList;
+export function renderOrUpdateInstanceStencil(data) {
+    const listElement = domRefs.inProgressList;
     if (!listElement) return;
 
-    const row = listElement.querySelector(`tr[data-image-id="${imageId}"].stencil-packet`);
-    if (row) {
-        row.remove();
-        checkAndRenderEmptyState(listElement, "Library is empty. Create a packet!");
+    const { instanceId, title, progressPercent, text } = data;
+    let row = listElement.querySelector(`tr[data-instance-id="${instanceId}"]`);
+
+    if (!row) {
+        const emptyStateRow = listElement.querySelector('tr > td.empty-state');
+        if (emptyStateRow) emptyStateRow.parentElement.remove();
+        
+        row = document.createElement('tr');
+        row.dataset.instanceId = instanceId;
+        row.classList.add('stencil-packet');
+        const colorName = packetUtils.getColorForTopic(title);
+        const colorHex = (packetColorMap[colorName] || defaultPacketColors).progress;
+
+        row.innerHTML = `
+            <td class="checkbox-cell">
+                <input type="checkbox" class="packet-checkbox" disabled>
+            </td>
+            <td>
+                <span class="stencil-title">${title}</span>
+                <span class="creation-stage-text"></span>
+            </td>
+            <td>
+                <div class="progress-bar-container">
+                    <div class="progress-bar" style="background-color: ${colorHex};"></div>
+                </div>
+            </td>
+        `;
+        listElement.prepend(row);
     }
+    
+    const progressTextElement = row.querySelector('.creation-stage-text');
+    const progressBarElement = row.querySelector('.progress-bar');
+    const progressBarContainer = row.querySelector('.progress-bar-container');
+
+    if (progressTextElement) progressTextElement.textContent = `(${text})`;
+    if (progressBarElement) progressBarElement.style.width = `${progressPercent}%`;
+    if (progressBarContainer) progressBarContainer.title = `${text} - ${progressPercent}%`;
 }
 
+
 export function addOrUpdateInProgressStencil(data) {
+    // This function is now only for IMAGE stencils, which show in the Library.
     if (!data || !data.imageId) return;
-    inProgressStencils.set(data.imageId, data);
+    inProgressImageStencils.set(data.imageId, data);
     if (domRefs.rootView && !domRefs.rootView.classList.contains('hidden')) {
         renderOrUpdateImageStencil(data);
     }
 }
 
+
 export function removeInProgressStencil(imageId) {
-    if (inProgressStencils.has(imageId)) {
-        inProgressStencils.delete(imageId);
-        if (domRefs.rootView && !domRefs.rootView.classList.contains('hidden')) {
-            removeImageStencil(imageId);
+    if (inProgressImageStencils.has(imageId)) {
+        inProgressImageStencils.delete(imageId);
+        const row = domRefs.inboxList?.querySelector(`tr[data-image-id="${imageId}"].stencil-packet`);
+        if (row) {
+            row.remove();
+            checkAndRenderEmptyState(domRefs.inboxList, "Library is empty. Create a packet!");
         }
     }
 }
