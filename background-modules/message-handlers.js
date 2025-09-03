@@ -21,6 +21,7 @@ import * as tabGroupHandler from './tab-group-handler.js';
 import * as sidebarHandler from './sidebar-handler.js';
 import cloudStorage from '../cloud-storage.js';
 import llmService from '../llm_service.js';
+import * as ruleManager from './rule-manager.js';
 
 import {
     instantiatePacket,
@@ -44,7 +45,8 @@ import {
     activeMediaPlayback,
     resetActiveMediaPlayback,
     notifyUIsOfStateChange,
-    saveCurrentTime
+    saveCurrentTime,
+    setupOffscreenDocument
 } from '../background.js';
 import { checkAndPromptForCompletion } from './navigation-handler.js';
 
@@ -161,20 +163,8 @@ async function handleOpenContent(data, sender, sendResponse) {
         sendResponse({ success: false, error: 'Missing instance data or targetCanonicalUrl' });
         return;
     }
-    
+
     if (openingContent.has(targetCanonicalUrl)) {
-        logger.log('MessageHandler:handleOpenContent', `Lock active for ${targetCanonicalUrl}. Focusing existing tab if possible.`);
-        try {
-            const allTabs = await chrome.tabs.query({});
-            for (const tab of allTabs) {
-                const context = await getPacketContext(tab.id);
-                if (context && context.instanceId === instanceId && context.canonicalPacketUrl === targetCanonicalUrl) {
-                    await chrome.tabs.update(tab.id, { active: true });
-                    if (tab.windowId) await chrome.windows.update(tab.windowId, { focused: true });
-                    break;
-                }
-            }
-        } catch (e) { /* Ignore errors during focus attempt */ }
         sendResponse({ success: true, message: 'Open already in progress.' });
         return;
     }
@@ -182,17 +172,44 @@ async function handleOpenContent(data, sender, sendResponse) {
     openingContent.add(targetCanonicalUrl); // Acquire lock
 
     try {
-        let targetTab = null;
+        // --- START: UNIFIED DUPLICATE CHECK ---
         const allTabs = await chrome.tabs.query({});
         for (const tab of allTabs) {
             const context = await getPacketContext(tab.id);
             if (context && context.instanceId === instanceId && context.canonicalPacketUrl === targetCanonicalUrl) {
-                targetTab = tab;
-                break;
+                await chrome.tabs.update(tab.id, { active: true });
+                if (tab.windowId) await chrome.windows.update(tab.windowId, { focused: true });
+                sendResponse({ success: true, message: 'Focused existing tab.' });
+                return;
+            }
+        }
+        // --- END: UNIFIED DUPLICATE CHECK ---
+
+        const contentItem = instance.contents.find(item => item.url === targetCanonicalUrl);
+
+        if (contentItem && contentItem.cacheable && contentItem.lrl) {
+            const indexedDbKey = sanitizeForFileName(contentItem.lrl);
+            const storedContent = await indexedDbStorage.getGeneratedContent(instanceId, indexedDbKey);
+            if (storedContent && storedContent[0]?.content) {
+                const fullHtml = new TextDecoder().decode(storedContent[0].content);
+                await setupOffscreenDocument();
+                const offscreenResponse = await chrome.runtime.sendMessage({
+                    target: 'offscreen',
+                    type: 'create-blob-url',
+                    data: { html: fullHtml }
+                });
+
+                if (offscreenResponse.success) {
+                    const newTab = await chrome.tabs.create({ url: offscreenResponse.blobUrl, active: true });
+                    const trustedIntent = { instanceId, canonicalPacketUrl: targetCanonicalUrl };
+                    await storage.setSession({ [`trusted_intent_${newTab.id}`]: trustedIntent });
+                    await sidebarHandler.updateActionForTab(newTab.id);
+                    sendResponse({ success: true });
+                    return; 
+                }
             }
         }
         
-        const contentItem = instance.contents.find(item => item.url === targetCanonicalUrl);
         let finalUrlToOpen;
 
         if (contentItem && contentItem.access === 'private') {
@@ -206,23 +223,16 @@ async function handleOpenContent(data, sender, sendResponse) {
             finalUrlToOpen = targetCanonicalUrl;
         }
 
+        const newTab = await chrome.tabs.create({ url: 'about:blank', active: false });
+        if (!newTab || typeof newTab.id !== 'number') throw new Error('Tab creation failed.');
+        
         const trustedIntent = {
             instanceId: instanceId,
             canonicalPacketUrl: targetCanonicalUrl,
         };
+        await storage.setSession({ [`trusted_intent_${newTab.id}`]: trustedIntent });
 
-        if (targetTab) {
-            await storage.setSession({ [`trusted_intent_${targetTab.id}`]: trustedIntent });
-            await chrome.tabs.update(targetTab.id, { url: finalUrlToOpen, active: true });
-            if (targetTab.windowId) await chrome.windows.update(targetTab.windowId, { focused: true });
-        } else {
-            const newTab = await chrome.tabs.create({ url: 'about:blank', active: false });
-            if (!newTab || typeof newTab.id !== 'number') throw new Error('Tab creation failed.');
-            
-            await storage.setSession({ [`trusted_intent_${newTab.id}`]: trustedIntent });
-
-            await chrome.tabs.update(newTab.id, { url: finalUrlToOpen, active: true });
-        }
+        await chrome.tabs.update(newTab.id, { url: finalUrlToOpen, active: true });
         
         sendResponse({ success: true });
     } catch (error) {
@@ -232,6 +242,7 @@ async function handleOpenContent(data, sender, sendResponse) {
         openingContent.delete(targetCanonicalUrl); // Release lock
     }
 }
+
 
 async function handleMarkUrlVisited(data, sendResponse) {
      const { packetId: instanceId, url } = data;
@@ -380,6 +391,39 @@ async function handlePlaybackActionRequest(data, sender, sendResponse) {
     }
 }
 
+export async function ensureHtmlIsCached(instanceId, url, lrl) {
+    const indexedDbKey = sanitizeForFileName(lrl);
+    const cachedHtml = await indexedDbStorage.getGeneratedContent(instanceId, indexedDbKey);
+
+    if (cachedHtml && cachedHtml[0]?.content) {
+        logger.log("CacheHelper", `Cache HIT for HTML ${lrl} in instance ${instanceId}`);
+        return { success: true, wasCached: true, content: cachedHtml[0].content };
+    }
+
+    logger.log("CacheHelper", `Cache MISS for HTML ${lrl}. Fetching from cloud: ${url}`);
+    const instance = await storage.getPacketInstance(instanceId);
+    const htmlItem = instance.contents.find(item => item.url === url && item.format === 'html');
+    if (!htmlItem) {
+        throw new Error(`HTML item with url ${url} not found in instance.`);
+    }
+
+    const downloadResult = await cloudStorage.downloadFile(url);
+    if (!downloadResult.success) {
+        throw new Error(`Failed to download HTML from cloud: ${downloadResult.error}`);
+    }
+
+    const htmlBuffer = await downloadResult.content.arrayBuffer();
+    await indexedDbStorage.saveGeneratedContent(instanceId, indexedDbKey, [{
+        name: lrl.split('/').pop(),
+        content: htmlBuffer,
+        contentType: htmlItem.mimeType
+    }]);
+
+    logger.log("CacheHelper", `Successfully fetched and cached HTML ${lrl} for instance ${instanceId}. Refreshing rules.`);
+    await ruleManager.addOrUpdatePacketRules(instance);
+    
+    return { success: true, wasCached: false, content: htmlBuffer };
+}
 
 const actionHandlers = {
     'is_current_tab_packetizable': async (data, sender, sendResponse) => {
@@ -565,6 +609,24 @@ const actionHandlers = {
             sendResponse({ success: false, error: 'Draft packet or RLR not found.' });
         }
     },
+    'get_cached_html_content': async (data, sender, sendResponse) => {
+        const { instanceId, lrl } = data;
+        if (instanceId && lrl) {
+            const indexedDbKey = sanitizeForFileName(lrl);
+            const storedContent = await indexedDbStorage.getGeneratedContent(instanceId, indexedDbKey);
+
+            if (storedContent && storedContent[0]?.content) {
+                const htmlContent = new TextDecoder().decode(storedContent[0].content);
+                const instance = await storage.getPacketInstance(instanceId);
+                const item = instance.contents.find(i => i.lrl === lrl);
+                sendResponse({ success: true, htmlContent, title: item?.title || 'Cached Page' });
+            } else {
+                sendResponse({ success: false, error: 'Cached content not found.' });
+            }
+        } else {
+            sendResponse({ success: false, error: 'Missing instanceId or lrl.' });
+        }
+    },
     'get_presigned_url': async (data, sender, sendResponse) => {
         const { s3Key, instanceId } = data;
         const instance = await storage.getPacketInstance(instanceId);
@@ -681,6 +743,17 @@ const actionHandlers = {
             sendResponse({ success: true });
         } catch (error) {
             logger.error("MessageHandler:ensure_media_is_cached", "Failed to cache media", error);
+            sendResponse({ success: false, error: error.message });
+        }
+    },
+    'ensure_html_is_cached': async (data, sender, sendResponse) => {
+        const { instanceId, url, lrl } = data;
+        try {
+            await ensureHtmlIsCached(instanceId, url, lrl);
+            sidebarHandler.notifySidebar('html_cache_populated', { instanceId, lrl });
+            sendResponse({ success: true });
+        } catch (error) {
+            logger.error("MessageHandler:ensure_html_is_cached", "Failed to cache HTML", error);
             sendResponse({ success: false, error: error.message });
         }
     },

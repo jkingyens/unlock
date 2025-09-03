@@ -11,14 +11,18 @@ import {
     getPacketContext,
     setPacketContext,
     clearPacketContext,
+    indexedDbStorage,
+    sanitizeForFileName
 } from '../utils.js';
 import {
     activeMediaPlayback,
     resetActiveMediaPlayback,
-    setMediaPlaybackState
+    setMediaPlaybackState,
+    setupOffscreenDocument
 } from '../background.js';
 import * as sidebarHandler from './sidebar-handler.js';
 import * as tabGroupHandler from './tab-group-handler.js';
+import { ensureHtmlIsCached } from './message-handlers.js';
 
 const pendingVisits = {};
 const pendingNavigationActionTimers = new Map();
@@ -53,16 +57,58 @@ async function injectOverlayScripts(tabId) {
     }
 }
 
+export async function onBeforeNavigate(details) {
+    if (details.frameId !== 0 || !details.url || !details.url.startsWith('http')) {
+        return;
+    }
+
+    const context = await getPacketContext(details.tabId);
+    if (!context || !context.instanceId) {
+        return;
+    }
+
+    const instance = await storage.getPacketInstance(context.instanceId);
+    const targetItem = packetUtils.isUrlInPacket(details.url, instance, { returnItem: true });
+
+    if (targetItem && targetItem.cacheable && targetItem.lrl) {
+        const indexedDbKey = sanitizeForFileName(targetItem.lrl);
+        const cachedContent = await indexedDbStorage.getGeneratedContent(instance.instanceId, indexedDbKey);
+
+        if (cachedContent && cachedContent[0]?.content) {
+            logger.log('NavigationHandler:onBeforeNavigate', `Intercepting navigation to cached item: ${targetItem.title}`);
+            
+            const fullHtml = new TextDecoder().decode(cachedContent[0].content);
+            
+            await setupOffscreenDocument();
+            const offscreenResponse = await chrome.runtime.sendMessage({
+                target: 'offscreen',
+                type: 'create-blob-url',
+                data: { html: fullHtml }
+            });
+
+            if (offscreenResponse.success) {
+                chrome.tabs.update(details.tabId, { url: offscreenResponse.blobUrl });
+            }
+        }
+    }
+}
+
 export async function onCommitted(details) {
-    if (details.frameId !== 0 || !details.url?.startsWith('http')) return;
-    logger.log(`[NavigationHandler Tab ${details.tabId}]`, `onCommitted event fired for URL: ${details.url}`);
-    await processNavigationEvent(details.tabId, details.url, details);
+    if (details.frameId !== 0) return;
+    const url = details.url;
+    if (!url || (!url.startsWith('http') && !url.startsWith('blob:chrome-extension://'))) return;
+    
+    logger.log(`[NavigationHandler Tab ${details.tabId}]`, `onCommitted event fired for URL: ${url}`);
+    await processNavigationEvent(details.tabId, url, details);
 }
 
 export async function onHistoryStateUpdated(details) {
-    if (details.frameId !== 0 || !details.url?.startsWith('http')) return;
-    logger.log(`[NavigationHandler Tab ${details.tabId}]`, `onHistoryStateUpdated event fired for URL: ${details.url}`);
-    await processNavigationEvent(details.tabId, details.url, details);
+    if (details.frameId !== 0) return;
+    const url = details.url;
+    if (!url || (!url.startsWith('http') && !url.startsWith('blob:chrome-extension://'))) return;
+
+    logger.log(`[NavigationHandler Tab ${details.tabId}]`, `onHistoryStateUpdated event fired for URL: ${url}`);
+    await processNavigationEvent(details.tabId, url, details);
 }
 
 export async function checkAndPromptForCompletion(logPrefix, visitResult, instanceId) {
@@ -220,6 +266,12 @@ async function processNavigationEvent(tabId, finalUrl, details) {
 
         if (itemForVisitTimer && !itemForVisitTimer.interactionBasedCompletion) {
             startVisitTimer(tabId, finalInstance.instanceId, itemForVisitTimer.url, logPrefix);
+        }
+        
+        if (itemForVisitTimer && itemForVisitTimer.cacheable && itemForVisitTimer.lrl && !finalUrl.startsWith('blob:')) {
+            ensureHtmlIsCached(finalInstance.instanceId, itemForVisitTimer.url, itemForVisitTimer.lrl).catch(err => {
+                logger.error(logPrefix, `Background caching failed for ${itemForVisitTimer.lrl}`, err);
+            });
         }
     }
 

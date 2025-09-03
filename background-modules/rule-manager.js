@@ -3,7 +3,7 @@
 // REVISED: Implemented an integer-based hashing function for rule IDs to conform to the
 // declarativeNetRequest API, which requires integer IDs >= 1.
 
-import { logger, storage } from '../utils.js';
+import { logger, storage, indexedDbStorage, sanitizeForFileName } from '../utils.js';
 import cloudStorage from '../cloud-storage.js';
 
 const RULE_ID_PREFIX = 'pkt_'; // No longer used in the ID itself, but good for context.
@@ -92,17 +92,36 @@ export async function addOrUpdatePacketRules(instance) {
             continue;
         }
 
-        let presignedUrl;
-        // If the page requires an interaction event, inject the extensionId as a signed query parameter.
-        if (item.interactionBasedCompletion === true) {
-            const extraParams = { extensionId: chrome.runtime.id };
-            presignedUrl = await cloudStorage.generatePresignedGetUrl(s3Key, 3600, item.publishContext, extraParams);
-        } else {
-            presignedUrl = await cloudStorage.generatePresignedGetUrl(s3Key, 3600, item.publishContext);
+        let redirectUrl;
+        let isCached = false;
+
+        if (item.cacheable === true && item.lrl) {
+            const indexedDbKey = sanitizeForFileName(item.lrl);
+            const cachedContent = await indexedDbStorage.getGeneratedContent(instance.instanceId, indexedDbKey);
+            if (cachedContent && cachedContent[0]?.content) {
+                isCached = true;
+            }
         }
 
-        if (!presignedUrl) {
-            logger.warn('RuleManager:addOrUpdate', `Failed to generate pre-signed URL for S3 key: ${s3Key}. Skipping rule creation.`);
+        if (isCached) {
+            // This path is no longer used for direct navigation, but the rule prevents unnecessary cloud requests.
+            const viewerUrl = new URL(chrome.runtime.getURL('preview.html'));
+            viewerUrl.searchParams.set('instanceId', instance.instanceId);
+            viewerUrl.searchParams.set('lrl', item.lrl);
+            viewerUrl.searchParams.set('v', Date.now()); // Cache busting
+            redirectUrl = viewerUrl.href;
+        } else {
+            // Fallback to pre-signed URL for non-cacheable items or non-cached cacheable items
+            if (item.interactionBasedCompletion === true) {
+                const extraParams = { extensionId: chrome.runtime.id };
+                redirectUrl = await cloudStorage.generatePresignedGetUrl(s3Key, 3600, item.publishContext, extraParams);
+            } else {
+                redirectUrl = await cloudStorage.generatePresignedGetUrl(s3Key, 3600, item.publishContext);
+            }
+        }
+
+        if (!redirectUrl) {
+            logger.warn('RuleManager:addOrUpdate', `Failed to generate redirect URL for S3 key: ${s3Key}. Skipping rule creation.`);
             continue;
         }
 
@@ -111,7 +130,7 @@ export async function addOrUpdatePacketRules(instance) {
             priority: RULE_PRIORITY,
             action: {
                 type: 'redirect',
-                redirect: { url: presignedUrl }
+                redirect: { url: redirectUrl }
             },
             condition: {
                 urlFilter: canonicalUrl.split('?')[0],

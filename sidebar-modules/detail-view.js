@@ -257,6 +257,33 @@ export async function redrawSingleWaveform(lrl) {
     }
 }
 
+export function updateSingleCardToCached(lrl) {
+    const card = domRefs.packetDetailView.querySelector(`.card[data-lrl="${lrl}"]`);
+    if (card) {
+        const cardIconContainer = card.querySelector('.card-icon-container');
+        if (cardIconContainer) {
+            cardIconContainer.classList.remove('loading', 'needs-download');
+            const downloadIcon = cardIconContainer.querySelector('.download-icon');
+            if (downloadIcon) downloadIcon.remove();
+            card.classList.add('clickable');
+            
+            const instanceId = card.closest('#detail-cards-container').dataset.instanceId;
+            const url = card.dataset.url;
+            card.addEventListener('click', (e) => {
+                if (card.classList.contains('opening')) {
+                    return;
+                }
+                card.classList.add('opening');
+                setTimeout(() => card.classList.remove('opening'), 2000);
+
+                if (typeof openUrl === 'function') {
+                    openUrl(url, instanceId);
+                }
+            });
+        }
+    }
+}
+
 
 // --- Main Rendering Function ---
 export async function displayPacketContent(instance, browserState, canonicalPacketUrl) {
@@ -475,6 +502,7 @@ async function createContentCard(contentItem, instance) {
     if (lrl) card.dataset.lrl = lrl;
 
     let isClickable = (origin === 'external') || (origin === 'internal' && contentItem.published);
+    let needsDownload = false;
 
     if (format === 'html') {
         let iconHTML = origin === 'external' ? '🔗' : '📄';
@@ -484,7 +512,14 @@ async function createContentCard(contentItem, instance) {
         } else {
             displayUrl = contentItem.published ? title : '(Not Published)';
         }
-        card.innerHTML = `<div class="card-icon">${iconHTML}</div><div class="card-text"><div class="card-title">${title}</div><div class="card-url">${displayUrl}</div>${context ? `<div class="card-relevance">${context}</div>` : ''}</div>`;
+        
+        let iconContainerHTML = `<div class="card-icon">${iconHTML}</div>`;
+
+        if (origin === 'internal' && contentItem.cacheable) {
+            isClickable = true;
+        }
+        
+        card.innerHTML = `${iconContainerHTML}<div class="card-text"><div class="card-title">${title}</div><div class="card-url">${displayUrl}</div>${context ? `<div class="card-relevance">${context}</div>` : ''}</div>`;
     } else if (format === 'audio') {
         card.classList.add('media');
         card.innerHTML = `
@@ -549,6 +584,18 @@ async function createContentCard(contentItem, instance) {
                 }
             });
         }
+    } else if (card.classList.contains('needs-download')) {
+        card.addEventListener('click', () => {
+            const cardIconContainer = card.querySelector('.card-icon-container');
+            if (cardIconContainer && cardIconContainer.classList.contains('needs-download')) {
+                cardIconContainer.classList.remove('needs-download');
+                cardIconContainer.classList.add('loading');
+                sendMessageToBackground({
+                    action: 'ensure_html_is_cached',
+                    data: { instanceId: instance.instanceId, url: contentItem.url, lrl: contentItem.lrl }
+                });
+            }
+        });
     }
 
     return card;
