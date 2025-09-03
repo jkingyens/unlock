@@ -23,7 +23,7 @@ import {
 } from './utils.js';
 import * as msgHandler from './background-modules/message-handlers.js';
 import * as ruleManager from './background-modules/rule-manager.js';
-import { onCommitted, onHistoryStateUpdated, checkAndPromptForCompletion, startVisitTimer, clearPendingVisitTimer } from './background-modules/navigation-handler.js';
+import { onCommitted, onHistoryStateUpdated, checkAndPromptForCompletion, startVisitTimer, clearPendingVisitTimer, onBeforeNavigate } from './background-modules/navigation-handler.js';
 import * as tabGroupHandler from './background-modules/tab-group-handler.js';
 import * as sidebarHandler from './background-modules/sidebar-handler.js';
 import cloudStorage from '../cloud-storage.js';
@@ -133,6 +133,46 @@ async function migrateHtmlContentToIndexedDb() {
 
     await storage.setLocal({ [MIGRATION_FLAG_HTML]: true });
 }
+
+async function migrateSummaryPagesToCacheable() {
+    const MIGRATION_FLAG_CACHEABLE = 'summaryPageCacheableMigrationComplete';
+    const flags = await storage.getLocal([MIGRATION_FLAG_CACHEABLE]);
+
+    if (flags[MIGRATION_FLAG_CACHEABLE]) {
+        return; // Migration already done
+    }
+
+    logger.log('Background:Migration', 'Running one-time migration to mark summary pages as cacheable...');
+    const allImages = await storage.getPacketImages();
+    let imagesToUpdate = { ...allImages };
+    let migrationNeeded = false;
+
+    for (const imageId in imagesToUpdate) {
+        let image = imagesToUpdate[imageId];
+        let wasModified = false;
+
+        if (image.sourceContent && Array.isArray(image.sourceContent)) {
+            image.sourceContent.forEach(item => {
+                if (item.origin === 'internal' && item.format === 'html' && item.cacheable !== true) {
+                    item.cacheable = true;
+                    wasModified = true;
+                }
+            });
+        }
+
+        if (wasModified) {
+            migrationNeeded = true;
+            logger.log('Background:Migration', `Marked internal HTML as cacheable for packet image: ${imageId}`);
+        }
+    }
+
+    if (migrationNeeded) {
+        await storage.setLocal({ [CONFIG.STORAGE_KEYS.PACKET_IMAGES]: imagesToUpdate });
+        logger.log('Background:Migration', 'Completed updating cacheable flags for all applicable packet images.');
+    }
+
+    await storage.setLocal({ [MIGRATION_FLAG_CACHEABLE]: true });
+}
 // --- END: New Migration Logic ---
 
 
@@ -234,7 +274,7 @@ async function hasOffscreenDocument() {
     return false;
 }
 
-async function setupOffscreenDocument() {
+export async function setupOffscreenDocument() {
     try {
         if (await hasOffscreenDocument()) return;
         if (creatingOffscreenDocument) {
@@ -397,9 +437,10 @@ chrome.runtime.onInstalled.addListener(async (details) => {
         logger.log('Background:onInstalled', `Extension ${details.reason}`);
         await initializeStorageAndSettings();
         
-        // **MODIFICATION**: Add the new migration function call here
+        await indexedDbStorage.garbageCollectIndexedDbContent();
         await migratePacketImagesIfNecessary();
         await migrateHtmlContentToIndexedDb(); 
+        await migrateSummaryPagesToCacheable(); 
 
         await indexedDbStorage.debugDumpIndexedDb();
         await restoreMediaStateOnStartup();
@@ -431,9 +472,10 @@ chrome.runtime.onStartup.addListener(async () => {
         logger.log('Background:onStartup', 'Browser startup detected. Navigation processing is paused.');
         await initializeStorageAndSettings();
 
-        // **MODIFICATION**: And add it here as well
+        await indexedDbStorage.clearInstanceCacheEntries();
         await migratePacketImagesIfNecessary();
         await migrateHtmlContentToIndexedDb();
+        await migrateSummaryPagesToCacheable();
 
         await indexedDbStorage.debugDumpIndexedDb();
         await restoreMediaStateOnStartup();
@@ -571,6 +613,13 @@ chrome.tabs.onReplaced.addListener(async (addedTabId, removedTabId) => {
 
 function attachNavigationListeners() {
     if (!chrome.webNavigation) { return; }
+    
+    const onBeforeNavigateWrapper = async (details) => {
+        await initializationPromise;
+        if (isRestoring) return;
+        onBeforeNavigate(details);
+    };
+
     const onCommittedWrapper = async (details) => {
         await initializationPromise;
         if (isRestoring) {
@@ -587,12 +636,18 @@ function attachNavigationListeners() {
         }
         onHistoryStateUpdated(details);
     };
+
+    if (chrome.webNavigation.onBeforeNavigate.hasListener(onBeforeNavigate)) {
+        chrome.webNavigation.onBeforeNavigate.removeListener(onBeforeNavigate);
+    }
     if (chrome.webNavigation.onCommitted.hasListener(onCommitted)) {
         chrome.webNavigation.onCommitted.removeListener(onCommitted);
     }
     if (chrome.webNavigation.onHistoryStateUpdated.hasListener(onHistoryStateUpdated)) {
         chrome.webNavigation.onHistoryStateUpdated.removeListener(onHistoryStateUpdated);
     }
+
+    chrome.webNavigation.onBeforeNavigate.addListener(onBeforeNavigateWrapper);
     chrome.webNavigation.onCommitted.addListener(onCommittedWrapper);
     chrome.webNavigation.onHistoryStateUpdated.addListener(onHistoryStateUpdatedWrapper);
 }

@@ -362,6 +362,11 @@ async function handleBackgroundMessage(message) {
                 detailView.redrawSingleWaveform(data.lrl);
             }
             break;
+        case 'html_cache_populated':
+            if (currentView === 'packet-detail' && currentInstanceId === data.instanceId) {
+                detailView.updateSingleCardToCached(data.lrl);
+            }
+            break;
     }
 }
 

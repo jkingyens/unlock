@@ -190,7 +190,8 @@ const indexedDbStorage = {
         logger.error('IndexedDB', 'Error saving generated content', { key, error });
         return false;
     }
-   },   async getGeneratedContent(imageId, pageId) {
+   },
+   async getGeneratedContent(imageId, pageId) {
     const key = `${imageId}::${pageId}`;
     try {
         const db = await getDb();
@@ -268,6 +269,101 @@ const indexedDbStorage = {
            return false;
        }
    },
+   async clearAllContent() {
+        try {
+            const db = await getDb();
+            const tx = db.transaction(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT, 'readwrite');
+            const store = tx.objectStore(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT);
+            const request = store.clear();
+            await new Promise((resolve, reject) => {
+                request.onerror = () => reject(request.error);
+                tx.oncomplete = () => resolve();
+                tx.onerror = () => reject(tx.error);
+            });
+            logger.log('IndexedDB', 'All cached content has been cleared.');
+            return true;
+        } catch (error) {
+            logger.error('IndexedDB', 'Error clearing cached content', { error });
+            return false;
+        }
+    },
+    async garbageCollectIndexedDbContent() {
+        logger.log('IndexedDB:GC', 'Starting garbage collection for orphaned image content...');
+        try {
+            const db = await getDb();
+            const allImages = await storage.getPacketImages();
+            const validImageIds = new Set(Object.keys(allImages));
+            let deletedCount = 0;
+
+            const tx = db.transaction(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT, 'readwrite');
+            const store = tx.objectStore(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT);
+            const request = store.openCursor();
+
+            await new Promise((resolve, reject) => {
+                request.onsuccess = event => {
+                    const cursor = event.target.result;
+                    if (cursor) {
+                        const currentKey = String(cursor.key);
+                        const imageId = currentKey.split('::')[0];
+                        
+                        // Only check keys that are not instance caches
+                        if (!imageId.startsWith('inst_') && !validImageIds.has(imageId)) {
+                            cursor.delete();
+                            deletedCount++;
+                        }
+                        cursor.continue();
+                    } else {
+                        resolve(); // End of cursor
+                    }
+                };
+                request.onerror = event => reject(event.target.error);
+                tx.oncomplete = () => resolve();
+                tx.onerror = () => reject(tx.error);
+            });
+            
+            if (deletedCount > 0) {
+                logger.log('IndexedDB:GC', `Garbage collection complete. Removed ${deletedCount} orphaned entries.`);
+            }
+            return true;
+        } catch (error) {
+            logger.error('IndexedDB:GC', 'Error during content garbage collection', { error });
+            return false;
+        }
+    },
+    async clearInstanceCacheEntries() {
+        logger.log('IndexedDB:ClearInstances', 'Clearing all packet instance cache entries...');
+        try {
+            const db = await getDb();
+            let deletedCount = 0;
+            const tx = db.transaction(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT, 'readwrite');
+            const store = tx.objectStore(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT);
+            const request = store.openCursor();
+
+            await new Promise((resolve, reject) => {
+                request.onsuccess = event => {
+                    const cursor = event.target.result;
+                    if (cursor) {
+                        if (String(cursor.key).startsWith('inst_')) {
+                            cursor.delete();
+                            deletedCount++;
+                        }
+                        cursor.continue();
+                    } else {
+                        resolve();
+                    }
+                };
+                request.onerror = event => reject(event.target.error);
+                tx.oncomplete = () => resolve();
+                tx.onerror = () => reject(tx.error);
+            });
+            
+            logger.log('IndexedDB:ClearInstances', `Cleanup complete. Removed ${deletedCount} instance cache entries.`);
+            return true;
+        } catch (error) {
+            logger.error('IndexedDB:ClearInstances', 'Error during instance cache cleanup', { error });
+            return false;
+        }
+    },
     // --- START: New Debugging Function ---
     async debugDumpIndexedDb() {
         if (!CONFIG.DEBUG) return;
@@ -499,6 +595,25 @@ const packetUtils = {
   isUrlInPacket(loadedUrl, instance, options = {}) {
     if (!loadedUrl || !instance || !Array.isArray(instance.contents)) {
         return options.returnItem ? null : false;
+    }
+
+    if (loadedUrl.startsWith('chrome-extension://')) {
+        try {
+            const urlObj = new URL(loadedUrl);
+            if (urlObj.pathname.endsWith('/preview.html')) {
+                const urlInstanceId = urlObj.searchParams.get('instanceId');
+                const urlLrl = urlObj.searchParams.get('lrl');
+                
+                if (urlInstanceId === instance.instanceId && urlLrl) {
+                    const matchedItem = instance.contents.find(item => item.lrl === decodeURIComponent(urlLrl));
+                    if (matchedItem) {
+                        return options.returnItem ? matchedItem : true;
+                    }
+                }
+            }
+        } catch (e) {
+            logger.warn('isUrlInPacket', 'Could not parse chrome-extension URL', { loadedUrl, error: e });
+        }
     }
 
     let decodedLoadedUrl;

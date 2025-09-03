@@ -118,9 +118,6 @@ export async function instantiatePacket(imageId, preGeneratedInstanceId, initiat
                         bucket: activeCloudConfig.bucket
                     };
 
-                    if (item.cacheable === true) {
-                        await indexedDbStorage.saveGeneratedContent(instanceId, indexedDbKey, storedContent);
-                    }
                 } else {
                     throw new Error(`Failed to publish ${lrl}: ${uploadResult.error}`);
                 }
@@ -209,7 +206,6 @@ export async function processDeletePacketsRequest(data, initiatorTabId = null) {
             }
             
             await storage.deletePacketBrowserState(instanceId);
-            await indexedDbStorage.deleteGeneratedContentForImage(instanceId);
 
             if (await cloudStorage.initialize()) {
                 for (const item of instance.contents) {
