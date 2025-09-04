@@ -2,6 +2,8 @@
 // REVISED: The packet_instance_deleted message handler is now more robust,
 // ensuring it correctly clears internal state and navigates to the root view
 // if the currently active packet is the one being deleted.
+// REVISED: The sidebar will now remain on the packet detail view if that packet's
+// media is playing, even when the user navigates to a tab outside the packet.
 
 import { logger, storage, packetUtils, applyThemeMode, CONFIG } from './utils.js';
 import { domRefs, cacheDomReferences } from './sidebar-modules/dom-references.js';
@@ -20,7 +22,7 @@ let isNavigating = false;
 let nextNavigationRequest = null;
 const PENDING_VIEW_KEY = 'pendingSidebarView';
 let isOpeningPacketItem = false; 
-
+let activeMediaInstanceId = null; // NEW: Tracks the ID of the packet with active media
 
 function resetSidebarState() {
     currentView = 'root';
@@ -30,6 +32,7 @@ function resetSidebarState() {
     isNavigating = false;
     nextNavigationRequest = null;
     isOpeningPacketItem = false;
+    // Note: activeMediaInstanceId is NOT reset here intentionally
     logger.log('Sidebar', 'Internal state has been reset.');
 }
 
@@ -183,6 +186,12 @@ async function updateSidebarContext(contextData) {
     const newPacketUrl = contextData?.packetUrl ?? null;
     let newInstanceData = contextData?.instance ?? null;
 
+    // MODIFIED: Add check for active media playback
+    if (newInstanceId === null && currentView === 'packet-detail' && currentInstanceId === activeMediaInstanceId) {
+        logger.log('Sidebar:updateSidebarContext', 'Ignoring context change to null because active media packet is being viewed.');
+        return;
+    }
+
     if (isOpeningPacketItem && newInstanceId === null) {
         logger.log('Sidebar:updateSidebarContext', 'Ignoring transient null context due to navigation lock.');
         return;
@@ -281,6 +290,13 @@ async function handleBackgroundMessage(message) {
             }
             break;
         case 'playback_state_updated':
+            // MODIFIED: Track active media instance ID
+            if (data.state === 'playing') {
+                activeMediaInstanceId = data.instanceId;
+            } else if (activeMediaInstanceId === data.instanceId) {
+                activeMediaInstanceId = null;
+            }
+
             if (currentView === 'packet-detail' && currentInstanceId === data.instanceId) {
                 currentInstanceData = data.instance;
                 detailView.updatePlaybackUI(data, currentInstanceData); 
