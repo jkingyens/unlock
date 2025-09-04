@@ -89,6 +89,7 @@ const CONFIG = {
     preferAudio: true,
     waveformLinkMarkersEnabled: true,
     visitThresholdSeconds: 2,
+    quickCopyEnabled: true,
     elevenlabsApiKey: ''
   },
   INDEXED_DB: {
