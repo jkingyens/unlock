@@ -2,6 +2,10 @@
 // FINAL FIX: Moved the clearPendingVisitTimer call to the absolute beginning of the
 // navigation event processing to definitively fix a race condition where a slow timer
 // could mark the wrong page as visited during rapid navigation.
+// REVISED: If a tab's context is cleared, but media is actively playing, the
+// sidebar context will be overridden to "stick" to the playing packet.
+// REVISED: Prevent reconcileBrowserState from running when context is overridden for
+// media playback, to allow tabs to be correctly ejected from groups.
 
 import {
     logger,
@@ -220,13 +224,21 @@ async function processNavigationEvent(tabId, finalUrl, details) {
         }
     }
 
-    const finalContext = await getPacketContext(tabId);
+    let finalContext = await getPacketContext(tabId);
     logger.log(logPrefix, 'Final context after logic:', finalContext);
     let finalInstance = finalContext ? await storage.getPacketInstance(finalContext.instanceId) : null;
+    let isContextOverriddenForMedia = false; // NEW: Flag to track context override
     
-    if (finalInstance && activeMediaPlayback.instanceId === finalInstance.instanceId) {
-        finalInstance = activeMediaPlayback.instance;
-        logger.log(logPrefix, 'Using live instance data from activeMediaPlayback to avoid race condition.');
+    if (activeMediaPlayback.instanceId) {
+        if (!finalInstance) {
+            finalInstance = activeMediaPlayback.instance;
+            finalContext = null; 
+            isContextOverriddenForMedia = true; // NEW: Set flag
+            logger.log(logPrefix, 'Tab has no context, but media is playing. Overriding sidebar context.');
+        } else if (finalInstance.instanceId === activeMediaPlayback.instanceId) {
+            finalInstance = activeMediaPlayback.instance;
+            logger.log(logPrefix, 'Using live instance data from activeMediaPlayback for focused tab.');
+        }
     }
     
     mostRecentInstance = finalInstance;
@@ -234,7 +246,7 @@ async function processNavigationEvent(tabId, finalUrl, details) {
     let image = finalInstance ? await storage.getPacketImage(finalInstance.imageId) : null;
 
     if (finalInstance && image) {
-        const loadedItem = finalInstance.contents.find(item => item.url === finalContext.canonicalPacketUrl);
+        const loadedItem = finalContext ? finalInstance.contents.find(item => item.url === finalContext.canonicalPacketUrl) : null;
         if (loadedItem) {
             let momentTripped = false;
             (finalInstance.moments || []).forEach((moment, index) => {
@@ -260,9 +272,13 @@ async function processNavigationEvent(tabId, finalUrl, details) {
             }
         }
 
-        await reconcileBrowserState(tabId, finalInstance.instanceId, finalInstance, finalUrl);
-        const canonicalUrlForVisit = finalContext.canonicalPacketUrl;
-        const itemForVisitTimer = finalInstance.contents.find(i => i.url === canonicalUrlForVisit);
+        // MODIFIED: Only reconcile browser state if context isn't an override
+        if (!isContextOverriddenForMedia) {
+            await reconcileBrowserState(tabId, finalInstance.instanceId, finalInstance, finalUrl);
+        }
+
+        const canonicalUrlForVisit = finalContext ? finalContext.canonicalPacketUrl : null;
+        const itemForVisitTimer = canonicalUrlForVisit ? finalInstance.contents.find(i => i.url === canonicalUrlForVisit) : null;
 
         if (itemForVisitTimer && !itemForVisitTimer.interactionBasedCompletion) {
             startVisitTimer(tabId, finalInstance.instanceId, itemForVisitTimer.url, logPrefix);
