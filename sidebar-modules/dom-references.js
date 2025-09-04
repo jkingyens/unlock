@@ -102,6 +102,7 @@ export function cacheDomReferences() {
         preferAudioEnabledCheckbox: document.getElementById('prefer-audio-enabled'),
         waveformLinkMarkersEnabledCheckbox: document.getElementById('waveform-link-markers-enabled'),
         visitThresholdSecondsInput: document.getElementById('visit-threshold-seconds'),
+        quickCopyEnabledCheckbox: document.getElementById('quick-copy-enabled'),
         themeAutoRadio: document.getElementById('theme-auto'),
         themeLightRadio: document.getElementById('theme-light'),
         themeDarkRadio: document.getElementById('theme-dark'),

@@ -64,10 +64,34 @@ export async function instantiatePacket(imageId, preGeneratedInstanceId, initiat
     logger.log('PacketProcessor:instantiatePacket', 'Starting INSTANCE creation', { imageId, instanceId });
 
     try {
-        let packetImage = await storage.getPacketImage(imageId);
+        const [packetImage, settings] = await Promise.all([
+            storage.getPacketImage(imageId),
+            storage.getSettings()
+        ]);
+
         if (!packetImage) throw new Error(`Packet Image ${imageId} not found.`);
 
         sendInstantiationProgress(instanceId, 5, "Preparing...", packetImage.title);
+
+        if (settings.quickCopyEnabled) {
+            logger.log('PacketProcessor:instantiatePacket', 'Quick Copy is enabled. Copying local data now.', { imageId, instanceId });
+            const internalContentToCopy = packetImage.sourceContent.filter(item => item.origin === 'internal');
+            for (const item of internalContentToCopy) {
+                if (!item.lrl) {
+                    logger.warn('PacketProcessor:instantiatePacket', 'Skipping quick copy for internal item with no LRL.', { itemTitle: item.title });
+                    continue;
+                }
+                const sourceDbKey = sanitizeForFileName(item.lrl);
+                const sourceContent = await indexedDbStorage.getGeneratedContent(imageId, sourceDbKey);
+                if (sourceContent) {
+                    await indexedDbStorage.saveGeneratedContent(instanceId, sourceDbKey, sourceContent);
+                    logger.log('PacketProcessor:instantiatePacket', `Quick-copied ${item.lrl} from image to instance.`);
+                } else {
+                    logger.warn('PacketProcessor:instantiatePacket', `Content for ${item.lrl} not found in image's cache during Quick Copy. It will not be available in the new instance locally.`);
+                }
+            }
+        }
+
 
         const internalContentToUpload = packetImage.sourceContent.filter(item => item.origin === 'internal');
         const totalFilesToUpload = internalContentToUpload.length;

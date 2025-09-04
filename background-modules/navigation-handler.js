@@ -6,6 +6,9 @@
 // sidebar context will be overridden to "stick" to the playing packet.
 // REVISED: Prevent reconcileBrowserState from running when context is overridden for
 // media playback, to allow tabs to be correctly ejected from groups.
+// REVISED: Refreshing a cached internal page now correctly preserves the tab's context
+// by setting a trusted intent before redirecting to a blob: URL and then bypassing the
+// demotion check for blob URLs.
 
 import {
     logger,
@@ -91,6 +94,13 @@ export async function onBeforeNavigate(details) {
             });
 
             if (offscreenResponse.success) {
+                const trustedIntent = {
+                    instanceId: instance.instanceId,
+                    canonicalPacketUrl: targetItem.url
+                };
+                await storage.setSession({ [`trusted_intent_${details.tabId}`]: trustedIntent });
+                logger.log('NavigationHandler:onBeforeNavigate', `Setting trusted intent for blob URL redirect.`, { tabId: details.tabId });
+
                 chrome.tabs.update(details.tabId, { url: offscreenResponse.blobUrl });
             }
         }
@@ -185,40 +195,44 @@ async function processNavigationEvent(tabId, finalUrl, details) {
             logger.log(logPrefix, `Is this a user-initiated navigation? -> ${isUserInitiated}`);
 
             if (isUserInitiated) {
-                const instance = await storage.getPacketInstance(currentContext.instanceId);
-                const newItemInPacket = packetUtils.isUrlInPacket(finalUrl, instance, { returnItem: true });
-
-                if (newItemInPacket && newItemInPacket.url !== currentContext.canonicalPacketUrl) {
-                    let duplicateTab = null;
-                    const allTabs = await chrome.tabs.query({});
-                    for (const tab of allTabs) {
-                        if (tab.id !== tabId) {
-                            const otherContext = await getPacketContext(tab.id);
-                            if (otherContext?.instanceId === currentContext.instanceId && otherContext?.canonicalPacketUrl === newItemInPacket.url) {
-                                duplicateTab = tab;
-                                break;
+                if (finalUrl.startsWith('blob:')) {
+                    logger.log(logPrefix, 'DECISION: Navigation is to an internally-redirected blob URL. Preserving context.');
+                } else {
+                    const instance = await storage.getPacketInstance(currentContext.instanceId);
+                    const newItemInPacket = packetUtils.isUrlInPacket(finalUrl, instance, { returnItem: true });
+    
+                    if (newItemInPacket && newItemInPacket.url !== currentContext.canonicalPacketUrl) {
+                        let duplicateTab = null;
+                        const allTabs = await chrome.tabs.query({});
+                        for (const tab of allTabs) {
+                            if (tab.id !== tabId) {
+                                const otherContext = await getPacketContext(tab.id);
+                                if (otherContext?.instanceId === currentContext.instanceId && otherContext?.canonicalPacketUrl === newItemInPacket.url) {
+                                    duplicateTab = tab;
+                                    break;
+                                }
                             }
                         }
+    
+                        if (duplicateTab) {
+                            logger.log(logPrefix, `DECISION: Found duplicate tab ${duplicateTab.id}. Closing it.`);
+                            await chrome.tabs.remove(duplicateTab.id);
+                        }
+                        
+                        logger.log(logPrefix, 'DECISION: Re-stamping tab context for in-packet navigation and starting grace period.');
+                        await setPacketContext(tabId, currentContext.instanceId, newItemInPacket.url, finalUrl);
+                        await storage.setSession({ [`grace_period_${tabId}`]: Date.now() });
+                        setTimeout(() => storage.removeSession(`grace_period_${tabId}`), 250);
+    
+                    } else if (!newItemInPacket) {
+                        logger.log(logPrefix, 'DECISION: User navigated to a URL outside the packet. Demoting tab.');
+                        await clearPacketContext(tabId);
+                        if (await shouldUseTabGroups()) {
+                            await tabGroupHandler.ejectTabFromGroup(tabId, currentContext.instanceId);
+                        }
+                    } else {
+                        logger.log(logPrefix, 'DECISION: Navigation is to the same packet item or a non-item URL that was not user-initiated. No context change needed.');
                     }
-
-                    if (duplicateTab) {
-                        logger.log(logPrefix, `DECISION: Found duplicate tab ${duplicateTab.id}. Closing it.`);
-                        await chrome.tabs.remove(duplicateTab.id);
-                    }
-                    
-                    logger.log(logPrefix, 'DECISION: Re-stamping tab context for in-packet navigation and starting grace period.');
-                    await setPacketContext(tabId, currentContext.instanceId, newItemInPacket.url, finalUrl);
-                    await storage.setSession({ [`grace_period_${tabId}`]: Date.now() });
-                    setTimeout(() => storage.removeSession(`grace_period_${tabId}`), 250);
-
-                } else if (!newItemInPacket) {
-                    logger.log(logPrefix, 'DECISION: User navigated to a URL outside the packet. Demoting tab.');
-                    await clearPacketContext(tabId);
-                    if (await shouldUseTabGroups()) {
-                        await tabGroupHandler.ejectTabFromGroup(tabId, currentContext.instanceId);
-                    }
-                } else {
-                    logger.log(logPrefix, 'DECISION: Navigation is to the same packet item or a non-item URL that was not user-initiated. No context change needed.');
                 }
             }
         }

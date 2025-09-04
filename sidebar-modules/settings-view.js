@@ -104,6 +104,7 @@ export function setupSettingsListeners() {
     s.preferAudioEnabledCheckbox?.addEventListener('change', requestSave);
     s.waveformLinkMarkersEnabledCheckbox?.addEventListener('change', requestSave);
     s.visitThresholdSecondsInput?.addEventListener('change', requestSave);
+    s.quickCopyEnabledCheckbox?.addEventListener('change', requestSave);
     s.confettiEnabledCheckbox?.addEventListener('change', (event) => {
         requestSave();
         if (event.target.checked && typeof showConfetti === 'function') {
@@ -159,6 +160,7 @@ async function loadSettings() {
         domRefs.preferAudioEnabledCheckbox.checked = loadedSettings.preferAudio ?? false;
         domRefs.waveformLinkMarkersEnabledCheckbox.checked = loadedSettings.waveformLinkMarkersEnabled ?? true;
         domRefs.visitThresholdSecondsInput.value = loadedSettings.visitThresholdSeconds ?? 5;
+        domRefs.quickCopyEnabledCheckbox.checked = loadedSettings.quickCopyEnabled ?? true;
 
         const theme = loadedSettings.themePreference || 'auto';
         if (domRefs.themeAutoRadio) domRefs.themeAutoRadio.checked = theme === 'auto';
@@ -259,6 +261,7 @@ async function gatherAndSaveSettings() {
             waveformLinkMarkersEnabled: domRefs.waveformLinkMarkersEnabledCheckbox.checked,
             confettiEnabled: domRefs.confettiEnabledCheckbox.checked,
             visitThresholdSeconds: visitThreshold,
+            quickCopyEnabled: domRefs.quickCopyEnabledCheckbox.checked,
             elevenlabsApiKey: document.getElementById('elevenlabs-api-key').value.trim()
         };
         await storage.saveSettings(settingsToSave);

@@ -1,6 +1,9 @@
 // ext/background.js - Main service worker entry point (Global Side Panel Mode)
 // FINAL REVISION: The resetActiveMediaPlayback function now sends an explicit 'stop'
 // command to the offscreen document to ensure audio is halted immediately.
+// REVISED: The onStartup handler now ensures that clearing the instance cache is
+// a blocking operation within the initialization promise, fixing a race condition
+// where caches could persist across restarts.
 
 import {
     logger,
@@ -472,7 +475,10 @@ chrome.runtime.onStartup.addListener(async () => {
         logger.log('Background:onStartup', 'Browser startup detected. Navigation processing is paused.');
         await initializeStorageAndSettings();
 
+        // --- THE FIX: Make the cache clearing a blocking operation within the promise chain ---
+        await initializationPromise;
         await indexedDbStorage.clearInstanceCacheEntries();
+
         await migratePacketImagesIfNecessary();
         await migrateHtmlContentToIndexedDb();
         await migrateSummaryPagesToCacheable();
