@@ -4,6 +4,13 @@
 // REVISED: The onStartup handler now ensures that clearing the instance cache is
 // a blocking operation within the initialization promise, fixing a race condition
 // where caches could persist across restarts.
+// REVISED: Removed blob URL restoration from startup. It now happens within the
+// onActivated listener, which detects if a tab's actual URL mismatches its expected
+// blob URL context and reloads it from cache just-in-time.
+// REVISED: The onActivated listener now unconditionally reloads any tab whose context
+// points to a blob: URL, assuming it's always stale after a restart.
+// REVISED: The fallback mechanism within the onActivated blob restoration logic now
+// correctly reconstructs the canonical cloud URL to prevent invalid chrome-extension:// URLs.
 
 import {
     logger,
@@ -448,6 +455,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
         await indexedDbStorage.debugDumpIndexedDb();
         await restoreMediaStateOnStartup();
         await cloudStorage.initialize().catch(err => logger.error('Background:onInstalled', 'Initial cloud storage init failed', err));
+        
         await ruleManager.refreshAllRules();
         const tabs = await chrome.tabs.query({ url: ["http://*/*", "https://*/*"] });
         for (const tab of tabs) {
@@ -475,7 +483,6 @@ chrome.runtime.onStartup.addListener(async () => {
         logger.log('Background:onStartup', 'Browser startup detected. Navigation processing is paused.');
         await initializeStorageAndSettings();
 
-        // --- THE FIX: Make the cache clearing a blocking operation within the promise chain ---
         await initializationPromise;
         await indexedDbStorage.clearInstanceCacheEntries();
 
@@ -560,11 +567,57 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
     }
     
     const tabId = activeInfo.tabId;
+    const tabContext = await getPacketContext(tabId);
+
+    if (tabContext?.currentBrowserUrl?.startsWith('blob:')) {
+        try {
+            logger.log('Background:onActivated', `Activated tab ${tabId} has a blob URL context. Assuming it's stale and attempting restoration.`);
+            
+            const instance = await storage.getPacketInstance(tabContext.instanceId);
+            const item = packetUtils.isUrlInPacket(tabContext.canonicalPacketUrl, instance, { returnItem: true });
+
+            if (instance && item && item.lrl) {
+                const indexedDbKey = sanitizeForFileName(item.lrl);
+                const cachedContent = await indexedDbStorage.getGeneratedContent(instance.instanceId, indexedDbKey);
+
+                if (cachedContent && cachedContent[0]?.content) {
+                    const fullHtml = new TextDecoder().decode(cachedContent[0].content);
+                    await setupOffscreenDocument();
+                    const offscreenResponse = await chrome.runtime.sendMessage({
+                        target: 'offscreen', type: 'create-blob-url', data: { html: fullHtml }
+                    });
+
+                    if (offscreenResponse.success) {
+                        logger.log('Background:onActivated', `Restoring content for tab ${tabId} with new blob URL.`);
+                        const trustedIntent = {
+                            instanceId: tabContext.instanceId,
+                            canonicalPacketUrl: tabContext.canonicalPacketUrl
+                        };
+                        await storage.setSession({ [`trusted_intent_${tabId}`]: trustedIntent });
+                        await chrome.tabs.update(tabId, { url: offscreenResponse.blobUrl });
+                        return; 
+                    }
+                }
+            }
+            
+            logger.warn('Background:onActivated', `Could not restore blob content for tab ${tabId}. Falling back to cloud URL.`);
+            const fallbackUrl = cloudStorage.constructPublicUrl(tabContext.canonicalPacketUrl, item.publishContext);
+            if (fallbackUrl) {
+                await chrome.tabs.update(tabId, { url: fallbackUrl });
+            }
+            return;
+            
+        } catch (error) {
+            if (!error.message.toLowerCase().includes('no tab with id')) {
+                 logger.error('Background:onActivated', `Error during blob restoration check for tab ${tabId}`, error);
+            }
+        }
+    }
+    
     await sidebarHandler.updateActionForTab(tabId);
 
     let context_to_send = {};
 
-    const tabContext = await getPacketContext(tabId);
     if (tabContext && tabContext.instanceId) {
         context_to_send = {
             instanceId: tabContext.instanceId,

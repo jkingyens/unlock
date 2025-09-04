@@ -2,6 +2,9 @@
 // Manages redirect rules for the declarativeNetRequest API to handle private S3 content.
 // REVISED: Implemented an integer-based hashing function for rule IDs to conform to the
 // declarativeNetRequest API, which requires integer IDs >= 1.
+// REVISED: Removed the logic that created redirect rules to preview.html for cached items.
+// This prevents an unwanted fallback and ensures that cached content is always served via
+// blob: URLs by the onBeforeNavigate handler.
 
 import { logger, storage, indexedDbStorage, sanitizeForFileName } from '../utils.js';
 import cloudStorage from '../cloud-storage.js';
@@ -92,7 +95,6 @@ export async function addOrUpdatePacketRules(instance) {
             continue;
         }
 
-        let redirectUrl;
         let isCached = false;
 
         if (item.cacheable === true && item.lrl) {
@@ -104,20 +106,16 @@ export async function addOrUpdatePacketRules(instance) {
         }
 
         if (isCached) {
-            // This path is no longer used for direct navigation, but the rule prevents unnecessary cloud requests.
-            const viewerUrl = new URL(chrome.runtime.getURL('preview.html'));
-            viewerUrl.searchParams.set('instanceId', instance.instanceId);
-            viewerUrl.searchParams.set('lrl', item.lrl);
-            viewerUrl.searchParams.set('v', Date.now()); // Cache busting
-            redirectUrl = viewerUrl.href;
+            logger.log('RuleManager:addOrUpdate', `Skipping rule creation for cached item: ${item.lrl}`);
+            continue;
+        }
+        
+        let redirectUrl;
+        if (item.interactionBasedCompletion === true) {
+            const extraParams = { extensionId: chrome.runtime.id };
+            redirectUrl = await cloudStorage.generatePresignedGetUrl(s3Key, 3600, item.publishContext, extraParams);
         } else {
-            // Fallback to pre-signed URL for non-cacheable items or non-cached cacheable items
-            if (item.interactionBasedCompletion === true) {
-                const extraParams = { extensionId: chrome.runtime.id };
-                redirectUrl = await cloudStorage.generatePresignedGetUrl(s3Key, 3600, item.publishContext, extraParams);
-            } else {
-                redirectUrl = await cloudStorage.generatePresignedGetUrl(s3Key, 3600, item.publishContext);
-            }
+            redirectUrl = await cloudStorage.generatePresignedGetUrl(s3Key, 3600, item.publishContext);
         }
 
         if (!redirectUrl) {
