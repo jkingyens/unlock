@@ -279,7 +279,7 @@ body.dark-mode .creation-stage-text {
 #detail-cards-container .card.active {
   background-color: var(--bg-accent);
   outline: 2px solid var(--card-border-active);
-  outline-offset: -2px;
+  outline-offset: -3px;
 }
 #detail-cards-container .card.media {
   padding: 0;

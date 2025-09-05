@@ -107,9 +107,9 @@ export async function displayRootNavigation() {
     const { inboxList, inProgressList, completedList } = domRefs;
     if (!inboxList || !inProgressList || !completedList) return;
     
+    inboxList.innerHTML = '';
     inProgressList.innerHTML = '';
     completedList.innerHTML = '';
-    inboxList.innerHTML = '';
 
 
     try {
@@ -246,29 +246,25 @@ function createInstanceRow(instance) {
 
 export function updateInstanceRowUI(instance) {
     const instanceId = instance.instanceId;
-    console.log(`[rv_debug] updateInstanceRowUI START for instanceId: ${instanceId}`);
-    
     inProgressInstanceStencils.delete(instanceId);
-    console.log(`[rv_debug] updateInstanceRowUI: Deleted stencil from map. Current stencil count: ${inProgressInstanceStencils.size}`);
 
     const listElement = domRefs.inProgressList;
     if (!listElement) {
-        console.warn(`[rv_debug] updateInstanceRowUI: inProgressList DOM element not found. Falling back to full refresh.`);
-        displayRootNavigation();
         return;
     }
 
-    const stencilRow = listElement.querySelector(`tr.stencil-packet[data-instance-id="${instanceId}"]`);
+    const existingRow = listElement.querySelector(`tr[data-instance-id="${instanceId}"]`);
     const newInstanceRow = createInstanceRow(instance);
 
-    if (stencilRow) {
-        console.log(`[rv_debug] updateInstanceRowUI: Found stencil row in DOM. Replacing it now.`);
-        stencilRow.replaceWith(newInstanceRow);
+    if (existingRow) {
+        existingRow.replaceWith(newInstanceRow);
     } else {
-        console.warn(`[rv_debug] updateInstanceRowUI: Stencil row for ${instanceId} NOT found in DOM. A full refresh might have already removed it. Appending new row as a fallback.`);
+        const emptyStateRow = listElement.querySelector('tr > td.empty-state');
+        if (emptyStateRow) {
+            emptyStateRow.parentElement.remove();
+        }
         listElement.appendChild(newInstanceRow);
     }
-    console.log(`[rv_debug] updateInstanceRowUI END for instanceId: ${instanceId}`);
 }
 
 export function removeInstanceRow(instanceId) {

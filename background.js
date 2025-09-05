@@ -11,6 +11,10 @@
 // points to a blob: URL, assuming it's always stale after a restart.
 // REVISED: The fallback mechanism within the onActivated blob restoration logic now
 // correctly reconstructs the canonical cloud URL to prevent invalid chrome-extension:// URLs.
+// REVISED: The notifyUIsOfStateChange function now explicitly sends a hide message
+// to the overlay when the sidebar is opened, ensuring it disappears immediately.
+// REVISED: Moved the proactive blob restoration logic to the onUpdated listener to fix
+// tabs as they finish loading on startup, before they are activated.
 
 import {
     logger,
@@ -371,34 +375,37 @@ export async function notifyUIsOfStateChange(options) {
     };
     sidebarHandler.notifySidebar('playback_state_updated', fullStateForSidebar);
 
-    if (!isSidebarOpen) {
-        try {
-            const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-            if (!activeTab || !activeTab.id) return;
+    try {
+        const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (!activeTab || !activeTab.id) return;
 
-            const overlayEnabled = await shouldShowOverlay();
-            let isPathBlocked = false;
-            if (activeTab.url) {
-                try {
-                    const url = new URL(activeTab.url);
-                    if (url.pathname === '/item') isPathBlocked = true;
-                } catch (e) {}
-            }
+        const overlayEnabled = await shouldShowOverlay();
+        let isPathBlocked = false;
+        if (activeTab.url) {
+            try {
+                const url = new URL(activeTab.url);
+                if (url.pathname === '/item') isPathBlocked = true;
+            } catch (e) {}
+        }
 
-            const lightweightStateForOverlay = {
-                isVisible: !!activeMediaPlayback.url && overlayEnabled && !isPathBlocked,
-                isPlaying: activeMediaPlayback.isPlaying,
-                title: activeMediaPlayback.title,
-                lastTrippedMoment: effectiveOptions.animateMomentMention ? activeMediaPlayback.lastTrippedMoment : null,
-                showVisitedAnimation: !!effectiveOptions.showVisitedAnimation
-            };
+        const lightweightStateForOverlay = {
+            isVisible: !isSidebarOpen && !!activeMediaPlayback.url && overlayEnabled && !isPathBlocked,
+            isPlaying: activeMediaPlayback.isPlaying,
+            title: activeMediaPlayback.title,
+            lastTrippedMoment: effectiveOptions.animateMomentMention ? activeMediaPlayback.lastTrippedMoment : null,
+            showVisitedAnimation: !!effectiveOptions.showVisitedAnimation,
+            animate: !!effectiveOptions.animate,
+        };
 
-            await injectOverlayScripts(activeTab.id);
-            await chrome.tabs.sendMessage(activeTab.id, { action: 'update_overlay_state', data: lightweightStateForOverlay });
-        } catch (e) {
-            if (!e.message.toLowerCase().includes('no tab with id')) {
-                logger.error('Background:notifyUIs', 'Error notifying overlay', e);
-            }
+        await injectOverlayScripts(activeTab.id);
+        await chrome.tabs.sendMessage(activeTab.id, {
+            action: 'update_overlay_state',
+            data: lightweightStateForOverlay
+        }).catch(() => {});
+
+    } catch (e) {
+        if (!e.message.toLowerCase().includes('no tab with id')) {
+            logger.error('Background:notifyUIs', 'Error notifying overlay', e);
         }
     }
 }
@@ -559,20 +566,17 @@ async function reorderGroupFromChangeEvent(groupId) {
     } catch (error) {}
 }
 
-chrome.tabs.onActivated.addListener(async (activeInfo) => {
-    const closingState = await storage.getSession('isClosingGroup');
-    if (closingState && closingState.isClosingGroup) {
-        logger.log('Background:onActivated', 'Ignoring tab activation event due to tab group closure in progress.');
+chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+    if (changeInfo.status !== 'complete' || !tab.url) {
         return;
     }
-    
-    const tabId = activeInfo.tabId;
+
     const tabContext = await getPacketContext(tabId);
 
-    if (tabContext?.currentBrowserUrl?.startsWith('blob:')) {
+    if (tabContext?.currentBrowserUrl?.startsWith('blob:') && tab.url !== tabContext.currentBrowserUrl) {
+        logger.log('Background:onUpdated', `Stale blob URL detected for tab ${tabId}. Attempting proactive restoration.`);
+        
         try {
-            logger.log('Background:onActivated', `Activated tab ${tabId} has a blob URL context. Assuming it's stale and attempting restoration.`);
-            
             const instance = await storage.getPacketInstance(tabContext.instanceId);
             const item = packetUtils.isUrlInPacket(tabContext.canonicalPacketUrl, instance, { returnItem: true });
 
@@ -588,35 +592,44 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
                     });
 
                     if (offscreenResponse.success) {
-                        logger.log('Background:onActivated', `Restoring content for tab ${tabId} with new blob URL.`);
+                        logger.log('Background:onUpdated', `Restoring content for tab ${tabId} with new blob URL.`);
                         const trustedIntent = {
                             instanceId: tabContext.instanceId,
                             canonicalPacketUrl: tabContext.canonicalPacketUrl
                         };
                         await storage.setSession({ [`trusted_intent_${tabId}`]: trustedIntent });
                         await chrome.tabs.update(tabId, { url: offscreenResponse.blobUrl });
-                        return; 
+                        return;
                     }
                 }
             }
             
-            logger.warn('Background:onActivated', `Could not restore blob content for tab ${tabId}. Falling back to cloud URL.`);
+            logger.warn('Background:onUpdated', `Could not restore blob content for tab ${tabId}. Falling back to cloud URL.`);
             const fallbackUrl = cloudStorage.constructPublicUrl(tabContext.canonicalPacketUrl, item.publishContext);
             if (fallbackUrl) {
                 await chrome.tabs.update(tabId, { url: fallbackUrl });
             }
-            return;
-            
         } catch (error) {
             if (!error.message.toLowerCase().includes('no tab with id')) {
-                 logger.error('Background:onActivated', `Error during blob restoration check for tab ${tabId}`, error);
+                 logger.error('Background:onUpdated', `Error during proactive blob restoration for tab ${tabId}`, error);
             }
         }
     }
+});
+
+chrome.tabs.onActivated.addListener(async (activeInfo) => {
+    const closingState = await storage.getSession('isClosingGroup');
+    if (closingState && closingState.isClosingGroup) {
+        logger.log('Background:onActivated', 'Ignoring tab activation event due to tab group closure in progress.');
+        return;
+    }
+    
+    const tabId = activeInfo.tabId;
     
     await sidebarHandler.updateActionForTab(tabId);
 
     let context_to_send = {};
+    const tabContext = await getPacketContext(tabId);
 
     if (tabContext && tabContext.instanceId) {
         context_to_send = {
