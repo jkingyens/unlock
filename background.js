@@ -365,7 +365,12 @@ export async function saveCurrentTime(instanceId, url, providedCurrentTime, isSt
 
 export async function notifyUIsOfStateChange(options) {
     const effectiveOptions = options || {};
-    const { isSidebarOpen } = await storage.getSession({ isSidebarOpen: false });
+    
+    // Use the explicitly passed sidebar state if available, otherwise fetch from storage.
+    // This makes the function's behavior deterministic when called from connection events.
+    const isSidebarOpen = typeof effectiveOptions.isSidebarOpen === 'boolean'
+        ? effectiveOptions.isSidebarOpen
+        : (await storage.getSession({ isSidebarOpen: false })).isSidebarOpen;
 
     const fullStateForSidebar = {
         ...activeMediaPlayback,
@@ -724,16 +729,19 @@ function attachNavigationListeners() {
     chrome.webNavigation.onHistoryStateUpdated.addListener(onHistoryStateUpdatedWrapper);
 }
 
-chrome.runtime.onConnect.addListener(async (port) => {
-  if (port.name === 'sidebar') {
-    await storage.setSession({ isSidebarOpen: true });
-    await notifyUIsOfStateChange();
-    port.onDisconnect.addListener(async () => {
-      await storage.setSession({ isSidebarOpen: false });
-      await notifyUIsOfStateChange({ animate: true });
-    });
-  }
-});
+// --- START OF FIX: This listener is removed ---
+// The new logic in sidebar.js makes this redundant and a potential source of race conditions.
+// chrome.runtime.onConnect.addListener(async (port) => {
+//   if (port.name === 'sidebar') {
+//     await storage.setSession({ isSidebarOpen: true });
+//     await notifyUIsOfStateChange({ isSidebarOpen: true });
+//     port.onDisconnect.addListener(async () => {
+//       await storage.setSession({ isSidebarOpen: false });
+//       await notifyUIsOfStateChange({ animate: true, isSidebarOpen: false });
+//     });
+//   }
+// });
+// --- END OF FIX ---
 
 async function garbageCollectTabContexts() {
     logger.log('Background:GC', 'Starting garbage collection for tab contexts...');

@@ -426,6 +426,18 @@ export async function ensureHtmlIsCached(instanceId, url, lrl) {
 }
 
 const actionHandlers = {
+    // --- START OF FIX ---
+    'sidebar_opened': async (data, sender, sendResponse) => {
+        await storage.setSession({ isSidebarOpen: true });
+        await notifyUIsOfStateChange({ isSidebarOpen: true });
+        sendResponse({ success: true });
+    },
+    'sidebar_closed': async (data, sender, sendResponse) => {
+        await storage.setSession({ isSidebarOpen: false });
+        await notifyUIsOfStateChange({ isSidebarOpen: false, animate: true });
+        sendResponse({ success: true });
+    },
+    // --- END OF FIX ---
     'is_current_tab_packetizable': async (data, sender, sendResponse) => {
         try {
             const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });

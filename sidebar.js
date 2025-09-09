@@ -97,6 +97,17 @@ function setupGlobalListeners() {
         }
     });
     domRefs.settingsBtn?.addEventListener('click', () => navigateTo('settings'));
+    
+    // --- START OF FIX ---
+    // Use the Page Visibility API to reliably inform the background script of the sidebar's state.
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') {
+            sendMessageToBackground({ action: 'sidebar_opened' });
+        } else {
+            sendMessageToBackground({ action: 'sidebar_closed' });
+        }
+    });
+    // --- END OF FIX ---
 }
 
 

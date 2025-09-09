@@ -12,12 +12,72 @@ if (!window.unlockOverlayInitialized) {
     let isVisible = false;
     let momentTimeout = null;
 
+    // --- START: New SVG Filter Injection ---
+    /**
+     * Injects the SVG filter definitions required for the liquid glass effect.
+     * This is designed to be self-contained to avoid conflicts with the host page.
+     */
+    function injectSvgFilters() {
+        if (document.getElementById('unlock-svg-filter-container')) return;
+
+        // 1. Define the SVG for the displacement map. This creates the gradient
+        // that controls how the content behind the overlay is distorted.
+        const displacementMapSvg = `
+            <svg xmlns="http://www.w3.org/2000/svg" width="450" height="54">
+                <defs>
+                    <radialGradient id="unlock-grad" cx="50%" cy="50%" r="50%">
+                        <stop offset="70%" stop-color="gray" />
+                        <stop offset="100%" stop-color="white" />
+                    </radialGradient>
+                </defs>
+                <rect width="100%" height="100%" rx="27" fill="url(#unlock-grad)" />
+            </svg>
+        `;
+
+        // 2. Encode the displacement map SVG into a Base64 data URI.
+        const encodedDisplacementMap = `data:image/svg+xml;base64,${btoa(displacementMapSvg)}`;
+
+        // 3. Create a container for the main filter definition.
+        const svgFilterContainer = document.createElement('div');
+        svgFilterContainer.id = 'unlock-svg-filter-container';
+        svgFilterContainer.style.display = 'none';
+
+        // 4. Define the main filter, using the data URI as the source.
+        // This filter grabs the background, applies the distortion map, and adds a subtle blur.
+        svgFilterContainer.innerHTML = `
+            <svg>
+                <defs>
+                    <filter id="unlock-liquid-glass-filter">
+                        <feImage href="${encodedDisplacementMap}" result="displacementMap" />
+                        <feGaussianBlur in="displacementMap" stdDeviation="2" result="blurredMap" />
+                        <feDisplacementMap
+                            in="SourceGraphic"
+                            in2="blurredMap"
+                            scale="15"
+                            xChannelSelector="R"
+                            yChannelSelector="G"
+                        />
+                        <feGaussianBlur in="SourceGraphic" stdDeviation="1" />
+                    </filter>
+                </defs>
+            </svg>
+        `;
+        
+        // 5. Append the filter definition to the body so CSS can reference it.
+        document.body.appendChild(svgFilterContainer);
+    }
+    // --- END: New SVG Filter Injection ---
+
+
     // --- Main Initialization ---
     function createOverlay() {
         // Prevent creating the overlay multiple times (double check)
         if (document.getElementById('unlock-media-overlay')) {
             return;
         }
+
+        // Inject the SVG filters required for the liquid glass effect
+        injectSvgFilters();
 
         // Add an inline style to prevent the initial flicker
         document.body.insertAdjacentHTML('beforeend', `
