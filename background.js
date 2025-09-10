@@ -371,8 +371,6 @@ export async function saveCurrentTime(instanceId, url, providedCurrentTime, isSt
 export async function notifyUIsOfStateChange(options) {
     const effectiveOptions = options || {};
     
-    // Use the explicitly passed sidebar state if available, otherwise fetch from storage.
-    // This makes the function's behavior deterministic when called from connection events.
     const isSidebarOpen = typeof effectiveOptions.isSidebarOpen === 'boolean'
         ? effectiveOptions.isSidebarOpen
         : (await storage.getSession({ isSidebarOpen: false })).isSidebarOpen;
@@ -386,35 +384,34 @@ export async function notifyUIsOfStateChange(options) {
     sidebarHandler.notifySidebar('playback_state_updated', fullStateForSidebar);
 
     try {
-        const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-        if (!activeTab || !activeTab.id) return;
+        const tabs = await chrome.tabs.query({ url: ["http://*/*", "https://*/*"] });
+        for (const tab of tabs) {
+            if (!tab.id) continue;
 
-        const overlayEnabled = await shouldShowOverlay();
-        let isPathBlocked = false;
-        if (activeTab.url) {
-            try {
-                const url = new URL(activeTab.url);
-                if (url.pathname === '/item') isPathBlocked = true;
-            } catch (e) {}
+            const overlayEnabled = await shouldShowOverlay();
+            let isPathBlocked = false;
+            if (tab.url) {
+                try {
+                    const url = new URL(tab.url);
+                    if (url.pathname === '/item') isPathBlocked = true;
+                } catch (e) {}
+            }
+
+            const lightweightStateForOverlay = {
+                isVisible: !isSidebarOpen && !!activeMediaPlayback.url && overlayEnabled && !isPathBlocked,
+                isPlaying: activeMediaPlayback.isPlaying,
+                title: activeMediaPlayback.title,
+                lastTrippedMoment: activeMediaPlayback.lastTrippedMoment,
+                showVisitedAnimation: !!effectiveOptions.showVisitedAnimation,
+                animate: !!effectiveOptions.animate,
+            };
+            
+            await injectOverlayScripts(tab.id);
+            await chrome.tabs.sendMessage(tab.id, {
+                action: 'update_overlay_state',
+                data: lightweightStateForOverlay
+            }).catch(() => {});
         }
-
-        const lightweightStateForOverlay = {
-            isVisible: !isSidebarOpen && !!activeMediaPlayback.url && overlayEnabled && !isPathBlocked,
-            isPlaying: activeMediaPlayback.isPlaying,
-            title: activeMediaPlayback.title,
-            lastTrippedMoment: effectiveOptions.animateMomentMention ? activeMediaPlayback.lastTrippedMoment : null,
-            showVisitedAnimation: !!effectiveOptions.showVisitedAnimation,
-            animate: !!effectiveOptions.animate,
-        };
-        
-        // Inject scripts into the active tab (if it's an external page)
-        // and then send the state update.
-        await injectOverlayScripts(activeTab.id);
-        await chrome.tabs.sendMessage(activeTab.id, {
-            action: 'update_overlay_state',
-            data: lightweightStateForOverlay
-        }).catch(() => {});
-
     } catch (e) {
         if (!e.message.toLowerCase().includes('no tab with id')) {
             logger.error('Background:notifyUIs', 'Error notifying overlay', e);
