@@ -2,6 +2,8 @@
 // REVISED: The packet_instance_deleted message handler is now more robust,
 // ensuring it correctly clears internal state and navigates to the root view
 // if the currently active packet is the one being deleted.
+// REVISED: The sidebar will now remain on the packet detail view if that packet's
+// media is playing, even when the user navigates to a tab outside the packet.
 
 import { logger, storage, packetUtils, applyThemeMode, CONFIG } from './utils.js';
 import { domRefs, cacheDomReferences } from './sidebar-modules/dom-references.js';
@@ -19,8 +21,8 @@ let currentPacketUrl = null; // The canonical packet URL from the packet definit
 let isNavigating = false;
 let nextNavigationRequest = null;
 const PENDING_VIEW_KEY = 'pendingSidebarView';
-let isOpeningPacketItem = false; 
-
+let isOpeningPacketItem = false;
+let activeMediaInstanceId = null; // NEW: Tracks the ID of the packet with active media
 
 function resetSidebarState() {
     currentView = 'root';
@@ -30,6 +32,7 @@ function resetSidebarState() {
     isNavigating = false;
     nextNavigationRequest = null;
     isOpeningPacketItem = false;
+    // Note: activeMediaInstanceId is NOT reset here intentionally
     logger.log('Sidebar', 'Internal state has been reset.');
 }
 
@@ -37,7 +40,7 @@ function resetSidebarState() {
 
 async function initialize() {
     resetSidebarState();
-    
+
     await applyThemeMode();
     cacheDomReferences();
 
@@ -94,6 +97,17 @@ function setupGlobalListeners() {
         }
     });
     domRefs.settingsBtn?.addEventListener('click', () => navigateTo('settings'));
+
+    // --- START OF FIX ---
+    // Use the Page Visibility API to reliably inform the background script of the sidebar's state.
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') {
+            sendMessageToBackground({ action: 'sidebar_opened' });
+        } else {
+            sendMessageToBackground({ action: 'sidebar_closed' });
+        }
+    });
+    // --- END OF FIX ---
 }
 
 
@@ -113,11 +127,11 @@ export async function navigateTo(viewName, instanceId = null, data = null) {
     if (currentView === 'settings' && viewName !== 'settings') {
         settingsView.triggerPendingSave();
     }
-    
+
     if (currentView !== 'packet-detail' || viewName !== 'packet-detail') {
         [domRefs.rootView, domRefs.createView, domRefs.packetDetailView, domRefs.settingsView].forEach(v => v?.classList.add('hidden'));
     }
-    
+
     domRefs.backBtn?.classList.toggle('hidden', viewName === 'root' || viewName === 'create');
     domRefs.settingsBtn?.classList.toggle('hidden', viewName !== 'root');
 
@@ -129,7 +143,7 @@ export async function navigateTo(viewName, instanceId = null, data = null) {
                 const instanceData = await storage.getPacketInstance(instanceId);
 
                 if (!instanceData) throw new Error(`Packet instance ${instanceId} not found.`);
-                
+
                 const browserState = await storage.getPacketBrowserState(instanceId);
 
                 currentView = 'packet-detail';
@@ -137,7 +151,7 @@ export async function navigateTo(viewName, instanceId = null, data = null) {
                 currentInstanceData = instanceData;
                 newSidebarTitle = instanceData.title || 'Packet Details';
                 domRefs.packetDetailView.classList.remove('hidden');
-                
+
                 await detailView.displayPacketContent(instanceData, browserState, currentPacketUrl);
                 break;
             case 'create':
@@ -183,11 +197,17 @@ async function updateSidebarContext(contextData) {
     const newPacketUrl = contextData?.packetUrl ?? null;
     let newInstanceData = contextData?.instance ?? null;
 
+    // MODIFIED: Add check for active media playback
+    if (newInstanceId === null && currentView === 'packet-detail' && currentInstanceId === activeMediaInstanceId) {
+        logger.log('Sidebar:updateSidebarContext', 'Ignoring context change to null because active media packet is being viewed.');
+        return;
+    }
+
     if (isOpeningPacketItem && newInstanceId === null) {
         logger.log('Sidebar:updateSidebarContext', 'Ignoring transient null context due to navigation lock.');
         return;
     }
-    
+
     if (newInstanceId !== currentInstanceId) {
         currentInstanceId = newInstanceId;
         currentInstanceData = newInstanceData;
@@ -201,12 +221,12 @@ async function updateSidebarContext(contextData) {
         if (!newInstanceData) {
             logger.warn('Sidebar:updateSidebarContext', `Received null instance data for current instance ID ${newInstanceId}. Navigating to root.`);
             navigateTo('root');
-            return; 
+            return;
         }
 
         currentInstanceData = newInstanceData;
         currentPacketUrl = newPacketUrl;
-        
+
         const browserState = await storage.getPacketBrowserState(currentInstanceId);
         await detailView.displayPacketContent(currentInstanceData, browserState, currentPacketUrl);
     }
@@ -263,32 +283,47 @@ async function handleBackgroundMessage(message) {
                 navigateTo('create', null, data.draft);
             }
             break;
-
         case 'packet_creation_failed':
             dialogHandler.hideCreateSourceDialog();
             dialogHandler.hideImportDialog();
-            rootView.removeInProgressStencil(data.imageId);
+            rootView.removeInstanceRow(data.instanceId);
+            rootView.removeImageRow(data.imageId);
             showRootViewStatus(`Creation failed: ${data?.error || 'Unknown'}`, 'error');
             break;
+        case 'packet_instantiation_progress':
+            if (currentView === 'root') {
+                rootView.renderOrUpdateInstanceStencil(data);
+            }
+            break;
+        case 'packet_creation_progress':
+            if (currentView === 'root') {
+                 rootView.renderOrUpdateImageStencil(data);
+            }
+            break;
         case 'playback_state_updated':
-            // --- START OF FIX: Ensure the latest instance data is used for rendering ---
+            // MODIFIED: Track active media instance ID
+            if (data.state === 'playing') {
+                activeMediaInstanceId = data.instanceId;
+            } else if (activeMediaInstanceId === data.instanceId) {
+                activeMediaInstanceId = null;
+            }
+
             if (currentView === 'packet-detail' && currentInstanceId === data.instanceId) {
-                // Update the sidebar's master copy of the instance state
                 currentInstanceData = data.instance;
-
-                // Pass the fresh instance data directly to the UI update functions
-                detailView.updatePlaybackUI(data, currentInstanceData); 
+                detailView.updatePlaybackUI(data, currentInstanceData);
                 detailView.updateCardVisibility(currentInstanceData);
-
                 if (data.lastTrippedMoment?.url) {
                     const cardToAnimate = domRefs.packetDetailView.querySelector(`.card[data-url="${data.lastTrippedMoment.url}"]`);
-                    if (cardToAnimate) {
+                    if (cardToAnimate && !cardToAnimate.classList.contains('link-mentioned')) {
                         cardToAnimate.classList.add('link-mentioned');
-                        setTimeout(() => cardToAnimate.classList.remove('link-mentioned'), 1500);
+                        setTimeout(() => {
+                            if (cardToAnimate) {
+                                cardToAnimate.classList.remove('link-mentioned');
+                            }
+                        }, 3000);
                     }
                 }
             }
-            // --- END OF FIX ---
             break;
         case 'navigate_to_view':
             if (data?.viewName) {
@@ -298,9 +333,6 @@ async function handleBackgroundMessage(message) {
             break;
         case 'update_sidebar_context':
             await updateSidebarContext(data);
-            break;
-        case 'packet_creation_progress':
-            rootView.addOrUpdateInProgressStencil(data);
             break;
         case 'packet_image_created':
             dialogHandler.hideImportDialog();
@@ -317,7 +349,9 @@ async function handleBackgroundMessage(message) {
             break;
         case 'packet_instance_created':
             showRootViewStatus(`Started packet '${data.instance.title}'.`, 'success');
-            if (currentView !== 'create') {
+            if (currentView === 'root') {
+                rootView.updateInstanceRowUI(data.instance);
+            } else {
                 navigateTo('packet-detail', data.instance.instanceId);
             }
             break;
@@ -332,11 +366,9 @@ async function handleBackgroundMessage(message) {
             break;
         case 'packet_instance_deleted':
             const wasViewingDeletedPacket = data?.packetId === currentInstanceId;
-
             if (currentView === 'root') {
                 rootView.removeInstanceRow(data.packetId);
             }
-            
             if (wasViewingDeletedPacket) {
                 resetSidebarState();
                 detailView.stopAudioIfPacketDeleted(data.packetId);
@@ -355,6 +387,16 @@ async function handleBackgroundMessage(message) {
             break;
         case 'theme_preference_updated':
             await applyThemeMode();
+            break;
+        case 'media_cache_populated':
+            if (currentView === 'packet-detail' && currentInstanceId === data.instanceId) {
+                detailView.redrawSingleWaveform(data.lrl);
+            }
+            break;
+        case 'html_cache_populated':
+            if (currentView === 'packet-detail' && currentInstanceId === data.instanceId) {
+                detailView.updateSingleCardToCached(data.lrl);
+            }
             break;
     }
 }
@@ -400,7 +442,7 @@ function showSettingsStatus(message, type, autoClear) {
 async function showConfetti(title) {
     const settings = await storage.getSettings();
     if (settings.confettiEnabled === false) {
-        return; 
+        return;
     }
 
     const colorName = packetUtils.getColorForTopic(title);

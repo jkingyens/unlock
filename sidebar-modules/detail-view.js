@@ -217,6 +217,73 @@ async function redrawAllVisibleWaveforms(playbackState = {}, instance) {
     }
 }
 
+export async function redrawSingleWaveform(lrl) {
+    const card = domRefs.packetDetailView.querySelector(`.card.media[data-lrl="${lrl}"]`);
+    if (!card) return;
+
+    const canvas = card.querySelector('.waveform-canvas');
+    const instanceId = card.closest('#detail-cards-container').dataset.instanceId;
+
+    if (!canvas || !instanceId) return;
+
+    const waveformContainer = card.querySelector('.media-waveform-container');
+    if (waveformContainer) {
+        waveformContainer.classList.remove('loading', 'needs-download');
+        const downloadIcon = waveformContainer.querySelector('.download-icon');
+        if (downloadIcon) downloadIcon.remove();
+    }
+
+    try {
+        const indexedDbKey = sanitizeForFileName(lrl);
+        const audioContent = await indexedDbStorage.getGeneratedContent(instanceId, indexedDbKey);
+        
+        if (audioContent && audioContent[0]?.content) {
+            const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            const audioData = audioContent[0].content;
+            const decodedData = await audioContext.decodeAudioData(audioData.slice(0));
+
+            const barHeights = calculateWaveformBars(decodedData.getChannelData(0), canvas.clientWidth);
+            audioDataCache.set(`${instanceId}::${card.dataset.url}`, {
+                barHeights: barHeights,
+                duration: decodedData.duration
+            });
+
+            const currentState = await sendMessageToBackground({ action: 'get_playback_state' });
+            const instance = await storage.getPacketInstance(instanceId);
+            await redrawAllVisibleWaveforms(currentState, instance);
+        }
+    } catch (err) {
+        logger.error("DetailView:redrawSingleWaveform", "Failed to draw newly cached waveform", err);
+    }
+}
+
+export function updateSingleCardToCached(lrl) {
+    const card = domRefs.packetDetailView.querySelector(`.card[data-lrl="${lrl}"]`);
+    if (card) {
+        const cardIconContainer = card.querySelector('.card-icon-container');
+        if (cardIconContainer) {
+            cardIconContainer.classList.remove('loading', 'needs-download');
+            const downloadIcon = cardIconContainer.querySelector('.download-icon');
+            if (downloadIcon) downloadIcon.remove();
+            card.classList.add('clickable');
+            
+            const instanceId = card.closest('#detail-cards-container').dataset.instanceId;
+            const url = card.dataset.url;
+            card.addEventListener('click', (e) => {
+                if (card.classList.contains('opening')) {
+                    return;
+                }
+                card.classList.add('opening');
+                setTimeout(() => card.classList.remove('opening'), 2000);
+
+                if (typeof openUrl === 'function') {
+                    openUrl(url, instanceId);
+                }
+            });
+        }
+    }
+}
+
 
 // --- Main Rendering Function ---
 export async function displayPacketContent(instance, browserState, canonicalPacketUrl) {
@@ -284,23 +351,23 @@ export async function displayPacketContent(instance, browserState, canonicalPack
                 const url = mediaCard.dataset.url;
                 const lrl = mediaCard.dataset.lrl;
                 const canvas = mediaCard.querySelector('.waveform-canvas');
+                const waveformContainer = mediaCard.querySelector('.media-waveform-container');
 
-                if (lrl && canvas) {
+                if (lrl && canvas && waveformContainer) {
                     const indexedDbKey = sanitizeForFileName(lrl);
                     const audioContent = await indexedDbStorage.getGeneratedContent(instance.instanceId, indexedDbKey);
+                    
                     if (audioContent && audioContent[0]?.content) {
                         try {
                             const audioData = audioContent[0].content;
                             const audioContext = new (window.AudioContext || window.webkitAudioContext)();
                             const decodedData = await audioContext.decodeAudioData(audioData.slice(0));
                             
-                            // --- START OF FIX: Calculate and cache bar heights on first load ---
                             const barHeights = calculateWaveformBars(decodedData.getChannelData(0), canvas.clientWidth);
                             audioDataCache.set(`${instance.instanceId}::${url}`, {
                                 barHeights: barHeights,
                                 duration: decodedData.duration
                             });
-                            // --- END OF FIX ---
                             
                             redrawAllVisibleWaveforms(currentState, instance);
 
@@ -308,7 +375,8 @@ export async function displayPacketContent(instance, browserState, canonicalPack
                             logger.error("DetailView", "Failed to draw initial waveform post-render", err);
                         }
                     } else {
-                        logger.warn("DetailView", "Could not find audio content in IndexedDB for waveform", { lrl, instanceId: instance.instanceId });
+                        // Media is not cached, show placeholder.
+                        waveformContainer.classList.add('needs-download');
                     }
                 }
             }
@@ -322,6 +390,7 @@ export async function displayPacketContent(instance, browserState, canonicalPack
         processQueuedDisplayRequest();
     }
 }
+
 
 /**
  * A lightweight function to update only the visibility and visited status of cards.
@@ -427,26 +496,29 @@ async function createContentCard(contentItem, instance) {
 
     const card = document.createElement('div');
     card.className = 'card';
-    const { url, lrl, title = 'Untitled', context = '', format, origin } = contentItem;
+    const { url, lrl, title = 'Untitled', context = '', format, origin, cacheable } = contentItem;
 
     if (url) card.dataset.url = url;
     if (lrl) card.dataset.lrl = lrl;
 
-    let isClickable = (origin === 'external') || (origin === 'internal' && contentItem.published);
-
+    let isClickable = (origin === 'external') || (origin === 'internal' && (contentItem.published || cacheable));
+    
     if (format === 'html') {
         let iconHTML = origin === 'external' ? '🔗' : '📄';
         let displayUrl = '';
         if (origin === 'external') {
             try { displayUrl = new URL(url).hostname.replace(/^www\./, ''); } catch (e) { displayUrl = url || '(URL missing)'; }
         } else {
-            displayUrl = contentItem.published ? title : '(Not Published)';
+            displayUrl = isClickable ? title : '(Not Published)';
         }
+        
         card.innerHTML = `<div class="card-icon">${iconHTML}</div><div class="card-text"><div class="card-title">${title}</div><div class="card-url">${displayUrl}</div>${context ? `<div class="card-relevance">${context}</div>` : ''}</div>`;
+    
     } else if (format === 'audio') {
         card.classList.add('media');
         card.innerHTML = `
             <div class="media-waveform-container">
+                 <div class="download-icon"></div>
                  <canvas class="waveform-canvas"></canvas>
                  <div class="waveform-marker-container"></div>
             </div>`;
@@ -494,7 +566,7 @@ async function createContentCard(contentItem, instance) {
         if (format === 'audio') {
             playMediaInCard(card, contentItem, instance);
         } else {
-            card.addEventListener('click', (e) => {
+            card.addEventListener('click', async (e) => {
                 if (card.classList.contains('opening')) {
                     return;
                 }
@@ -577,6 +649,18 @@ export function stopAudioIfPacketDeleted(deletedPacketId) {
 
 async function playMediaInCard(card, contentItem, instance) {
     card.addEventListener('click', () => {
+        const waveformContainer = card.querySelector('.media-waveform-container');
+
+        if (waveformContainer && waveformContainer.classList.contains('needs-download')) {
+            waveformContainer.classList.remove('needs-download');
+            waveformContainer.classList.add('loading');
+            sendMessageToBackground({
+                action: 'ensure_media_is_cached',
+                data: { instanceId: instance.instanceId, url: contentItem.url, lrl: contentItem.lrl }
+            });
+            return; // Don't try to play yet, wait for cache to populate.
+        }
+
         const isThisCardPlaying = currentPlayingUrl === contentItem.url;
 
         if (isThisCardPlaying) {

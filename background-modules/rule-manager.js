@@ -2,8 +2,11 @@
 // Manages redirect rules for the declarativeNetRequest API to handle private S3 content.
 // REVISED: Implemented an integer-based hashing function for rule IDs to conform to the
 // declarativeNetRequest API, which requires integer IDs >= 1.
+// REVISED: Removed the logic that created redirect rules to preview.html for cached items.
+// This prevents an unwanted fallback and ensures that cached content is always served via
+// blob: URLs by the onBeforeNavigate handler.
 
-import { logger, storage } from '../utils.js';
+import { logger, storage, indexedDbStorage, sanitizeForFileName } from '../utils.js';
 import cloudStorage from '../cloud-storage.js';
 
 const RULE_ID_PREFIX = 'pkt_'; // No longer used in the ID itself, but good for context.
@@ -41,7 +44,6 @@ function getRuleId(instanceId, itemUrl) {
 
 /**
  * Gets all currently active redirect rules managed by this extension.
- * Uses session rules which are cleared on browser restart.
  * @returns {Promise<Array<chrome.declarativeNetRequest.Rule>>}
  */
 async function getSessionRules() {
@@ -55,9 +57,6 @@ async function getSessionRules() {
 
 /**
  * Creates or updates all necessary redirect rules for a given packet instance.
- * It generates new pre-signed URLs for each generated content item and sets up
- * a redirect from the canonical, non-signed URL to the new pre-signed URL.
- *
  * @param {object} instance - The PacketInstance object.
  * @returns {Promise<{success: boolean, rulesCreated: number, error?: string}>}
  */
@@ -92,17 +91,16 @@ export async function addOrUpdatePacketRules(instance) {
             continue;
         }
 
-        let presignedUrl;
-        // If the page requires an interaction event, inject the extensionId as a signed query parameter.
+        let redirectUrl;
         if (item.interactionBasedCompletion === true) {
             const extraParams = { extensionId: chrome.runtime.id };
-            presignedUrl = await cloudStorage.generatePresignedGetUrl(s3Key, 3600, item.publishContext, extraParams);
+            redirectUrl = await cloudStorage.generatePresignedGetUrl(s3Key, 3600, item.publishContext, extraParams);
         } else {
-            presignedUrl = await cloudStorage.generatePresignedGetUrl(s3Key, 3600, item.publishContext);
+            redirectUrl = await cloudStorage.generatePresignedGetUrl(s3Key, 3600, item.publishContext);
         }
 
-        if (!presignedUrl) {
-            logger.warn('RuleManager:addOrUpdate', `Failed to generate pre-signed URL for S3 key: ${s3Key}. Skipping rule creation.`);
+        if (!redirectUrl) {
+            logger.warn('RuleManager:addOrUpdate', `Failed to generate redirect URL for S3 key: ${s3Key}. Skipping rule creation.`);
             continue;
         }
 
@@ -111,7 +109,7 @@ export async function addOrUpdatePacketRules(instance) {
             priority: RULE_PRIORITY,
             action: {
                 type: 'redirect',
-                redirect: { url: presignedUrl }
+                redirect: { url: redirectUrl }
             },
             condition: {
                 urlFilter: canonicalUrl.split('?')[0],
