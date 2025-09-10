@@ -36,7 +36,6 @@ export function cacheDomReferences() {
         completedList: document.getElementById('completed-list'),
         createPacketSidebarBtn: document.getElementById('create-packet-sidebar-btn'),
         sidebarDeleteBtn: document.getElementById('sidebar-delete-btn'),
-        sidebarRestartBtn: document.getElementById('sidebar-restart-btn'),
         sidebarStatusMessage: document.getElementById('sidebar-status-message'),
         showImportDialogBtn: document.getElementById('show-import-dialog-btn'),
         genericConfirmDialog: document.getElementById('generic-confirm-dialog'),

@@ -160,6 +160,9 @@ export function enhanceHtml(bodyHtml, pageTitle) {
     if (bodyMatch && bodyMatch[1]) {
         cleanBody = bodyMatch[1].trim();
     }
+    
+    const interceptorUrl = chrome.runtime.getURL('page_interceptor.js');
+
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -170,6 +173,7 @@ export function enhanceHtml(bodyHtml, pageTitle) {
 </head>
 <body>
   <div class="page-container">${cleanBody}</div>
+  <script src="${interceptorUrl}"></script>
 </body>
 </html>`;
 }

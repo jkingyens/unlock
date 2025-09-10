@@ -21,7 +21,7 @@ let currentPacketUrl = null; // The canonical packet URL from the packet definit
 let isNavigating = false;
 let nextNavigationRequest = null;
 const PENDING_VIEW_KEY = 'pendingSidebarView';
-let isOpeningPacketItem = false; 
+let isOpeningPacketItem = false;
 let activeMediaInstanceId = null; // NEW: Tracks the ID of the packet with active media
 
 function resetSidebarState() {
@@ -40,7 +40,7 @@ function resetSidebarState() {
 
 async function initialize() {
     resetSidebarState();
-    
+
     await applyThemeMode();
     cacheDomReferences();
 
@@ -97,7 +97,7 @@ function setupGlobalListeners() {
         }
     });
     domRefs.settingsBtn?.addEventListener('click', () => navigateTo('settings'));
-    
+
     // --- START OF FIX ---
     // Use the Page Visibility API to reliably inform the background script of the sidebar's state.
     document.addEventListener('visibilitychange', () => {
@@ -127,11 +127,11 @@ export async function navigateTo(viewName, instanceId = null, data = null) {
     if (currentView === 'settings' && viewName !== 'settings') {
         settingsView.triggerPendingSave();
     }
-    
+
     if (currentView !== 'packet-detail' || viewName !== 'packet-detail') {
         [domRefs.rootView, domRefs.createView, domRefs.packetDetailView, domRefs.settingsView].forEach(v => v?.classList.add('hidden'));
     }
-    
+
     domRefs.backBtn?.classList.toggle('hidden', viewName === 'root' || viewName === 'create');
     domRefs.settingsBtn?.classList.toggle('hidden', viewName !== 'root');
 
@@ -143,7 +143,7 @@ export async function navigateTo(viewName, instanceId = null, data = null) {
                 const instanceData = await storage.getPacketInstance(instanceId);
 
                 if (!instanceData) throw new Error(`Packet instance ${instanceId} not found.`);
-                
+
                 const browserState = await storage.getPacketBrowserState(instanceId);
 
                 currentView = 'packet-detail';
@@ -151,7 +151,7 @@ export async function navigateTo(viewName, instanceId = null, data = null) {
                 currentInstanceData = instanceData;
                 newSidebarTitle = instanceData.title || 'Packet Details';
                 domRefs.packetDetailView.classList.remove('hidden');
-                
+
                 await detailView.displayPacketContent(instanceData, browserState, currentPacketUrl);
                 break;
             case 'create':
@@ -207,7 +207,7 @@ async function updateSidebarContext(contextData) {
         logger.log('Sidebar:updateSidebarContext', 'Ignoring transient null context due to navigation lock.');
         return;
     }
-    
+
     if (newInstanceId !== currentInstanceId) {
         currentInstanceId = newInstanceId;
         currentInstanceData = newInstanceData;
@@ -221,12 +221,12 @@ async function updateSidebarContext(contextData) {
         if (!newInstanceData) {
             logger.warn('Sidebar:updateSidebarContext', `Received null instance data for current instance ID ${newInstanceId}. Navigating to root.`);
             navigateTo('root');
-            return; 
+            return;
         }
 
         currentInstanceData = newInstanceData;
         currentPacketUrl = newPacketUrl;
-        
+
         const browserState = await storage.getPacketBrowserState(currentInstanceId);
         await detailView.displayPacketContent(currentInstanceData, browserState, currentPacketUrl);
     }
@@ -310,13 +310,17 @@ async function handleBackgroundMessage(message) {
 
             if (currentView === 'packet-detail' && currentInstanceId === data.instanceId) {
                 currentInstanceData = data.instance;
-                detailView.updatePlaybackUI(data, currentInstanceData); 
+                detailView.updatePlaybackUI(data, currentInstanceData);
                 detailView.updateCardVisibility(currentInstanceData);
                 if (data.lastTrippedMoment?.url) {
                     const cardToAnimate = domRefs.packetDetailView.querySelector(`.card[data-url="${data.lastTrippedMoment.url}"]`);
-                    if (cardToAnimate) {
+                    if (cardToAnimate && !cardToAnimate.classList.contains('link-mentioned')) {
                         cardToAnimate.classList.add('link-mentioned');
-                        setTimeout(() => cardToAnimate.classList.remove('link-mentioned'), 1500);
+                        setTimeout(() => {
+                            if (cardToAnimate) {
+                                cardToAnimate.classList.remove('link-mentioned');
+                            }
+                        }, 3000);
                     }
                 }
             }
@@ -438,7 +442,7 @@ function showSettingsStatus(message, type, autoClear) {
 async function showConfetti(title) {
     const settings = await storage.getSettings();
     if (settings.confettiEnabled === false) {
-        return; 
+        return;
     }
 
     const colorName = packetUtils.getColorForTopic(title);

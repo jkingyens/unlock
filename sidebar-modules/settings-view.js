@@ -124,6 +124,32 @@ export function setupSettingsListeners() {
     if (toggleElevenlabsApiKeyVisibilityBtn) {
         toggleElevenlabsApiKeyVisibilityBtn.addEventListener('click', () => toggleVisibility(elevenLabsApiKeyInput, toggleElevenlabsApiKeyVisibilityBtn));
     }
+    
+    // --- START OF FIX: Add listeners for new debug buttons ---
+    document.getElementById('debug-clear-data-btn')?.addEventListener('click', async () => {
+        const confirmed = await showConfirmDialog(
+            "This will delete ALL packet images, instances, and cached content. This cannot be undone.",
+            "Delete All Data",
+            "Cancel",
+            true
+        );
+        if (confirmed) {
+            showSettingsStatus('Clearing all data...', 'info', false);
+            const response = await sendMessageToBackground({ action: 'debug_clear_all_data' });
+            if (response.success) {
+                showSettingsStatus('All packet data has been cleared.', 'success');
+            } else {
+                showSettingsStatus(`Error: ${response.error}`, 'error', false);
+            }
+        }
+    });
+    
+    document.getElementById('debug-refresh-rules-btn')?.addEventListener('click', async () => {
+        showSettingsStatus('Refreshing redirect rules...', 'info', false);
+        await sendMessageToBackground({ action: 'request_rule_refresh' });
+        showSettingsStatus('Redirect rules have been refreshed.', 'success');
+    });
+    // --- END OF FIX ---
 }
 
 /**

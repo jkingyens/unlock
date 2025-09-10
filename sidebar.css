@@ -617,7 +617,7 @@ body.dark-mode .import-dialog .cancel-btn:hover, body.dark-mode .share-dialog .c
 }
 
 #detail-cards-container .card.link-mentioned {
-  animation: link-pulse 1.5s ease-out;
+  animation: link-pulse 1.5s ease-out 2;
 }
 
 .card.media .media-play-icon {

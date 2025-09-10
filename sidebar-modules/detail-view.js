@@ -496,30 +496,24 @@ async function createContentCard(contentItem, instance) {
 
     const card = document.createElement('div');
     card.className = 'card';
-    const { url, lrl, title = 'Untitled', context = '', format, origin } = contentItem;
+    const { url, lrl, title = 'Untitled', context = '', format, origin, cacheable } = contentItem;
 
     if (url) card.dataset.url = url;
     if (lrl) card.dataset.lrl = lrl;
 
-    let isClickable = (origin === 'external') || (origin === 'internal' && contentItem.published);
-    let needsDownload = false;
-
+    let isClickable = (origin === 'external') || (origin === 'internal' && (contentItem.published || cacheable));
+    
     if (format === 'html') {
         let iconHTML = origin === 'external' ? '🔗' : '📄';
         let displayUrl = '';
         if (origin === 'external') {
             try { displayUrl = new URL(url).hostname.replace(/^www\./, ''); } catch (e) { displayUrl = url || '(URL missing)'; }
         } else {
-            displayUrl = contentItem.published ? title : '(Not Published)';
+            displayUrl = isClickable ? title : '(Not Published)';
         }
         
-        let iconContainerHTML = `<div class="card-icon">${iconHTML}</div>`;
-
-        if (origin === 'internal' && contentItem.cacheable) {
-            isClickable = true;
-        }
-        
-        card.innerHTML = `${iconContainerHTML}<div class="card-text"><div class="card-title">${title}</div><div class="card-url">${displayUrl}</div>${context ? `<div class="card-relevance">${context}</div>` : ''}</div>`;
+        card.innerHTML = `<div class="card-icon">${iconHTML}</div><div class="card-text"><div class="card-title">${title}</div><div class="card-url">${displayUrl}</div>${context ? `<div class="card-relevance">${context}</div>` : ''}</div>`;
+    
     } else if (format === 'audio') {
         card.classList.add('media');
         card.innerHTML = `
@@ -572,7 +566,7 @@ async function createContentCard(contentItem, instance) {
         if (format === 'audio') {
             playMediaInCard(card, contentItem, instance);
         } else {
-            card.addEventListener('click', (e) => {
+            card.addEventListener('click', async (e) => {
                 if (card.classList.contains('opening')) {
                     return;
                 }
@@ -584,18 +578,6 @@ async function createContentCard(contentItem, instance) {
                 }
             });
         }
-    } else if (card.classList.contains('needs-download')) {
-        card.addEventListener('click', () => {
-            const cardIconContainer = card.querySelector('.card-icon-container');
-            if (cardIconContainer && cardIconContainer.classList.contains('needs-download')) {
-                cardIconContainer.classList.remove('needs-download');
-                cardIconContainer.classList.add('loading');
-                sendMessageToBackground({
-                    action: 'ensure_html_is_cached',
-                    data: { instanceId: instance.instanceId, url: contentItem.url, lrl: contentItem.lrl }
-                });
-            }
-        });
     }
 
     return card;

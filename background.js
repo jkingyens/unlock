@@ -326,7 +326,12 @@ export async function controlAudioInOffscreen(command, data) {
 async function injectOverlayScripts(tabId) {
     try {
         const tab = await chrome.tabs.get(tabId);
-        if (!tab || !tab.url || !tab.url.startsWith('http')) return;
+        // This function now ONLY injects into external web pages.
+        // Internal pages like preview.html handle their own overlay.
+        if (!tab || !tab.url || !tab.url.startsWith('http')) {
+            return;
+        }
+        
         await chrome.scripting.executeScript({ target: { tabId: tabId }, files: ['overlay.js'] });
         await chrome.scripting.insertCSS({ target: { tabId: tabId }, files: ['overlay.css'] });
     } catch (e) {
@@ -401,7 +406,9 @@ export async function notifyUIsOfStateChange(options) {
             showVisitedAnimation: !!effectiveOptions.showVisitedAnimation,
             animate: !!effectiveOptions.animate,
         };
-
+        
+        // Inject scripts into the active tab (if it's an external page)
+        // and then send the state update.
         await injectOverlayScripts(activeTab.id);
         await chrome.tabs.sendMessage(activeTab.id, {
             action: 'update_overlay_state',
@@ -469,10 +476,15 @@ chrome.runtime.onInstalled.addListener(async (details) => {
         await cloudStorage.initialize().catch(err => logger.error('Background:onInstalled', 'Initial cloud storage init failed', err));
         
         await ruleManager.refreshAllRules();
+        
+        logger.log('Background:onInstalled', 'Re-injecting overlay scripts into existing web tabs.');
         const tabs = await chrome.tabs.query({ url: ["http://*/*", "https://*/*"] });
         for (const tab of tabs) {
-            if (tab.id) injectOverlayScripts(tab.id);
+            if (tab.id) {
+                injectOverlayScripts(tab.id).catch(e => { /* Silently ignore errors for restricted pages */ });
+            }
         }
+        
         try {
             if (chrome.sidePanel && chrome.sidePanel.setPanelBehavior) {
                  await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
@@ -510,13 +522,15 @@ chrome.runtime.onStartup.addListener(async () => {
         await getDb();
         await garbageCollectTabContexts();
         await tabGroupHandler.cleanupDraftGroup();
-        logger.log('Background:onStartup', 'Injecting overlay scripts into existing tabs.');
+        
+        logger.log('Background:onStartup', 'Injecting overlay scripts into existing web tabs.');
         const tabs = await chrome.tabs.query({ url: ["http://*/*", "https://*/*"] });
         for (const tab of tabs) {
             if (tab.id) {
-                injectOverlayScripts(tab.id).catch(e => logger.warn('Background:onStartup', `Failed to inject script into tab ${tab.id}`, e));
+                injectOverlayScripts(tab.id).catch(e => { /* Silently ignore errors for restricted pages */ });
             }
         }
+        
     } finally {
         isRestoring = false;
         logger.log('Background:onStartup', 'Startup process complete. Navigation processing is now enabled.');
@@ -673,6 +687,10 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
              }
         }
     }
+
+    // Always notify the UI (especially the overlay) of the current media state
+    // when a tab is activated. This ensures stale overlays are hidden.
+    await notifyUIsOfStateChange({ animate: false });
 });
 
 chrome.tabs.onRemoved.addListener(async (tabId, removeInfo) => {
@@ -729,19 +747,9 @@ function attachNavigationListeners() {
     chrome.webNavigation.onHistoryStateUpdated.addListener(onHistoryStateUpdatedWrapper);
 }
 
-// --- START OF FIX: This listener is removed ---
-// The new logic in sidebar.js makes this redundant and a potential source of race conditions.
-// chrome.runtime.onConnect.addListener(async (port) => {
-//   if (port.name === 'sidebar') {
-//     await storage.setSession({ isSidebarOpen: true });
-//     await notifyUIsOfStateChange({ isSidebarOpen: true });
-//     port.onDisconnect.addListener(async () => {
-//       await storage.setSession({ isSidebarOpen: false });
-//       await notifyUIsOfStateChange({ animate: true, isSidebarOpen: false });
-//     });
-//   }
-// });
-// --- END OF FIX ---
+// The onConnect listener was removed as part of a previous fix.
+// The sidebar now uses explicit messages ('sidebar_opened', 'sidebar_closed')
+// for more reliable state management.
 
 async function garbageCollectTabContexts() {
     logger.log('Background:GC', 'Starting garbage collection for tab contexts...');

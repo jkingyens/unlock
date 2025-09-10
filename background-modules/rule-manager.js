@@ -44,7 +44,6 @@ function getRuleId(instanceId, itemUrl) {
 
 /**
  * Gets all currently active redirect rules managed by this extension.
- * Uses session rules which are cleared on browser restart.
  * @returns {Promise<Array<chrome.declarativeNetRequest.Rule>>}
  */
 async function getSessionRules() {
@@ -58,9 +57,6 @@ async function getSessionRules() {
 
 /**
  * Creates or updates all necessary redirect rules for a given packet instance.
- * It generates new pre-signed URLs for each generated content item and sets up
- * a redirect from the canonical, non-signed URL to the new pre-signed URL.
- *
  * @param {object} instance - The PacketInstance object.
  * @returns {Promise<{success: boolean, rulesCreated: number, error?: string}>}
  */
@@ -95,21 +91,6 @@ export async function addOrUpdatePacketRules(instance) {
             continue;
         }
 
-        let isCached = false;
-
-        if (item.cacheable === true && item.lrl) {
-            const indexedDbKey = sanitizeForFileName(item.lrl);
-            const cachedContent = await indexedDbStorage.getGeneratedContent(instance.instanceId, indexedDbKey);
-            if (cachedContent && cachedContent[0]?.content) {
-                isCached = true;
-            }
-        }
-
-        if (isCached) {
-            logger.log('RuleManager:addOrUpdate', `Skipping rule creation for cached item: ${item.lrl}`);
-            continue;
-        }
-        
         let redirectUrl;
         if (item.interactionBasedCompletion === true) {
             const extraParams = { extensionId: chrome.runtime.id };
