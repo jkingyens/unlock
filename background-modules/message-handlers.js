@@ -62,6 +62,31 @@ function debouncedSaveInstance(instance) {
 }
 
 
+// --- START OF MODIFICATION: Helper for script injection ---
+/**
+ * Injects the page interceptor script into an HTML string before serving.
+ * @param {string} htmlContent The raw HTML content.
+ * @returns {string} The HTML content with the script tag injected.
+ */
+function injectInterceptorScript(htmlContent) {
+    if (!htmlContent || typeof htmlContent !== 'string') return '';
+    
+    // Get the full URL to the interceptor script at runtime.
+    const interceptorUrl = chrome.runtime.getURL('page_interceptor.js');
+    const scriptTag = `<script src="${interceptorUrl}"></script>`;
+
+    // Find the closing body tag and insert the script just before it for proper execution order.
+    const bodyEndIndex = htmlContent.toLowerCase().lastIndexOf('</body>');
+    if (bodyEndIndex !== -1) {
+        return htmlContent.slice(0, bodyEndIndex) + scriptTag + htmlContent.slice(bodyEndIndex);
+    }
+    
+    // As a fallback for malformed HTML, append the script at the end.
+    return htmlContent + scriptTag;
+}
+// --- END OF MODIFICATION ---
+
+
 // --- Context Request Handlers ---
 async function handleGetContextForTab(data, sender, sendResponse) {
     const { tabId } = data;
@@ -403,6 +428,15 @@ const actionHandlers = {
             sendResponse({ success: false, error: error.message });
         }
     },
+    'debug_clear_instance_caches': async (data, sender, sendResponse) => {
+        try {
+            await indexedDbStorage.clearInstanceCacheEntries();
+            sendResponse({ success: true });
+        } catch (error) {
+            logger.error('MessageHandler:debug_clear_instance_caches', 'Failed to clear instance caches', error);
+            sendResponse({ success: false, error: error.message });
+        }
+    },
     'sidebar_opened': async (data, sender, sendResponse) => {
         await storage.setSession({ isSidebarOpen: true });
         await notifyUIsOfStateChange({ isSidebarOpen: true });
@@ -494,15 +528,6 @@ const actionHandlers = {
     },
     'open_sidebar_and_navigate': async (data, sender, sendResponse) => {
         sendResponse({ success: true, message: "User should open side panel via action icon." });
-    },
-    'debug_clear_instance_caches': async (data, sender, sendResponse) => {
-        try {
-            await indexedDbStorage.clearInstanceCacheEntries();
-            sendResponse({ success: true });
-        } catch (error) {
-            logger.error('MessageHandler:debug_clear_instance_caches', 'Failed to clear instance caches', error);
-            sendResponse({ success: false, error: error.message });
-        }
     },
     'audio_time_update': async (data) => {
         if (!activeMediaPlayback.instance || activeMediaPlayback.url !== data.url || !activeMediaPlayback.isPlaying) {
@@ -596,7 +621,8 @@ const actionHandlers = {
             const storedContent = await indexedDbStorage.getGeneratedContent(draftPacket.id, indexedDbKey);
             
             if (item && storedContent && storedContent[0]?.content) {
-                const htmlContent = new TextDecoder().decode(storedContent[0].content);
+                let htmlContent = new TextDecoder().decode(storedContent[0].content);
+                htmlContent = injectInterceptorScript(htmlContent);
                 sendResponse({ success: true, htmlContent, title: item.title });
             } else {
                 sendResponse({ success: false, error: 'Item content not found in IndexedDB.' });
@@ -612,7 +638,8 @@ const actionHandlers = {
             const storedContent = await indexedDbStorage.getGeneratedContent(instanceId, indexedDbKey);
 
             if (storedContent && storedContent[0]?.content) {
-                const htmlContent = new TextDecoder().decode(storedContent[0].content);
+                let htmlContent = new TextDecoder().decode(storedContent[0].content);
+                htmlContent = injectInterceptorScript(htmlContent);
                 const instance = await storage.getPacketInstance(instanceId);
                 const item = instance.contents.find(i => i.lrl === lrl);
                 sendResponse({ success: true, htmlContent, title: item?.title || 'Cached Page' });
