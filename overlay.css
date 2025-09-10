@@ -6,7 +6,6 @@
     left: 50%;
     transform: translateX(-50%) translateY(-150%);
     z-index: 2147483647;
-    /* UPDATED: Made background slightly more transparent for a better glass effect */
     background-color: rgba(30, 30, 30, 0.65);
     color: #ffffff;
     border-radius: 50px;
@@ -14,7 +13,6 @@
     display: flex;
     align-items: center;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    /* UPDATED: Fallback blur for browsers that don't support advanced filters */
     backdrop-filter: blur(10px);
     -webkit-backdrop-filter: blur(10px);
     box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
@@ -27,16 +25,12 @@
     justify-content: space-between;
 }
 
-/* --- START: New rule for Liquid Glass Effect --- */
-/* This rule applies the advanced filter only on browsers that support it,
-   providing a graceful fallback to the simple blur defined above. */
 @supports (backdrop-filter: url('#')) or (-webkit-backdrop-filter: url('#')) {
     #unlock-media-overlay {
         -webkit-backdrop-filter: url('#unlock-liquid-glass-filter');
         backdrop-filter: url('#unlock-liquid-glass-filter');
     }
 }
-/* --- END: New rule for Liquid Glass Effect --- */
 
 
 #unlock-media-overlay.no-transition {

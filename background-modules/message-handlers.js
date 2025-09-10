@@ -172,7 +172,6 @@ async function handleOpenContent(data, sender, sendResponse) {
     openingContent.add(targetCanonicalUrl); // Acquire lock
 
     try {
-        // --- START: UNIFIED DUPLICATE CHECK ---
         const allTabs = await chrome.tabs.query({});
         for (const tab of allTabs) {
             const context = await getPacketContext(tab.id);
@@ -183,44 +182,13 @@ async function handleOpenContent(data, sender, sendResponse) {
                 return;
             }
         }
-        // --- END: UNIFIED DUPLICATE CHECK ---
-
-        const contentItem = instance.contents.find(item => item.url === targetCanonicalUrl);
-
-        if (contentItem && contentItem.cacheable && contentItem.lrl) {
-            const indexedDbKey = sanitizeForFileName(contentItem.lrl);
-            const storedContent = await indexedDbStorage.getGeneratedContent(instanceId, indexedDbKey);
-            if (storedContent && storedContent[0]?.content) {
-                const fullHtml = new TextDecoder().decode(storedContent[0].content);
-                await setupOffscreenDocument();
-                const offscreenResponse = await chrome.runtime.sendMessage({
-                    target: 'offscreen',
-                    type: 'create-blob-url',
-                    data: { html: fullHtml }
-                });
-
-                if (offscreenResponse.success) {
-                    const newTab = await chrome.tabs.create({ url: offscreenResponse.blobUrl, active: true });
-                    const trustedIntent = { instanceId, canonicalPacketUrl: targetCanonicalUrl };
-                    await storage.setSession({ [`trusted_intent_${newTab.id}`]: trustedIntent });
-                    await sidebarHandler.updateActionForTab(newTab.id);
-                    sendResponse({ success: true });
-                    return; 
-                }
-            }
-        }
         
-        let finalUrlToOpen;
-
-        if (contentItem && contentItem.access === 'private') {
-            if (contentItem.publishContext) {
-                finalUrlToOpen = cloudStorage.constructPublicUrl(targetCanonicalUrl, contentItem.publishContext);
-            } else {
-                finalUrlToOpen = cloudStorage.getPublicUrl(targetCanonicalUrl);
-            }
-            if (!finalUrlToOpen) throw new Error(`Could not determine public URL for S3 key ${targetCanonicalUrl}.`);
-        } else {
-            finalUrlToOpen = targetCanonicalUrl;
+        let finalUrlToOpen = targetCanonicalUrl;
+        
+        const contentItem = instance.contents?.find(item => item.url === targetCanonicalUrl);
+        
+        if (contentItem && contentItem.origin === 'internal' && contentItem.publishContext) {
+            finalUrlToOpen = cloudStorage.constructPublicUrl(targetCanonicalUrl, contentItem.publishContext);
         }
 
         const newTab = await chrome.tabs.create({ url: 'about:blank', active: false });
@@ -426,7 +394,15 @@ export async function ensureHtmlIsCached(instanceId, url, lrl) {
 }
 
 const actionHandlers = {
-    // --- START OF FIX ---
+    'debug_clear_all_data': async (data, sender, sendResponse) => {
+        try {
+            await storage.clearAllPacketData();
+            sendResponse({ success: true });
+        } catch (error) {
+            logger.error('MessageHandler:debug_clear_all_data', 'Failed to clear all data', error);
+            sendResponse({ success: false, error: error.message });
+        }
+    },
     'sidebar_opened': async (data, sender, sendResponse) => {
         await storage.setSession({ isSidebarOpen: true });
         await notifyUIsOfStateChange({ isSidebarOpen: true });
@@ -437,7 +413,6 @@ const actionHandlers = {
         await notifyUIsOfStateChange({ isSidebarOpen: false, animate: true });
         sendResponse({ success: true });
     },
-    // --- END OF FIX ---
     'is_current_tab_packetizable': async (data, sender, sendResponse) => {
         try {
             const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -663,10 +638,7 @@ const actionHandlers = {
     'initiate_packet_creation_from_tab': (data, sender, sendResponse) => processCreatePacketRequestFromTab(sender.tab.id).then(sendResponse),
     'initiate_packet_creation': (data, sender, sendResponse) => processCreatePacketRequest(data, sender.tab?.id).then(sendResponse),
     'instantiate_packet': async (data, sender, sendResponse) => {
-        // --- START OF FIX ---
-        // Use the instanceId provided by the frontend, don't generate a new one.
         const result = await instantiatePacket(data.imageId, data.instanceId, sender.tab?.id);
-        // --- END OF FIX ---
         if (result.success) {
             chrome.runtime.sendMessage({ action: 'packet_instance_created', data: { instance: result.instance } });
         }
@@ -697,6 +669,29 @@ const actionHandlers = {
         sendResponse(visitResult);
     },
     'open_content': handleOpenContent,
+    'open_and_close_preview': async (data, sender, sendResponse) => {
+        const { url, instanceId } = data;
+        const tabId = sender.tab?.id;
+        
+        if (!tabId || !instanceId || !url) {
+            return sendResponse({ success: false, error: 'Missing required data from preview page.' });
+        }
+        try {
+            const instance = await storage.getPacketInstance(instanceId);
+            if (!instance) {
+                throw new Error(`Instance ${instanceId} not found.`);
+            }
+            // Reuse the existing handler to open the new tab
+            await handleOpenContent({ instance, url }, sender, () => {});
+            
+            // Now, close the original preview tab
+            await chrome.tabs.remove(tabId);
+            sendResponse({ success: true });
+        } catch (error) {
+            logger.error('MessageHandler:open_and_close_preview', 'Error during preview transition', error);
+            sendResponse({ success: false, error: error.message });
+        }
+    },
     'open_content_from_overlay': async (data, sender, sendResponse) => {
         const { url } = data;
         const { instanceId } = activeMediaPlayback;
@@ -768,6 +763,10 @@ const actionHandlers = {
             logger.error("MessageHandler:ensure_html_is_cached", "Failed to cache HTML", error);
             sendResponse({ success: false, error: error.message });
         }
+    },
+    'request_rule_refresh': async (data, sender, sendResponse) => {
+        await ruleManager.refreshAllRules();
+        sendResponse({ success: true });
     },
 };
 

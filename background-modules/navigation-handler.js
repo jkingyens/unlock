@@ -6,9 +6,8 @@
 // sidebar context will be overridden to "stick" to the playing packet.
 // REVISED: Prevent reconcileBrowserState from running when context is overridden for
 // media playback, to allow tabs to be correctly ejected from groups.
-// REVISED: Refreshing a cached internal page now correctly preserves the tab's context
-// by setting a trusted intent before redirecting to a blob: URL and then bypassing the
-// demotion check for blob URLs.
+// REVISED: Re-implemented onBeforeNavigate to handle cached content redirects,
+// ensuring the trusted token is set correctly to preserve tab context.
 
 import {
     logger,
@@ -65,43 +64,33 @@ async function injectOverlayScripts(tabId) {
 }
 
 export async function onBeforeNavigate(details) {
-    if (details.frameId !== 0 || !details.url || !details.url.startsWith('http')) {
+    if (details.frameId !== 0 || !details.url.startsWith('http')) {
         return;
     }
 
-    const context = await getPacketContext(details.tabId);
-    if (!context || !context.instanceId) {
-        return;
-    }
+    const instances = await storage.getPacketInstances();
+    for (const instanceId in instances) {
+        const instance = instances[instanceId];
+        const targetItem = packetUtils.isUrlInPacket(details.url, instance, { returnItem: true });
 
-    const instance = await storage.getPacketInstance(context.instanceId);
-    const targetItem = packetUtils.isUrlInPacket(details.url, instance, { returnItem: true });
+        if (targetItem && targetItem.cacheable && targetItem.lrl) {
+            const indexedDbKey = sanitizeForFileName(targetItem.lrl);
+            const cachedContent = await indexedDbStorage.getGeneratedContent(instance.instanceId, indexedDbKey);
 
-    if (targetItem && targetItem.cacheable && targetItem.lrl) {
-        const indexedDbKey = sanitizeForFileName(targetItem.lrl);
-        const cachedContent = await indexedDbStorage.getGeneratedContent(instance.instanceId, indexedDbKey);
-
-        if (cachedContent && cachedContent[0]?.content) {
-            logger.log('NavigationHandler:onBeforeNavigate', `Intercepting navigation to cached item: ${targetItem.title}`);
-            
-            const fullHtml = new TextDecoder().decode(cachedContent[0].content);
-            
-            await setupOffscreenDocument();
-            const offscreenResponse = await chrome.runtime.sendMessage({
-                target: 'offscreen',
-                type: 'create-blob-url',
-                data: { html: fullHtml }
-            });
-
-            if (offscreenResponse.success) {
+            if (cachedContent && cachedContent[0]?.content) {
+                logger.log('NavigationHandler:onBeforeNavigate', `Cache HIT. Intercepting and redirecting to local preview for: ${targetItem.title}`);
+                
+                const previewUrl = chrome.runtime.getURL(`preview.html?instanceId=${instance.instanceId}&lrl=${encodeURIComponent(targetItem.lrl)}`);
+                
                 const trustedIntent = {
                     instanceId: instance.instanceId,
-                    canonicalPacketUrl: targetItem.url
+                    canonicalPacketUrl: targetItem.url // The ORIGINAL cloud URL
                 };
                 await storage.setSession({ [`trusted_intent_${details.tabId}`]: trustedIntent });
-                logger.log('NavigationHandler:onBeforeNavigate', `Setting trusted intent for blob URL redirect.`, { tabId: details.tabId });
+                
+                chrome.tabs.update(details.tabId, { url: previewUrl });
 
-                chrome.tabs.update(details.tabId, { url: offscreenResponse.blobUrl });
+                return; 
             }
         }
     }
@@ -110,7 +99,7 @@ export async function onBeforeNavigate(details) {
 export async function onCommitted(details) {
     if (details.frameId !== 0) return;
     const url = details.url;
-    if (!url || (!url.startsWith('http') && !url.startsWith('blob:chrome-extension://'))) return;
+    if (!url || (!url.startsWith('http') && !url.startsWith('chrome-extension://'))) return;
     
     logger.log(`[NavigationHandler Tab ${details.tabId}]`, `onCommitted event fired for URL: ${url}`);
     await processNavigationEvent(details.tabId, url, details);
@@ -119,7 +108,7 @@ export async function onCommitted(details) {
 export async function onHistoryStateUpdated(details) {
     if (details.frameId !== 0) return;
     const url = details.url;
-    if (!url || (!url.startsWith('http') && !url.startsWith('blob:chrome-extension://'))) return;
+    if (!url || (!url.startsWith('http') && !url.startsWith('chrome-extension://'))) return;
 
     logger.log(`[NavigationHandler Tab ${details.tabId}]`, `onHistoryStateUpdated event fired for URL: ${url}`);
     await processNavigationEvent(details.tabId, url, details);
@@ -165,6 +154,32 @@ async function processNavigationEvent(tabId, finalUrl, details) {
     clearPendingVisitTimer(tabId);
     logger.log(logPrefix, 'Cleared any pending visit timers for this tab.');
 
+    // --- START OF FIX ---
+    // If the navigation is to our internal preview page (e.g., from a back button press),
+    // we must re-establish the tab's context based on the URL parameters.
+    if (finalUrl.includes('/preview.html')) {
+        logger.log(logPrefix, 'DECISION: Navigation is to an internal preview page. Re-establishing context from URL params.');
+        try {
+            const urlParams = new URL(finalUrl).searchParams;
+            const instanceId = urlParams.get('instanceId');
+            const lrl = urlParams.get('lrl');
+
+            if (instanceId && lrl) {
+                const instance = await storage.getPacketInstance(instanceId);
+                const contentItem = instance?.contents.find(item => item.lrl === decodeURIComponent(lrl));
+
+                if (contentItem && contentItem.url) {
+                    // Set the context to the CANONICAL URL, even though we're on the preview page.
+                    await setPacketContext(tabId, instanceId, contentItem.url, finalUrl);
+                    logger.log(logPrefix, 'Successfully re-established context for preview page.', { canonicalUrl: contentItem.url });
+                }
+            }
+        } catch (e) {
+            logger.error(logPrefix, 'Error parsing preview.html URL for context.', e);
+        }
+    }
+    // --- END OF FIX ---
+
     logger.log(logPrefix, '>>> NAVIGATION EVENT START <<<', { url: finalUrl, transition: `${details.transitionType} | ${details.transitionQualifiers.join(', ')}` });
     await injectOverlayScripts(tabId);
 
@@ -195,8 +210,8 @@ async function processNavigationEvent(tabId, finalUrl, details) {
             logger.log(logPrefix, `Is this a user-initiated navigation? -> ${isUserInitiated}`);
 
             if (isUserInitiated) {
-                if (finalUrl.startsWith('blob:')) {
-                    logger.log(logPrefix, 'DECISION: Navigation is to an internally-redirected blob URL. Preserving context.');
+                if (finalUrl.includes('/preview.html')) {
+                     logger.log(logPrefix, 'DECISION: Navigation is to an internal preview page. Preserving context.');
                 } else {
                     const instance = await storage.getPacketInstance(currentContext.instanceId);
                     const newItemInPacket = packetUtils.isUrlInPacket(finalUrl, instance, { returnItem: true });
@@ -286,7 +301,6 @@ async function processNavigationEvent(tabId, finalUrl, details) {
             }
         }
 
-        // MODIFIED: Only reconcile browser state if context isn't an override
         if (!isContextOverriddenForMedia) {
             await reconcileBrowserState(tabId, finalInstance.instanceId, finalInstance, finalUrl);
         }
@@ -298,7 +312,7 @@ async function processNavigationEvent(tabId, finalUrl, details) {
             startVisitTimer(tabId, finalInstance.instanceId, itemForVisitTimer.url, logPrefix);
         }
         
-        if (itemForVisitTimer && itemForVisitTimer.cacheable && itemForVisitTimer.lrl && !finalUrl.startsWith('blob:')) {
+        if (itemForVisitTimer && itemForVisitTimer.cacheable && itemForVisitTimer.lrl && !finalUrl.startsWith('chrome-extension://')) {
             ensureHtmlIsCached(finalInstance.instanceId, itemForVisitTimer.url, itemForVisitTimer.lrl).catch(err => {
                 logger.error(logPrefix, `Background caching failed for ${itemForVisitTimer.lrl}`, err);
             });
@@ -333,7 +347,7 @@ async function reconcileBrowserState(tabId, instanceId, instance, currentBrowser
     }
 
     if (await shouldUseTabGroups()) {
-        const ensuredGroupId = await tabGroupHandler.ensureTabInGroup(tabId, instanceId);
+        const ensuredGroupId = await tabGroupHandler.ensureTabInGroup(tabId, instance);
         if (browserState.tabGroupId !== ensuredGroupId && ensuredGroupId !== null) {
             browserState.tabGroupId = ensuredGroupId;
             stateModified = true;

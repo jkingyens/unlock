@@ -365,7 +365,6 @@ const indexedDbStorage = {
             return false;
         }
     },
-    // --- START: New Debugging Function ---
     async debugDumpIndexedDb() {
         if (!CONFIG.DEBUG) return;
         try {
@@ -391,7 +390,6 @@ const indexedDbStorage = {
             logger.error('IndexedDB', 'Error dumping database keys', error);
         }
     }
-    // --- END: New Debugging Function ---
 };
 
 const storage = {
@@ -526,7 +524,21 @@ const storage = {
       if (!chrome.storage?.session) return resolve();
       chrome.storage.session.remove(key, () => resolve());
     });
+  },
+  // --- START OF FIX: New function to clear all packet data ---
+  async clearAllPacketData() {
+    logger.log('Storage:clearAllPacketData', 'Clearing all packet images, instances, browser states, and cached content.');
+    await Promise.all([
+      this.setLocal({
+        [CONFIG.STORAGE_KEYS.PACKET_IMAGES]: {},
+        [CONFIG.STORAGE_KEYS.PACKET_INSTANCES]: {},
+        [CONFIG.STORAGE_KEYS.PACKET_BROWSER_STATES]: {}
+      }),
+      indexedDbStorage.clearAllContent()
+    ]);
+    logger.log('Storage:clearAllPacketData', 'All packet data has been cleared.');
   }
+  // --- END OF FIX ---
 };
 
 const packetUtils = {

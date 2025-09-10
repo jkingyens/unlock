@@ -42,20 +42,15 @@ function createTabGroupHelper(tabId, instance) {
  * Ensures a tab is placed into the correct tab group for a given packet instance.
  * If no group exists, it creates one.
  * @param {number} tabId - The ID of the tab to place.
- * @param {string} instanceId - The ID of the packet instance.
+ * @param {object} instance - The packet instance object.
  * @returns {Promise<number|null>} The group ID the tab was placed in, or null.
  */
-export async function ensureTabInGroup(tabId, instanceId) {
+export async function ensureTabInGroup(tabId, instance) {
     if (!(await shouldUseTabGroups())) return null;
-    if (typeof tabId !== 'number' || !instanceId) return null;
+    if (typeof tabId !== 'number' || !instance || !instance.instanceId) return null;
 
     try {
-        const instance = await storage.getPacketInstance(instanceId);
-        if (!instance) {
-            logger.warn('TabGroupHandler:ensureTabInGroup', 'Packet instance not found for ID:', { instanceId });
-            return null;
-        }
-
+        const instanceId = instance.instanceId;
         const identifier = getIdentifierForGroupTitle(instanceId);
         const expectedGroupTitle = `${GROUP_TITLE_PREFIX}${identifier}`;
         
@@ -93,7 +88,7 @@ export async function ensureTabInGroup(tabId, instanceId) {
         return targetGroupId;
 
     } catch (error) {
-        logger.error('TabGroupHandler:ensureTabInGroup', 'Error ensuring tab is in group', { tabId, instanceId, error });
+        logger.error('TabGroupHandler:ensureTabInGroup', 'Error ensuring tab is in group', { tabId, instanceId: instance.instanceId, error });
         return null;
     }
 }

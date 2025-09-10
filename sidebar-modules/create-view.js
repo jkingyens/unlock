@@ -108,7 +108,7 @@ export async function prepareCreateView(imageToEdit = null) {
     
     initialDraftState = JSON.stringify(draftPacket.sourceContent);
     renderDraftContentList();
-    logger.log('[Draft Debug]', 'prepareCreateView completed. Calling syncDraftGroup.');
+    sendMessageToBackground({ action: 'request_rule_refresh' });
     syncDraftGroup();
 }
 
@@ -119,7 +119,8 @@ function getUrlForItem(item, index) {
         return item.url;
     }
     if (item.origin === 'internal' && item.lrl) {
-        return chrome.runtime.getURL(`preview.html?rlr=${encodeURIComponent(item.lrl)}`);
+        const path = item.lrl.startsWith('/') ? item.lrl.substring(1) : item.lrl;
+        return `https://unlock.local/draft/${draftPacket.id}/${path}`;
     }
     return null;
 }
@@ -127,9 +128,7 @@ function getUrlForItem(item, index) {
 // --- Tab Group Management for Drafts ---
 
 async function syncDraftGroup() {
-    logger.log('[Draft Debug]', 'Initiating syncDraftGroup from create-view.');
     if (!(await shouldUseTabGroups()) || isTabGroupSyncing) {
-        logger.log('[Draft Debug]', 'syncDraftGroup skipped.', { tabGroups: await shouldUseTabGroups(), syncing: isTabGroupSyncing });
         return;
     }
     isTabGroupSyncing = true;
@@ -138,15 +137,12 @@ async function syncDraftGroup() {
             .map(item => getUrlForItem(item))
             .filter(Boolean);
 
-        logger.log('[Draft Debug]', 'Sending sync_draft_group message to background.', { desiredUrls });
-
         const response = await sendMessageToBackground({
             action: 'sync_draft_group',
             data: { desiredUrls }
         });
         if (response.success) {
             draftTabGroupId = response.groupId;
-            logger.log('[Draft Debug]', 'sync_draft_group message successful.', { returnedGroupId: draftTabGroupId });
         }
     } catch (error) {
         logger.error('CreateView', 'Error syncing draft group', error);
@@ -164,6 +160,7 @@ async function cleanupDraftGroup() {
     if (draftPacket && draftPacket.id.startsWith('draft_')) {
         await indexedDbStorage.deleteGeneratedContentForImage(draftPacket.id);
     }
+    await sendMessageToBackground({ action: 'request_rule_refresh' });
 }
 
 // --- UI Rendering ---
@@ -188,6 +185,7 @@ function renderDraftContentList() {
                 draftPacket.sourceContent.splice(index, 1);
                 renderDraftContentList();
                 storage.setSession({ 'draftPacketForPreview': draftPacket });
+                sendMessageToBackground({ action: 'request_rule_refresh' });
                 syncDraftGroup();
             });
             card.appendChild(removeBtn);
@@ -212,7 +210,7 @@ function createDraftContentCard(contentItem, index) {
     let displayUrl = '';
     const itemUrl = getUrlForItem(contentItem, index);
     
-    card.dataset.url = contentItem.url;
+    card.dataset.url = itemUrl;
 
     if (format === 'html' && origin === 'external') {
         iconHTML = '🔗';
@@ -233,11 +231,13 @@ function createDraftContentCard(contentItem, index) {
         if (contentItem.format === 'audio') {
             toggleDraftAudioPlayback(contentItem, card);
         } else if (itemUrl) {
-            if (await shouldUseTabGroups()) {
-                sendMessageToBackground({ action: 'focus_or_create_draft_tab', data: { url: itemUrl } });
-            } else {
-                chrome.tabs.create({ url: itemUrl });
-            }
+            sendMessageToBackground({
+                action: 'open_content',
+                data: { 
+                    instance: { instanceId: draftPacket.id },
+                    url: itemUrl 
+                }
+            });
         }
     });
 
@@ -421,6 +421,7 @@ async function handleAddCurrentPageToDraft() {
         
         renderDraftContentList();
         await storage.setSession({ 'draftPacketForPreview': draftPacket });
+        await sendMessageToBackground({ action: 'request_rule_refresh' });
         await syncDraftGroup();
         showRootViewStatus('Page added to draft.', 'success');
 
@@ -472,6 +473,7 @@ async function handleConfirmMakePage() {
         if (response?.success && response.newItem) {
             draftPacket.sourceContent.push(response.newItem);
             renderDraftContentList();
+            await sendMessageToBackground({ action: 'request_rule_refresh' });
             hideMakePageDialog();
             
             await storage.setSession({ 'draftPacketForPreview': draftPacket });
@@ -528,6 +530,7 @@ async function handleDrop(e) {
             const [draggedItem] = draftPacket.sourceContent.splice(draggedItemIndex, 1);
             draftPacket.sourceContent.splice(droppedOnIndex, 0, draggedItem);
             renderDraftContentList();
+            await sendMessageToBackground({ action: 'request_rule_refresh' });
             await storage.setSession({ 'draftPacketForPreview': draftPacket });
             await syncDraftGroup();
         }
@@ -569,6 +572,7 @@ function handleFileDrop(e) {
 
                 draftPacket.sourceContent.push(newMediaItem);
                 renderDraftContentList();
+                await sendMessageToBackground({ action: 'request_rule_refresh' });
                 await storage.setSession({ 'draftPacketForPreview': draftPacket });
             };
             reader.readAsArrayBuffer(file);

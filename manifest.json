@@ -38,8 +38,15 @@
   },
   "web_accessible_resources": [
     {
-      "resources": [ "overlay.js", "overlay.css" ],
-      "matches": [ "<all_urls>" ]
+      "resources": [
+        "overlay.js",
+        "overlay.css",
+        "preview.html",
+        "page_interceptor.js"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
     }
   ],
   "side_panel": {
