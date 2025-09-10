@@ -143,6 +143,25 @@ export function setupSettingsListeners() {
             }
         }
     });
+
+    document.getElementById('debug-clear-instance-cache-btn')?.addEventListener('click', async () => {
+        const confirmed = await showConfirmDialog(
+            "This will delete all locally cached media and pages for started packets. This is useful for testing or freeing up space, but content will need to be re-downloaded.",
+            "Clear Caches",
+            "Cancel",
+            false
+        );
+        if (confirmed) {
+            showSettingsStatus('Clearing instance caches...', 'info', false);
+            const response = await sendMessageToBackground({ action: 'debug_clear_instance_caches' });
+            if (response.success) {
+                showSettingsStatus('All instance caches have been cleared.', 'success');
+            } else {
+                showSettingsStatus(`Error: ${response.error}`, 'error', false);
+            }
+        }
+    });
+
     
     document.getElementById('debug-refresh-rules-btn')?.addEventListener('click', async () => {
         showSettingsStatus('Refreshing redirect rules...', 'info', false);

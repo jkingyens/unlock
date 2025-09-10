@@ -508,7 +508,6 @@ chrome.runtime.onStartup.addListener(async () => {
         await initializeStorageAndSettings();
 
         await initializationPromise;
-        await indexedDbStorage.clearInstanceCacheEntries();
 
         await migratePacketImagesIfNecessary();
         await migrateHtmlContentToIndexedDb();
