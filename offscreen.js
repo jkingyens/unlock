@@ -183,6 +183,15 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
         if (request.target !== 'offscreen') return false;
 
         switch (request.type) {
+        case 'create-blob-url':
+            try {
+                const blob = new Blob([request.data.html], { type: 'text/html' });
+                const blobUrl = URL.createObjectURL(blob);
+                sendResponse({ success: true, blobUrl: blobUrl });
+            } catch (error) {
+                sendResponse({ success: false, error: error.message });
+            }
+            return false;
         case 'parse-html-for-tts-and-links':
                 try {
                     const parser = new DOMParser();

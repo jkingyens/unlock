@@ -21,21 +21,23 @@ import * as tabGroupHandler from './tab-group-handler.js';
 import * as sidebarHandler from './sidebar-handler.js';
 import cloudStorage from '../cloud-storage.js';
 import llmService from '../llm_service.js';
+import * as ruleManager from './rule-manager.js';
 
 import {
-    processCreatePacketRequest,
-    processCreatePacketRequestFromTab,
-    processGenerateCustomPageRequest,
-    processRepublishRequest,
+    instantiatePacket,
     processDeletePacketsRequest,
     publishImageForSharing,
     importImageFromUrl,
-    instantiatePacket,
-    processDeletePacketImageRequest,
-    enhanceHtml,
-    processImproveDraftAudio,
-    generateDraftPacketFromTab
+    processDeletePacketImageRequest
 } from './packet-processor.js';
+
+import {
+    generateDraftPacketFromTab,
+    processCreatePacketRequestFromTab,
+    processCreatePacketRequest,
+    enhanceHtml
+} from './create-utils.js';
+
 
 import {
     setMediaPlaybackState,
@@ -43,7 +45,8 @@ import {
     activeMediaPlayback,
     resetActiveMediaPlayback,
     notifyUIsOfStateChange,
-    saveCurrentTime
+    saveCurrentTime,
+    setupOffscreenDocument
 } from '../background.js';
 import { checkAndPromptForCompletion } from './navigation-handler.js';
 
@@ -57,6 +60,31 @@ function debouncedSaveInstance(instance) {
         storage.savePacketInstance(instance);
     }, 1000); // Save after 1 second of inactivity
 }
+
+
+// --- START OF MODIFICATION: Helper for script injection ---
+/**
+ * Injects the page interceptor script into an HTML string before serving.
+ * @param {string} htmlContent The raw HTML content.
+ * @returns {string} The HTML content with the script tag injected.
+ */
+function injectInterceptorScript(htmlContent) {
+    if (!htmlContent || typeof htmlContent !== 'string') return '';
+    
+    // Get the full URL to the interceptor script at runtime.
+    const interceptorUrl = chrome.runtime.getURL('page_interceptor.js');
+    const scriptTag = `<script src="${interceptorUrl}"></script>`;
+
+    // Find the closing body tag and insert the script just before it for proper execution order.
+    const bodyEndIndex = htmlContent.toLowerCase().lastIndexOf('</body>');
+    if (bodyEndIndex !== -1) {
+        return htmlContent.slice(0, bodyEndIndex) + scriptTag + htmlContent.slice(bodyEndIndex);
+    }
+    
+    // As a fallback for malformed HTML, append the script at the end.
+    return htmlContent + scriptTag;
+}
+// --- END OF MODIFICATION ---
 
 
 // --- Context Request Handlers ---
@@ -160,20 +188,8 @@ async function handleOpenContent(data, sender, sendResponse) {
         sendResponse({ success: false, error: 'Missing instance data or targetCanonicalUrl' });
         return;
     }
-    
+
     if (openingContent.has(targetCanonicalUrl)) {
-        logger.log('MessageHandler:handleOpenContent', `Lock active for ${targetCanonicalUrl}. Focusing existing tab if possible.`);
-        try {
-            const allTabs = await chrome.tabs.query({});
-            for (const tab of allTabs) {
-                const context = await getPacketContext(tab.id);
-                if (context && context.instanceId === instanceId && context.canonicalPacketUrl === targetCanonicalUrl) {
-                    await chrome.tabs.update(tab.id, { active: true });
-                    if (tab.windowId) await chrome.windows.update(tab.windowId, { focused: true });
-                    break;
-                }
-            }
-        } catch (e) { /* Ignore errors during focus attempt */ }
         sendResponse({ success: true, message: 'Open already in progress.' });
         return;
     }
@@ -181,47 +197,35 @@ async function handleOpenContent(data, sender, sendResponse) {
     openingContent.add(targetCanonicalUrl); // Acquire lock
 
     try {
-        let targetTab = null;
         const allTabs = await chrome.tabs.query({});
         for (const tab of allTabs) {
             const context = await getPacketContext(tab.id);
             if (context && context.instanceId === instanceId && context.canonicalPacketUrl === targetCanonicalUrl) {
-                targetTab = tab;
-                break;
+                await chrome.tabs.update(tab.id, { active: true });
+                if (tab.windowId) await chrome.windows.update(tab.windowId, { focused: true });
+                sendResponse({ success: true, message: 'Focused existing tab.' });
+                return;
             }
         }
         
-        const contentItem = instance.contents.find(item => item.url === targetCanonicalUrl);
-        let finalUrlToOpen;
-
-        if (contentItem && contentItem.access === 'private') {
-            if (contentItem.publishContext) {
-                finalUrlToOpen = cloudStorage.constructPublicUrl(targetCanonicalUrl, contentItem.publishContext);
-            } else {
-                finalUrlToOpen = cloudStorage.getPublicUrl(targetCanonicalUrl);
-            }
-            if (!finalUrlToOpen) throw new Error(`Could not determine public URL for S3 key ${targetCanonicalUrl}.`);
-        } else {
-            finalUrlToOpen = targetCanonicalUrl;
+        let finalUrlToOpen = targetCanonicalUrl;
+        
+        const contentItem = instance.contents?.find(item => item.url === targetCanonicalUrl);
+        
+        if (contentItem && contentItem.origin === 'internal' && contentItem.publishContext) {
+            finalUrlToOpen = cloudStorage.constructPublicUrl(targetCanonicalUrl, contentItem.publishContext);
         }
 
+        const newTab = await chrome.tabs.create({ url: 'about:blank', active: false });
+        if (!newTab || typeof newTab.id !== 'number') throw new Error('Tab creation failed.');
+        
         const trustedIntent = {
             instanceId: instanceId,
             canonicalPacketUrl: targetCanonicalUrl,
         };
+        await storage.setSession({ [`trusted_intent_${newTab.id}`]: trustedIntent });
 
-        if (targetTab) {
-            await storage.setSession({ [`trusted_intent_${targetTab.id}`]: trustedIntent });
-            await chrome.tabs.update(targetTab.id, { url: finalUrlToOpen, active: true });
-            if (targetTab.windowId) await chrome.windows.update(targetTab.windowId, { focused: true });
-        } else {
-            const newTab = await chrome.tabs.create({ url: 'about:blank', active: false });
-            if (!newTab || typeof newTab.id !== 'number') throw new Error('Tab creation failed.');
-            
-            await storage.setSession({ [`trusted_intent_${newTab.id}`]: trustedIntent });
-
-            await chrome.tabs.update(newTab.id, { url: finalUrlToOpen, active: true });
-        }
+        await chrome.tabs.update(newTab.id, { url: finalUrlToOpen, active: true });
         
         sendResponse({ success: true });
     } catch (error) {
@@ -231,6 +235,7 @@ async function handleOpenContent(data, sender, sendResponse) {
         openingContent.delete(targetCanonicalUrl); // Release lock
     }
 }
+
 
 async function handleMarkUrlVisited(data, sendResponse) {
      const { packetId: instanceId, url } = data;
@@ -279,6 +284,38 @@ function findMediaItemInInstance(instance, url) {
     return instance.contents.find(item => item.url === url && item.format === 'audio');
 }
 
+async function ensureMediaIsCached(instanceId, url, lrl) {
+    const indexedDbKey = sanitizeForFileName(lrl);
+    const cachedAudio = await indexedDbStorage.getGeneratedContent(instanceId, indexedDbKey);
+    
+    if (cachedAudio && cachedAudio[0]?.content) {
+        logger.log("CacheHelper", `Cache HIT for ${lrl} in instance ${instanceId}`);
+        return { success: true, wasCached: true, content: cachedAudio[0].content };
+    }
+
+    logger.log("CacheHelper", `Cache MISS for ${lrl}. Fetching from cloud: ${url}`);
+    const instance = await storage.getPacketInstance(instanceId);
+    const mediaItem = findMediaItemInInstance(instance, url);
+    if (!mediaItem) {
+        throw new Error(`Media item with url ${url} not found in instance.`);
+    }
+
+    const downloadResult = await cloudStorage.downloadFile(url);
+    if (!downloadResult.success) {
+        throw new Error(`Failed to download audio from cloud: ${downloadResult.error}`);
+    }
+
+    const audioBuffer = await downloadResult.content.arrayBuffer();
+    await indexedDbStorage.saveGeneratedContent(instanceId, indexedDbKey, [{
+        name: lrl.split('/').pop(),
+        content: audioBuffer,
+        contentType: mediaItem.mimeType
+    }]);
+    
+    logger.log("CacheHelper", `Successfully fetched and cached ${lrl} for instance ${instanceId}`);
+    return { success: true, wasCached: false, content: audioBuffer };
+}
+
 async function handlePlaybackActionRequest(data, sender, sendResponse) {
     const { intent, instanceId, url, lrl } = data;
     try {
@@ -297,15 +334,10 @@ async function handlePlaybackActionRequest(data, sender, sendResponse) {
                 const mediaItem = findMediaItemInInstance(instance, url);
                 if (!mediaItem) throw new Error(`Could not find audio track with url ${url} in packet.`);
                 
-                const indexedDbKey = sanitizeForFileName(lrl);
-                const cachedAudio = await indexedDbStorage.getGeneratedContent(instance.instanceId, indexedDbKey);
-                if (!cachedAudio || !cachedAudio[0]?.content) {
-                    throw new Error("Could not find cached audio data in IndexedDB for instance.");
-                }
+                const cacheResult = await ensureMediaIsCached(instanceId, url, lrl);
+                const audioB64 = arrayBufferToBase64(cacheResult.content);
 
-                const audioB64 = arrayBufferToBase64(cachedAudio[0].content);
                 const startTime = mediaItem.currentTime || 0;
-
                 await controlAudioInOffscreen('play', { audioB64, mimeType: mediaItem.mimeType, url: url, instanceId, startTime });
 
                 const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -352,7 +384,69 @@ async function handlePlaybackActionRequest(data, sender, sendResponse) {
     }
 }
 
+export async function ensureHtmlIsCached(instanceId, url, lrl) {
+    const indexedDbKey = sanitizeForFileName(lrl);
+    const cachedHtml = await indexedDbStorage.getGeneratedContent(instanceId, indexedDbKey);
+
+    if (cachedHtml && cachedHtml[0]?.content) {
+        logger.log("CacheHelper", `Cache HIT for HTML ${lrl} in instance ${instanceId}`);
+        return { success: true, wasCached: true, content: cachedHtml[0].content };
+    }
+
+    logger.log("CacheHelper", `Cache MISS for HTML ${lrl}. Fetching from cloud: ${url}`);
+    const instance = await storage.getPacketInstance(instanceId);
+    const htmlItem = instance.contents.find(item => item.url === url && item.format === 'html');
+    if (!htmlItem) {
+        throw new Error(`HTML item with url ${url} not found in instance.`);
+    }
+
+    const downloadResult = await cloudStorage.downloadFile(url);
+    if (!downloadResult.success) {
+        throw new Error(`Failed to download HTML from cloud: ${downloadResult.error}`);
+    }
+
+    const htmlBuffer = await downloadResult.content.arrayBuffer();
+    await indexedDbStorage.saveGeneratedContent(instanceId, indexedDbKey, [{
+        name: lrl.split('/').pop(),
+        content: htmlBuffer,
+        contentType: htmlItem.mimeType
+    }]);
+
+    logger.log("CacheHelper", `Successfully fetched and cached HTML ${lrl} for instance ${instanceId}. Refreshing rules.`);
+    await ruleManager.addOrUpdatePacketRules(instance);
+    
+    return { success: true, wasCached: false, content: htmlBuffer };
+}
+
 const actionHandlers = {
+    'debug_clear_all_data': async (data, sender, sendResponse) => {
+        try {
+            await storage.clearAllPacketData();
+            sendResponse({ success: true });
+        } catch (error) {
+            logger.error('MessageHandler:debug_clear_all_data', 'Failed to clear all data', error);
+            sendResponse({ success: false, error: error.message });
+        }
+    },
+    'debug_clear_instance_caches': async (data, sender, sendResponse) => {
+        try {
+            await indexedDbStorage.clearInstanceCacheEntries();
+            sendResponse({ success: true });
+        } catch (error) {
+            logger.error('MessageHandler:debug_clear_instance_caches', 'Failed to clear instance caches', error);
+            sendResponse({ success: false, error: error.message });
+        }
+    },
+    'sidebar_opened': async (data, sender, sendResponse) => {
+        await storage.setSession({ isSidebarOpen: true });
+        await notifyUIsOfStateChange({ isSidebarOpen: true });
+        sendResponse({ success: true });
+    },
+    'sidebar_closed': async (data, sender, sendResponse) => {
+        await storage.setSession({ isSidebarOpen: false });
+        await notifyUIsOfStateChange({ isSidebarOpen: false, animate: true });
+        sendResponse({ success: true });
+    },
     'is_current_tab_packetizable': async (data, sender, sendResponse) => {
         try {
             const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -497,7 +591,6 @@ const actionHandlers = {
         await notifyUIsOfStateChange();
         sendResponse({success: true});
     },
-    'improve_draft_audio': (data, sender, sendResponse) => processImproveDraftAudio(data).then(sendResponse),
     'generate_packet_title': (data, sender, sendResponse) => {
         (async () => {
             try {
@@ -518,15 +611,43 @@ const actionHandlers = {
         return true; // Indicate that the response will be sent asynchronously
     },
     'get_draft_item_for_preview': async (data, sender, sendResponse) => {
-        const { rlr } = data; // Use 'rlr' (local resource locator)
+        const { rlr } = data;
         const sessionData = await storage.getSession('draftPacketForPreview');
         const draftPacket = sessionData?.draftPacketForPreview;
-        const item = draftPacket?.sourceContent.find(i => i.lrl === rlr);
-        if (item?.contentB64) {
-            const htmlContent = new TextDecoder().decode(base64Decode(item.contentB64));
-            sendResponse({ success: true, htmlContent, title: item.title });
+        
+        if (draftPacket && rlr) {
+            const item = draftPacket.sourceContent.find(i => i.lrl === rlr);
+            const indexedDbKey = sanitizeForFileName(rlr);
+            const storedContent = await indexedDbStorage.getGeneratedContent(draftPacket.id, indexedDbKey);
+            
+            if (item && storedContent && storedContent[0]?.content) {
+                let htmlContent = new TextDecoder().decode(storedContent[0].content);
+                htmlContent = injectInterceptorScript(htmlContent);
+                sendResponse({ success: true, htmlContent, title: item.title });
+            } else {
+                sendResponse({ success: false, error: 'Item content not found in IndexedDB.' });
+            }
         } else {
-            sendResponse({ success: false, error: 'Item not found or has no content.' });
+            sendResponse({ success: false, error: 'Draft packet or RLR not found.' });
+        }
+    },
+    'get_cached_html_content': async (data, sender, sendResponse) => {
+        const { instanceId, lrl } = data;
+        if (instanceId && lrl) {
+            const indexedDbKey = sanitizeForFileName(lrl);
+            const storedContent = await indexedDbStorage.getGeneratedContent(instanceId, indexedDbKey);
+
+            if (storedContent && storedContent[0]?.content) {
+                let htmlContent = new TextDecoder().decode(storedContent[0].content);
+                htmlContent = injectInterceptorScript(htmlContent);
+                const instance = await storage.getPacketInstance(instanceId);
+                const item = instance.contents.find(i => i.lrl === lrl);
+                sendResponse({ success: true, htmlContent, title: item?.title || 'Cached Page' });
+            } else {
+                sendResponse({ success: false, error: 'Cached content not found.' });
+            }
+        } else {
+            sendResponse({ success: false, error: 'Missing instanceId or lrl.' });
         }
     },
     'get_presigned_url': async (data, sender, sendResponse) => {
@@ -544,7 +665,6 @@ const actionHandlers = {
     'sync_draft_group': (data, sender, sendResponse) => tabGroupHandler.syncDraftGroup(data.desiredUrls).then(sendResponse),
     'focus_or_create_draft_tab': (data, sender, sendResponse) => tabGroupHandler.focusOrCreateDraftTab(data.url).then(sendResponse),
     'cleanup_draft_group': (data, sender, sendResponse) => tabGroupHandler.cleanupDraftGroup().then(sendResponse),
-    'generate_custom_page': (data, sender, sendResponse) => processGenerateCustomPageRequest(data).then(sendResponse),
     'delete_packet_image': (data, sender, sendResponse) => processDeletePacketImageRequest(data).then(sendResponse),
     'save_packet_image': async (data, sender, sendResponse) => {
         await storage.savePacketImage(data.image);
@@ -554,8 +674,7 @@ const actionHandlers = {
     'initiate_packet_creation_from_tab': (data, sender, sendResponse) => processCreatePacketRequestFromTab(sender.tab.id).then(sendResponse),
     'initiate_packet_creation': (data, sender, sendResponse) => processCreatePacketRequest(data, sender.tab?.id).then(sendResponse),
     'instantiate_packet': async (data, sender, sendResponse) => {
-        const newInstanceId = `inst_${Date.now()}_${Math.random().toString(36).substring(2, 10)}`;
-        const result = await instantiatePacket(data.imageId, newInstanceId, sender.tab?.id);
+        const result = await instantiatePacket(data.imageId, data.instanceId, sender.tab?.id);
         if (result.success) {
             chrome.runtime.sendMessage({ action: 'packet_instance_created', data: { instance: result.instance } });
         }
@@ -586,6 +705,29 @@ const actionHandlers = {
         sendResponse(visitResult);
     },
     'open_content': handleOpenContent,
+    'open_and_close_preview': async (data, sender, sendResponse) => {
+        const { url, instanceId } = data;
+        const tabId = sender.tab?.id;
+        
+        if (!tabId || !instanceId || !url) {
+            return sendResponse({ success: false, error: 'Missing required data from preview page.' });
+        }
+        try {
+            const instance = await storage.getPacketInstance(instanceId);
+            if (!instance) {
+                throw new Error(`Instance ${instanceId} not found.`);
+            }
+            // Reuse the existing handler to open the new tab
+            await handleOpenContent({ instance, url }, sender, () => {});
+            
+            // Now, close the original preview tab
+            await chrome.tabs.remove(tabId);
+            sendResponse({ success: true });
+        } catch (error) {
+            logger.error('MessageHandler:open_and_close_preview', 'Error during preview transition', error);
+            sendResponse({ success: false, error: error.message });
+        }
+    },
     'open_content_from_overlay': async (data, sender, sendResponse) => {
         const { url } = data;
         const { instanceId } = activeMediaPlayback;
@@ -635,7 +777,33 @@ const actionHandlers = {
     'debug_dump_idb': (data, sender, sendResponse) => {
         indexedDbStorage.debugDumpIndexedDb();
         sendResponse({ success: true });
-    }
+    },
+    'ensure_media_is_cached': async (data, sender, sendResponse) => {
+        const { instanceId, url, lrl } = data;
+        try {
+            await ensureMediaIsCached(instanceId, url, lrl);
+            sidebarHandler.notifySidebar('media_cache_populated', { instanceId, lrl });
+            sendResponse({ success: true });
+        } catch (error) {
+            logger.error("MessageHandler:ensure_media_is_cached", "Failed to cache media", error);
+            sendResponse({ success: false, error: error.message });
+        }
+    },
+    'ensure_html_is_cached': async (data, sender, sendResponse) => {
+        const { instanceId, url, lrl } = data;
+        try {
+            await ensureHtmlIsCached(instanceId, url, lrl);
+            sidebarHandler.notifySidebar('html_cache_populated', { instanceId, lrl });
+            sendResponse({ success: true });
+        } catch (error) {
+            logger.error("MessageHandler:ensure_html_is_cached", "Failed to cache HTML", error);
+            sendResponse({ success: false, error: error.message });
+        }
+    },
+    'request_rule_refresh': async (data, sender, sendResponse) => {
+        await ruleManager.refreshAllRules();
+        sendResponse({ success: true });
+    },
 };
 
 export function handleMessage(message, sender, sendResponse) {

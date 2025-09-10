@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Unlock",
   "version": "1.97",
-  "description": "Unlock your web browser",
+  "description": "Unlock the web",
   "action": {
     "default_icon": {
       "16": "images/icon16.png",
@@ -38,8 +38,15 @@
   },
   "web_accessible_resources": [
     {
-      "resources": [ "overlay.js", "overlay.css" ],
-      "matches": [ "<all_urls>" ]
+      "resources": [
+        "overlay.js",
+        "overlay.css",
+        "preview.html",
+        "page_interceptor.js"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
     }
   ],
   "side_panel": {

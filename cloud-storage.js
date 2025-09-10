@@ -127,12 +127,8 @@ const cloudStorage = {
         return { success: false, error: `Download failed (${response.status}): ${errorText || response.statusText}`, status: response.status };
       }
 
-      let content; const contentType = response.headers.get('content-type');
-      if (contentType && contentType.includes('application/json')) { content = await response.json(); }
-      else { content = await response.text(); } 
-
       logger.log('CloudStorage', 'File downloaded successfully using V4 signature', { filePath: cleanedFilePath });
-      return { success: true, content: content };
+      return { success: true, content: response };
 
     } catch (error) {
       logger.error('CloudStorage', 'Download error', { filePath, error });

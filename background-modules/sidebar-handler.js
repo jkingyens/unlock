@@ -74,7 +74,6 @@ export function notifySidebar(action, data, retry = true) {
         const lastError = chrome.runtime.lastError;
         if (lastError) {
              const errorMsg = lastError.message || '';
-             // --- THE FIX: Added a check for the "port closed" error ---
              const isExpectedError = errorMsg.includes("Could not establish connection") || 
                                      errorMsg.includes("Receiving end does not exist") ||
                                      errorMsg.includes("The message port closed before a response was received");
@@ -82,7 +81,6 @@ export function notifySidebar(action, data, retry = true) {
              if (!isExpectedError) {
                   logger.warn('SidebarHandler:notify', 'Send failed with an unexpected error', { action, error: errorMsg });
              }
-             // --- END of the fix ---
              isSidebarReady = false;
              if (retry) {
                  pendingSidebarNotifications.push({ action, data: data, timestamp: Date.now() });
@@ -102,23 +100,20 @@ export async function processPendingNotifications() {
     pendingSidebarNotifications = [];
 
     for (const n of notificationsToProcess) {
-        // --- THE FIX: Intercept completion-related notifications to re-verify state ---
         if ((n.action === 'show_confetti' || n.action === 'prompt_close_tab_group')) {
             const instanceId = n.data.packetId || n.data.instanceId;
             if (instanceId) {
                 try {
                     const instance = await storage.getPacketInstance(instanceId);
-                    // If the instance has been deleted or completion has been acknowledged, drop the notification.
                     if (!instance || instance.completionAcknowledged) {
                         logger.log('SidebarHandler:processPending', `Skipping stale completion notification for ${instanceId}`, { action: n.action });
-                        continue; // Skip to the next notification
+                        continue; 
                     }
                 } catch (e) {
                     logger.error('SidebarHandler:processPending', `Error checking instance state for pending notification`, e);
                 }
             }
         }
-        // --- END of the fix ---
         
         notifySidebar(n.action, n.data, false);
     }
@@ -130,7 +125,6 @@ export async function processPendingNotifications() {
  * @param {object} sender - Message sender details.
  * @param {function} sendResponse - Callback to acknowledge the message.
  */
-// *** FIX: Added the 'data' parameter to correct the function signature. ***
 export async function handleSidebarReady(data, sender, sendResponse) {
      logger.log('SidebarHandler:handleSidebarReady', 'Ready message received from sidebar UI');
 
