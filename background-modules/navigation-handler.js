@@ -29,6 +29,7 @@ import {
 import * as sidebarHandler from './sidebar-handler.js';
 import * as tabGroupHandler from './tab-group-handler.js';
 import { ensureHtmlIsCached } from './message-handlers.js';
+import cloudStorage from '../cloud-storage.js';
 
 const pendingVisits = {};
 const pendingNavigationActionTimers = new Map();
@@ -100,6 +101,43 @@ export async function onCommitted(details) {
     if (details.frameId !== 0) return;
     const url = details.url;
     if (!url || (!url.startsWith('http') && !url.startsWith('chrome-extension://'))) return;
+
+    // --- START OF BUG FIX ---
+    // Before processing any navigation, check if this is a navigation to our internal
+    // preview page. If it is, we must verify the content is still in the cache.
+    // This handles cases where the browser is restarted, and the cache is cleared.
+    if (url.includes('/preview.html')) {
+        try {
+            const urlParams = new URL(url).searchParams;
+            const instanceId = urlParams.get('instanceId');
+            const lrl = urlParams.get('lrl');
+
+            if (instanceId && lrl) {
+                const decodedLrl = decodeURIComponent(lrl);
+                const indexedDbKey = sanitizeForFileName(decodedLrl);
+                const cachedContent = await indexedDbStorage.getGeneratedContent(instanceId, indexedDbKey);
+
+                // If the content is NOT in the cache, the tab should be redirected to the original cloud URL.
+                if (!cachedContent || !cachedContent[0]?.content) {
+                    logger.warn(`[NavigationHandler Tab ${details.tabId}]`, `Cache MISS for preview page. Redirecting to cloud URL.`);
+                    const instance = await storage.getPacketInstance(instanceId);
+                    const item = instance?.contents.find(i => i.lrl === decodedLrl);
+                    
+                    if (item && item.url && item.publishContext) {
+                        const fallbackUrl = cloudStorage.constructPublicUrl(item.url, item.publishContext);
+                        if (fallbackUrl) {
+                            // Redirect the tab and stop further processing for this stale navigation event.
+                            chrome.tabs.update(details.tabId, { url: fallbackUrl });
+                            return; 
+                        }
+                    }
+                }
+            }
+        } catch (error) {
+            logger.error(`[NavigationHandler Tab ${details.tabId}]`, "Error during preview page cache validation", error);
+        }
+    }
+    // --- END OF BUG FIX ---
     
     logger.log(`[NavigationHandler Tab ${details.tabId}]`, `onCommitted event fired for URL: ${url}`);
     await processNavigationEvent(details.tabId, url, details);
@@ -154,7 +192,7 @@ async function processNavigationEvent(tabId, finalUrl, details) {
     clearPendingVisitTimer(tabId);
     logger.log(logPrefix, 'Cleared any pending visit timers for this tab.');
 
-    // --- START OF FIX ---
+    // --- START OF FIX: Replaced from previous turn ---
     // If the navigation is to our internal preview page (e.g., from a back button press),
     // we must re-establish the tab's context based on the URL parameters.
     if (finalUrl.includes('/preview.html')) {
