@@ -584,7 +584,12 @@ const actionHandlers = {
         await notifyUIsOfStateChange({ animateMomentMention });
        
         if (animateMomentMention) {
-            activeMediaPlayback.lastTrippedMoment = null;
+            setTimeout(() => {
+                if (activeMediaPlayback.lastTrippedMoment) {
+                    activeMediaPlayback.lastTrippedMoment = null;
+                    notifyUIsOfStateChange({ animate: true });
+                }
+            }, 6000);
         }
     },
     'overlay_setting_updated': async (data, sender, sendResponse) => {
