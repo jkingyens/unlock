@@ -495,6 +495,15 @@ const actionHandlers = {
     'open_sidebar_and_navigate': async (data, sender, sendResponse) => {
         sendResponse({ success: true, message: "User should open side panel via action icon." });
     },
+    'debug_clear_instance_caches': async (data, sender, sendResponse) => {
+        try {
+            await indexedDbStorage.clearInstanceCacheEntries();
+            sendResponse({ success: true });
+        } catch (error) {
+            logger.error('MessageHandler:debug_clear_instance_caches', 'Failed to clear instance caches', error);
+            sendResponse({ success: false, error: error.message });
+        }
+    },
     'audio_time_update': async (data) => {
         if (!activeMediaPlayback.instance || activeMediaPlayback.url !== data.url || !activeMediaPlayback.isPlaying) {
             return;
