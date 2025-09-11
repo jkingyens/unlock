@@ -115,14 +115,20 @@ export async function instantiatePacket(imageId, preGeneratedInstanceId, initiat
                 if (!lrl) continue;
                 
                 const indexedDbKey = sanitizeForFileName(lrl);
-                const storedContent = await indexedDbStorage.getGeneratedContent(imageId, indexedDbKey);
-                
+                const contentSourceId = settings.quickCopyEnabled ? instanceId : imageId;
+                const storedContent = await indexedDbStorage.getGeneratedContent(contentSourceId, indexedDbKey);
+
                 if (!storedContent || !storedContent[0]?.content) {
                     throw new Error(`Cannot instantiate: Content for ${lrl} is missing from IndexedDB for image ${imageId}.`);
                 }
 
                 const contentToUpload = storedContent[0].content;
-                const contentType = item.contentType || item.mimeType;
+                let contentType = storedContent[0]?.contentType || item.contentType || item.mimeType;
+                if (!contentType && item.format === 'html') {
+                    contentType = 'text/html';
+                } else if (!contentType && item.format === 'audio') {
+                    contentType = item.mimeType || 'audio/mpeg';
+                }
                 const cloudPath = `packets/${instanceId}${lrl.startsWith('/') ? lrl : '/' + lrl}`;
 
                 const uploadResult = await cloudStorage.uploadFile(cloudPath, contentToUpload, contentType, 'private');
