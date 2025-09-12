@@ -106,7 +106,6 @@ export async function instantiatePacket(imageId, preGeneratedInstanceId, initiat
 
         sendInstantiationProgress(instanceId, 10, "Configuration checked", packetImage.title);
 
-        // Create a deep copy of the content that we can safely modify.
         const packetInstanceContents = JSON.parse(JSON.stringify(packetImage.sourceContent));
         
         for (const item of packetInstanceContents) {
@@ -117,7 +116,7 @@ export async function instantiatePacket(imageId, preGeneratedInstanceId, initiat
                 const indexedDbKey = sanitizeForFileName(lrl);
                 const contentSourceId = settings.quickCopyEnabled ? instanceId : imageId;
                 const storedContent = await indexedDbStorage.getGeneratedContent(contentSourceId, indexedDbKey);
-
+                
                 if (!storedContent || !storedContent[0]?.content) {
                     throw new Error(`Cannot instantiate: Content for ${lrl} is missing from IndexedDB for image ${imageId}.`);
                 }
@@ -128,6 +127,8 @@ export async function instantiatePacket(imageId, preGeneratedInstanceId, initiat
                     contentType = 'text/html';
                 } else if (!contentType && item.format === 'audio') {
                     contentType = item.mimeType || 'audio/mpeg';
+                } else if (!contentType && item.format === 'pdf') {
+                    contentType = 'application/pdf';
                 }
                 const cloudPath = `packets/${instanceId}${lrl.startsWith('/') ? lrl : '/' + lrl}`;
 
@@ -154,21 +155,10 @@ export async function instantiatePacket(imageId, preGeneratedInstanceId, initiat
             }
         }
 
-        // --- START: Pruning Logic ---
-        // Create sets of all valid URLs and LRLs that exist in the final instance content.
         const validUrls = new Set(packetInstanceContents.map(item => item.url).filter(Boolean));
         const validLrls = new Set(packetInstanceContents.map(item => item.lrl).filter(Boolean));
-
-        // Filter the moments from the original image to only include those whose source content exists in this instance.
-        const filteredMoments = (packetImage.moments || []).filter(moment => {
-            return validLrls.has(moment.sourceUrl);
-        });
-
-        // Filter the checkpoints to only include those where all required items are present in this instance.
-        const filteredCheckpoints = (packetImage.checkpoints || []).filter(checkpoint => {
-            return checkpoint.requiredItems.every(item => validUrls.has(item.url));
-        });
-        // --- END: Pruning Logic ---
+        const filteredMoments = (packetImage.moments || []).filter(moment => validLrls.has(moment.sourceUrl));
+        const filteredCheckpoints = (packetImage.checkpoints || []).filter(checkpoint => checkpoint.requiredItems.every(item => validUrls.has(item.url)));
 
         const packetInstance = {
             instanceId: instanceId,
@@ -249,13 +239,8 @@ export async function processDeletePacketsRequest(data, initiatorTabId = null) {
             }
             
             await storage.deletePacketInstance(instanceId);
-            logger.log('PacketProcessor:delete', `Deleted PacketInstance: ${instanceId}`);
-
             await ruleManager.removePacketRules(instanceId);
-            logger.log('PacketProcessor:delete', `Removed redirect rules for: ${instanceId}`);
-
             sendProgressNotification('packet_instance_deleted', { packetId: instanceId, source: 'user_action' });
-            
             deletedCount++;
         } catch (error) {
             logger.error('PacketProcessor:delete', `Error deleting packet ${instanceId}`, error);
@@ -279,31 +264,21 @@ export async function processDeletePacketImageRequest(data) {
     if (!imageId) {
         return { success: false, error: "Image ID is required for deletion." };
     }
-    logger.log('PacketProcessor:processDeletePacketImage', 'Processing delete request for image:', imageId);
     let errors = [];
-
     try {
         await storage.deletePacketImage(imageId);
-        logger.log('PacketProcessor:deleteImage', `Deleted PacketImage: ${imageId}`);
     } catch (error) {
         logger.error('PacketProcessor:deleteImage', `Error deleting packet image ${imageId}`, error);
         errors.push(error.message);
     }
-
     try {
         await indexedDbStorage.deleteGeneratedContentForImage(imageId);
-        logger.log('PacketProcessor:deleteImage', `Deleted IndexedDB content for: ${imageId}`);
     } catch (error) {
         logger.error('PacketProcessor:deleteImage', `Error deleting IDB content for image ${imageId}`, error);
         errors.push(error.message);
     }
-    
     sendProgressNotification('packet_image_deleted', { imageId: imageId });
-    
-    return {
-        success: errors.length === 0,
-        errors: errors
-    };
+    return { success: errors.length === 0, errors: errors };
 }
 
 export async function importImageFromUrl(url) {
@@ -313,38 +288,32 @@ export async function importImageFromUrl(url) {
 
     try {
         sendStencilProgressNotification(newImageId, 'init', 'active', 'Downloading...', 10, 'Importing Packet...');
-
         const response = await fetch(url, { cache: 'no-store' });
         if (!response.ok) throw new Error(`Failed to download packet from URL (${response.status})`);
         const sharedImage = await response.json();
-
         if (!sharedImage || !sharedImage.title || !Array.isArray(sharedImage.sourceContent)) {
             throw new Error("Invalid packet image format in downloaded JSON.");
         }
-        
         const importedPacketImage = { ...sharedImage, id: newImageId, created: new Date().toISOString(), shareUrl: url };
         
         for (const contentItem of importedPacketImage.sourceContent) {
+            // --- START OF FIX ---
             if (contentItem.origin === 'internal' && contentItem.contentB64) {
-                const contentBuffer = base64Decode(contentItem.contentB64);
+            // --- END OF FIX ---
+                const contentBuffer = await base64Decode(contentItem.contentB64);
                 const indexedDbKey = sanitizeForFileName(contentItem.lrl);
-                
                 await indexedDbStorage.saveGeneratedContent(newImageId, indexedDbKey, [{
                     name: contentItem.lrl.split('/').pop(),
                     content: contentBuffer,
                     contentType: contentItem.contentType || contentItem.mimeType
                 }]);
-
                 delete contentItem.contentB64;
             }
         }
 
         await storage.savePacketImage(importedPacketImage);
-        logger.log('PacketProcessor:importImageFromUrl', 'Packet image imported and content stored in IndexedDB.', { newImageId, originalUrl: url });
-        
         sendStencilProgressNotification(newImageId, 'complete', 'completed', 'Ready in Library', 100);
         sendProgressNotification('packet_image_created', { image: importedPacketImage });
-
         return { success: true, imageId: newImageId };
 
     } catch (error) {
@@ -359,18 +328,14 @@ export async function publishImageForSharing(imageId) {
     if (!(await cloudStorage.initialize())) {
         return { success: false, error: "Cloud storage not initialized. Cannot share." };
     }
-
     try {
         const packetImage = await storage.getPacketImage(imageId);
         if (!packetImage) return { success: false, error: `Packet image ${imageId} not found.` };
-        
         const imageForExport = JSON.parse(JSON.stringify(packetImage));
-
         for (const contentItem of imageForExport.sourceContent) {
             if (contentItem.origin === 'internal' && contentItem.lrl) {
                 const indexedDbKey = sanitizeForFileName(contentItem.lrl);
                 const storedContent = await indexedDbStorage.getGeneratedContent(imageId, indexedDbKey);
-                
                 if (storedContent && storedContent[0]?.content) {
                     contentItem.contentB64 = arrayBufferToBase64(storedContent[0].content);
                 } else {
@@ -378,17 +343,13 @@ export async function publishImageForSharing(imageId) {
                 }
             }
         }
-
         const jsonString = JSON.stringify(imageForExport);
         const shareFileName = `shared/img_${imageId.replace(/^img_/, '')}_${Date.now()}.json`;
-
         const uploadResult = await cloudStorage.uploadFile(shareFileName, jsonString, 'application/json', 'public-read');
 
         if (uploadResult.success && uploadResult.fileName) {
             const publicUrl = cloudStorage.getPublicUrl(uploadResult.fileName);
             if (!publicUrl) return { success: false, error: "Failed to construct public URL after upload." };
-            
-            logger.log('PacketProcessor:publishImageForSharing', 'Image published for sharing.', { imageId, shareUrl: publicUrl });
             return { success: true, shareUrl: publicUrl, message: "Packet link ready to share!" };
         } else {
             return { success: false, error: `Failed to upload shareable image: ${uploadResult.error || 'Unknown cloud error'}` };

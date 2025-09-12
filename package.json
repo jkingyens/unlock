@@ -1,0 +1,11 @@
+{
+  "name": "unlock-cli",
+  "version": "1.97",
+  "description": "A CLI for creating and managing Unlock packets.",
+  "preferGlobal": true,
+  "bin": {
+    "pkt": "ext/cli.js"
+  },
+  "author": "Jeff Kingyens",
+  "license": "MIT"
+}
