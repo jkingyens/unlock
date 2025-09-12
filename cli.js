@@ -75,14 +75,15 @@ function createTemplateConfig() {
 /**
  * Validates a packet image object.
  * @param {object} packetImage The packet image object to validate.
- * @returns {Array<string>} An array of validation errors, or an empty array if valid.
+ * @returns {{errors: Array<string>, warnings: Array<string>}} An object containing arrays of validation errors and warnings.
  */
 function validatePacketSchema(packetImage) {
   const errors = [];
+  const warnings = [];
 
   if (!packetImage || typeof packetImage !== 'object') {
     errors.push('Packet image is not a valid JSON object.');
-    return errors;
+    return { errors, warnings };
   }
 
   // Check top-level keys
@@ -104,6 +105,28 @@ function validatePacketSchema(packetImage) {
   }
   if (!Array.isArray(packetImage.sourceContent)) {
     errors.push('Key "sourceContent" must be an array.');
+  } else {
+    const formatExtensionMap = {
+      html: ['.html', '.htm'],
+      pdf: ['.pdf'],
+      audio: ['.mp3', '.m4a', 'aac', '.ogg', '.wav'],
+    };
+
+    for (const item of packetImage.sourceContent) {
+      if (item.origin === 'internal' && item.format && item.content) {
+        const expectedExtensions = formatExtensionMap[item.format];
+        if (expectedExtensions) {
+          const fileExtension = path.extname(item.content).toLowerCase();
+          if (!expectedExtensions.includes(fileExtension)) {
+            warnings.push(
+              `Possible mismatch for item "${item.title || 'Untitled'}": Format is "${
+                item.format
+              }" but file extension is "${fileExtension}".`
+            );
+          }
+        }
+      }
+    }
   }
 
   // Check for duplicate URLs
@@ -133,7 +156,7 @@ function validatePacketSchema(packetImage) {
     }
   }
 
-  return errors;
+  return { errors, warnings };
 }
 
 /**
@@ -536,11 +559,16 @@ async function main() {
     const fileContent = fs.readFileSync(filePath, 'utf8');
     const packetImage = JSON.parse(fileContent);
     let errors = [];
+    let warnings = [];
 
     if (command === 'validate') {
-        errors = validatePacketSchema(packetImage);
+        const validationResult = validatePacketSchema(packetImage);
+        errors = validationResult.errors;
+        warnings = validationResult.warnings;
     } else if (command === 'winnable') {
-        errors = validatePacketSchema(packetImage);
+        const validationResult = validatePacketSchema(packetImage);
+        errors = validationResult.errors;
+        warnings = validationResult.warnings;
         if (errors.length === 0) {
             errors = validatePacketWinnability(packetImage);
         }
@@ -549,12 +577,20 @@ async function main() {
         process.exit(0);
     }
 
+    if (warnings.length > 0) {
+        console.log(`\n${colors.yellow}⚠️  Warnings found for "${filename}":${colors.reset}`);
+        warnings.forEach(warn => console.log(`  - ${warn}`));
+    }
+
     if (errors.length === 0) {
-      console.log(`✅ Success: Packet image "${filename}" is valid and completable.`);
+      console.log(`\n✅ Success: Packet image "${filename}" passes validation.`);
+      if(warnings.length > 0) {
+          console.log(`${colors.grey}(Please review the warnings above)${colors.reset}`);
+      }
       process.exit(0);
     } else {
-      console.error(`❌ Validation failed for "${filename}":`);
-      errors.forEach(err => console.error(`- ${err}`));
+      console.error(`\n❌ Validation failed for "${filename}":`);
+      errors.forEach(err => console.error(`  - ${err}`));
       process.exit(1);
     }
   } catch (parseError) {

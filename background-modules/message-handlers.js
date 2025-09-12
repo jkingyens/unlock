@@ -48,7 +48,7 @@ import {
     saveCurrentTime,
     setupOffscreenDocument
 } from '../background.js';
-import { checkAndPromptForCompletion } from './navigation-handler.js';
+import { checkAndPromptForCompletion, startVisitTimer } from './navigation-handler.js';
 
 const PENDING_VIEW_KEY = 'pendingSidebarView';
 const openingContent = new Set(); // Lock to prevent opening multiple tabs for the same URL
@@ -62,32 +62,17 @@ function debouncedSaveInstance(instance) {
 }
 
 
-// --- START OF MODIFICATION: Helper for script injection ---
-/**
- * Injects the page interceptor script into an HTML string before serving.
- * @param {string} htmlContent The raw HTML content.
- * @returns {string} The HTML content with the script tag injected.
- */
 function injectInterceptorScript(htmlContent) {
     if (!htmlContent || typeof htmlContent !== 'string') return '';
-    
-    // Get the full URL to the interceptor script at runtime.
     const interceptorUrl = chrome.runtime.getURL('page_interceptor.js');
     const scriptTag = `<script src="${interceptorUrl}"></script>`;
-
-    // Find the closing body tag and insert the script just before it for proper execution order.
     const bodyEndIndex = htmlContent.toLowerCase().lastIndexOf('</body>');
     if (bodyEndIndex !== -1) {
         return htmlContent.slice(0, bodyEndIndex) + scriptTag + htmlContent.slice(bodyEndIndex);
     }
-    
-    // As a fallback for malformed HTML, append the script at the end.
     return htmlContent + scriptTag;
 }
-// --- END OF MODIFICATION ---
 
-
-// --- Context Request Handlers ---
 async function handleGetContextForTab(data, sender, sendResponse) {
     const { tabId } = data;
     if (typeof tabId !== 'number') {
@@ -194,7 +179,7 @@ async function handleOpenContent(data, sender, sendResponse) {
         return;
     }
 
-    openingContent.add(targetCanonicalUrl); // Acquire lock
+    openingContent.add(targetCanonicalUrl); 
 
     try {
         const allTabs = await chrome.tabs.query({});
@@ -211,6 +196,52 @@ async function handleOpenContent(data, sender, sendResponse) {
         let finalUrlToOpen = targetCanonicalUrl;
         
         const contentItem = instance.contents?.find(item => item.url === targetCanonicalUrl);
+        
+        if (contentItem && contentItem.format === 'pdf' && contentItem.origin === 'internal' && contentItem.lrl) {
+            let cachedContent = await indexedDbStorage.getGeneratedContent(instance.instanceId, sanitizeForFileName(contentItem.lrl));
+
+            if (!cachedContent || !cachedContent[0]?.content) {
+                logger.warn('MessageHandler:handleOpenContent', `PDF content for "${contentItem.title}" not found. Attempting to re-download.`);
+                const cacheResult = await ensurePdfIsCached(instanceId, targetCanonicalUrl, contentItem.lrl);
+                if (!cacheResult.success) {
+                    throw new Error(`Failed to re-download missing PDF content: ${cacheResult.error}`);
+                }
+                cachedContent = [{ content: cacheResult.content }];
+            }
+
+            const contentBuffer = cachedContent[0].content;
+            const contentB64 = arrayBufferToBase64(contentBuffer);
+            
+            await setupOffscreenDocument();
+            const offscreenResponse = await chrome.runtime.sendMessage({
+                target: 'offscreen',
+                type: 'create-blob-url-from-buffer',
+                data: {
+                    bufferB64: contentB64,
+                    type: 'application/pdf'
+                }
+            });
+
+            if (!offscreenResponse?.success) {
+                throw new Error(offscreenResponse.error || 'Failed to create blob URL in offscreen document.');
+            }
+            
+            const blobUrl = offscreenResponse.blobUrl;
+            const newTab = await chrome.tabs.create({ url: blobUrl, active: true });
+            
+            // Manually associate the new tab with the packet context
+            await setPacketContext(newTab.id, instanceId, targetCanonicalUrl, newTab.url);
+            if (await shouldUseTabGroups()) {
+                await tabGroupHandler.ensureTabInGroup(newTab.id, instance);
+            }
+            await sidebarHandler.updateActionForTab(newTab.id);
+
+            // Manually start the visit timer since webNavigation listeners won't fire for blob URLs
+            startVisitTimer(newTab.id, instanceId, targetCanonicalUrl, '[handleOpenContent:PDF]');
+
+            sendResponse({ success: true, tabId: newTab.id });
+            return;
+        }
         
         if (contentItem && contentItem.origin === 'internal' && contentItem.publishContext) {
             finalUrlToOpen = cloudStorage.constructPublicUrl(targetCanonicalUrl, contentItem.publishContext);
@@ -229,13 +260,12 @@ async function handleOpenContent(data, sender, sendResponse) {
         
         sendResponse({ success: true });
     } catch (error) {
-        logger.error('MessageHandler:handleOpenContent', 'Error opening content', {instanceId, targetCanonicalUrl, error});
+        logger.error('MessageHandler:handleOpenContent', 'Error opening content', error);
         sendResponse({ success: false, error: error.message || 'Unknown error' });
     } finally {
-        openingContent.delete(targetCanonicalUrl); // Release lock
+        openingContent.delete(targetCanonicalUrl);
     }
 }
-
 
 async function handleMarkUrlVisited(data, sendResponse) {
      const { packetId: instanceId, url } = data;
@@ -305,7 +335,7 @@ async function ensureMediaIsCached(instanceId, url, lrl) {
         throw new Error(`Failed to download audio from cloud: ${downloadResult.error}`);
     }
 
-    const audioBuffer = await downloadResult.content.arrayBuffer();
+    const audioBuffer = downloadResult.content;
     await indexedDbStorage.saveGeneratedContent(instanceId, indexedDbKey, [{
         name: lrl.split('/').pop(),
         content: audioBuffer,
@@ -405,7 +435,7 @@ export async function ensureHtmlIsCached(instanceId, url, lrl) {
         throw new Error(`Failed to download HTML from cloud: ${downloadResult.error}`);
     }
 
-    const htmlBuffer = await downloadResult.content.arrayBuffer();
+    const htmlBuffer = downloadResult.content;
     await indexedDbStorage.saveGeneratedContent(instanceId, indexedDbKey, [{
         name: lrl.split('/').pop(),
         content: htmlBuffer,
@@ -416,6 +446,38 @@ export async function ensureHtmlIsCached(instanceId, url, lrl) {
     await ruleManager.addOrUpdatePacketRules(instance);
     
     return { success: true, wasCached: false, content: htmlBuffer };
+}
+
+export async function ensurePdfIsCached(instanceId, url, lrl) {
+    const indexedDbKey = sanitizeForFileName(lrl);
+    const cachedPdf = await indexedDbStorage.getGeneratedContent(instanceId, indexedDbKey);
+
+    if (cachedPdf && cachedPdf[0]?.content) {
+        logger.log("CacheHelper", `Cache HIT for PDF ${lrl} in instance ${instanceId}`);
+        return { success: true, wasCached: true, content: cachedPdf[0].content };
+    }
+
+    logger.log("CacheHelper", `Cache MISS for PDF ${lrl}. Fetching from cloud: ${url}`);
+    const instance = await storage.getPacketInstance(instanceId);
+    const pdfItem = instance.contents.find(item => item.url === url && item.format === 'pdf');
+    if (!pdfItem) {
+        throw new Error(`PDF item with url ${url} not found in instance.`);
+    }
+
+    const downloadResult = await cloudStorage.downloadFile(url);
+    if (!downloadResult.success) {
+        throw new Error(`Failed to download PDF from cloud: ${downloadResult.error}`);
+    }
+
+    const pdfBuffer = downloadResult.content;
+    await indexedDbStorage.saveGeneratedContent(instanceId, indexedDbKey, [{
+        name: lrl.split('/').pop(),
+        content: pdfBuffer,
+        contentType: pdfItem.mimeType || 'application/pdf'
+    }]);
+
+    logger.log("CacheHelper", `Successfully fetched and cached PDF ${lrl} for instance ${instanceId}.`);
+    return { success: true, wasCached: false, content: pdfBuffer };
 }
 
 const actionHandlers = {
@@ -487,7 +549,6 @@ const actionHandlers = {
             const tabContext = await getPacketContext(activeTab.id);
 
             if (tabContext && tabContext.instanceId) {
-                // Tier 1: Tab context takes precedence
                 context_to_send = {
                     instanceId: tabContext.instanceId,
                     instance: await storage.getPacketInstance(tabContext.instanceId),
@@ -495,7 +556,6 @@ const actionHandlers = {
                     currentUrl: tabContext.currentBrowserUrl,
                 };
             } else if (activeMediaPlayback.url && activeMediaPlayback.instance) {
-                // Tier 2: Fallback to active media context
                 context_to_send = {
                     instanceId: activeMediaPlayback.instanceId,
                     instance: activeMediaPlayback.instance,
@@ -503,7 +563,6 @@ const actionHandlers = {
                     currentUrl: activeTab.url,
                 };
             } else {
-                // Default: No context
                 context_to_send = { instanceId: null, instance: null };
             }
             sendResponse({ success: true, ...context_to_send });
@@ -613,7 +672,7 @@ const actionHandlers = {
                 sendResponse({ success: false, error: error.message });
             }
         })();
-        return true; // Indicate that the response will be sent asynchronously
+        return true; 
     },
     'get_draft_item_for_preview': async (data, sender, sendResponse) => {
         const { rlr } = data;
@@ -722,10 +781,8 @@ const actionHandlers = {
             if (!instance) {
                 throw new Error(`Instance ${instanceId} not found.`);
             }
-            // Reuse the existing handler to open the new tab
             await handleOpenContent({ instance, url }, sender, () => {});
             
-            // Now, close the original preview tab
             await chrome.tabs.remove(tabId);
             sendResponse({ success: true });
         } catch (error) {
@@ -805,6 +862,17 @@ const actionHandlers = {
             sendResponse({ success: false, error: error.message });
         }
     },
+    'ensure_pdf_is_cached': async (data, sender, sendResponse) => {
+        const { instanceId, url, lrl } = data;
+        try {
+            await ensurePdfIsCached(instanceId, url, lrl);
+            sidebarHandler.notifySidebar('pdf_cache_populated', { instanceId, lrl });
+            sendResponse({ success: true });
+        } catch (error) {
+            logger.error("MessageHandler:ensure_pdf_is_cached", "Failed to cache PDF", error);
+            sendResponse({ success: false, error: error.message });
+        }
+    },
     'request_rule_refresh': async (data, sender, sendResponse) => {
         await ruleManager.refreshAllRules();
         sendResponse({ success: true });
@@ -820,10 +888,9 @@ export function handleMessage(message, sender, sendResponse) {
                 try {
                     sendResponse({ success: false, error: err.message });
                 } catch (e) {
-                    // This error is expected if a response was already sent.
                 }
             });
-        return true; // Indicates async response
+        return true; 
     } else {
         logger.warn("MessageHandler", "Unknown action received", message.action);
         sendResponse({ success: false, error: `Unknown action: ${message.action}` });

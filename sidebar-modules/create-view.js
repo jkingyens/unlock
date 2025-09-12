@@ -222,6 +222,9 @@ function createDraftContentCard(contentItem, index) {
         iconHTML = '▶️';
         displayUrl = "Audio Preview";
         card.classList.add('media');
+    } else if (format === 'pdf') {
+        iconHTML = '📄';
+        displayUrl = "PDF Document";
     }
 
     card.title = `Click to open or focus tab: ${title}`;
@@ -550,32 +553,35 @@ function handleFileDrop(e) {
 
     if (e.dataTransfer.files) {
         for (const file of e.dataTransfer.files) {
-            const reader = new FileReader();
-            reader.onload = async (event) => {
-                const lrl = `/media/${sanitizeForFileName(file.name)}`;
-                const newMediaItem = {
-                    origin: 'internal',
-                    format: 'audio',
-                    access: 'private',
-                    lrl: lrl,
-                    title: file.name,
-                    mimeType: file.type,
-                };
-                
-                const audioBuffer = event.target.result;
-                const indexedDbKey = sanitizeForFileName(newMediaItem.lrl);
-                await indexedDbStorage.saveGeneratedContent(draftPacket.id, indexedDbKey, [{
-                    name: file.name,
-                    content: audioBuffer,
-                    contentType: newMediaItem.mimeType
-                }]);
+            if (file.type.startsWith('audio/') || file.type === 'application/pdf') {
+                const reader = new FileReader();
+                reader.onload = async (event) => {
+                    const format = file.type === 'application/pdf' ? 'pdf' : 'audio';
+                    const lrl = `/${format}s/${sanitizeForFileName(file.name)}`;
+                    const newMediaItem = {
+                        origin: 'internal',
+                        format: format,
+                        access: 'private',
+                        lrl: lrl,
+                        title: file.name,
+                        mimeType: file.type,
+                    };
+                    
+                    const fileBuffer = event.target.result;
+                    const indexedDbKey = sanitizeForFileName(newMediaItem.lrl);
+                    await indexedDbStorage.saveGeneratedContent(draftPacket.id, indexedDbKey, [{
+                        name: file.name,
+                        content: fileBuffer,
+                        contentType: newMediaItem.mimeType
+                    }]);
 
-                draftPacket.sourceContent.push(newMediaItem);
-                renderDraftContentList();
-                await sendMessageToBackground({ action: 'request_rule_refresh' });
-                await storage.setSession({ 'draftPacketForPreview': draftPacket });
-            };
-            reader.readAsArrayBuffer(file);
+                    draftPacket.sourceContent.push(newMediaItem);
+                    renderDraftContentList();
+                    await sendMessageToBackground({ action: 'request_rule_refresh' });
+                    await storage.setSession({ 'draftPacketForPreview': draftPacket });
+                };
+                reader.readAsArrayBuffer(file);
+            }
         }
     }
 }

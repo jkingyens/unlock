@@ -80,7 +80,7 @@ const cloudStorage = {
     });
   },
   
-  async downloadFile(filePath) {
+ async downloadFile(filePath) {
     if (!(await this.initialize())) { return { success: false, error: 'Client not initialized.' }; }
     if (!filePath) { return { success: false, error: 'Missing required filePath for downloadFile.' }; }
     if (!this.activeConfig.credentials?.accessKey || !this.activeConfig.credentials?.secretKey) { return { success: false, error: 'Missing Access Key or Secret Key in active settings.' }; }
@@ -105,8 +105,6 @@ const cloudStorage = {
         throw new Error(`Invalid storage provider type: ${provider}`);
       }
       
-      logger.log('CloudStorage', 'Attempting to download file with V4 signature', { endpoint, pathForSigning });
-      
       const headers = new Headers(); 
       headers.set('Host', host); 
 
@@ -128,7 +126,12 @@ const cloudStorage = {
       }
 
       logger.log('CloudStorage', 'File downloaded successfully using V4 signature', { filePath: cleanedFilePath });
-      return { success: true, content: response };
+      
+      // --- START OF FIX ---
+      // This ensures we get the raw binary data for any file type.
+      const contentBuffer = await response.arrayBuffer();
+      return { success: true, content: contentBuffer };
+      // --- END OF FIX ---
 
     } catch (error) {
       logger.error('CloudStorage', 'Download error', { filePath, error });
@@ -136,7 +139,7 @@ const cloudStorage = {
       return { success: false, error: error.message || 'Unknown download error' };
     }
   },
-
+  
   async generatePresignedGetUrl(filePath, expirationSeconds = 3600, publishContext, extraQueryParams = {}) {
     if (!publishContext || !publishContext.storageConfigId) {
         logger.error('CloudStorage:generatePresignedGetUrl', 'CRITICAL: publishContext with storageConfigId is required for signing.', { filePath });

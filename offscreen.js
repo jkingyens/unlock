@@ -22,7 +22,7 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
         audio.onplay = () => {
             if (timeUpdateInterval) clearInterval(timeUpdateInterval);
             timeUpdateInterval = setInterval(() => {
-                if (!audio.paused && chrome.runtime?.id) { // Check context before sending
+                if (!audio.paused && chrome.runtime?.id) { 
                     chrome.runtime.sendMessage({
                         action: 'audio_time_update',
                         data: {
@@ -41,7 +41,7 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
         audio.onended = () => {
             if (timeUpdateInterval) clearInterval(timeUpdateInterval);
             timeUpdateInterval = null;
-            if (chrome.runtime?.id) { // Check context before sending
+            if (chrome.runtime?.id) { 
                 chrome.runtime.sendMessage({
                     action: 'media_playback_complete',
                     data: {
@@ -183,16 +183,36 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
         if (request.target !== 'offscreen') return false;
 
         switch (request.type) {
-        case 'create-blob-url':
-            try {
-                const blob = new Blob([request.data.html], { type: 'text/html' });
-                const blobUrl = URL.createObjectURL(blob);
-                sendResponse({ success: true, blobUrl: blobUrl });
-            } catch (error) {
-                sendResponse({ success: false, error: error.message });
-            }
-            return false;
-        case 'parse-html-for-tts-and-links':
+            case 'create-blob-url':
+                try {
+                    const blob = new Blob([request.data.html], { type: 'text/html' });
+                    const blobUrl = URL.createObjectURL(blob);
+                    sendResponse({ success: true, blobUrl: blobUrl });
+                } catch (error) {
+                    sendResponse({ success: false, error: error.message });
+                }
+                return false;
+            case 'create-blob-url-from-buffer':
+                try {
+                    const buffer = base64ToAb(request.data.bufferB64);
+                    // --- DEBUG LOGGING START ---
+                    const firstBytes = new Uint8Array(buffer.slice(0, 8));
+                    const magicNumber = Array.from(firstBytes).map(byte => String.fromCharCode(byte)).join('');
+                    console.log(`[DEBUG_LOG 3/3] Offscreen:handleMessages - Received buffer to create blob`, {
+                        bufferSize: buffer.byteLength,
+                        magicNumber: magicNumber,
+                        isValidPDF: magicNumber.startsWith('%PDF')
+                    });
+                    // --- DEBUG LOGGING END ---
+
+                    const blob = new Blob([buffer], { type: request.data.type });
+                    const blobUrl = URL.createObjectURL(blob);
+                    sendResponse({ success: true, blobUrl: blobUrl });
+                } catch (error) {
+                    sendResponse({ success: false, error: error.message });
+                }
+                return false; 
+            case 'parse-html-for-tts-and-links':
                 try {
                     const parser = new DOMParser();
                     const doc = parser.parseFromString(request.data.html, 'text/html');
@@ -201,14 +221,10 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
                         plainText: '',
                         linkMappings: []
                     };
-
-                    // --- START OF FIX: Replaced TreeWalker with a robust recursive parser ---
                     function processNode(node) {
                         if (node.nodeType === Node.TEXT_NODE) {
-                            // Append text content, normalizing whitespace
                             context.plainText += node.textContent.replace(/\s+/g, ' ').trim() + ' ';
                         } else if (node.nodeType === Node.ELEMENT_NODE) {
-                            // If it's a link, record its position BEFORE processing its children
                             if (node.tagName === 'A' && node.hasAttribute('data-timestampable')) {
                                 const href = node.getAttribute('href');
                                 if (href && !context.linkMappings.some(m => m.href === href)) {
@@ -219,29 +235,20 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
                                     });
                                 }
                             }
-                            
-                            // Recursively process child nodes
                             node.childNodes.forEach(processNode);
-
-                            // Add a newline for block-level elements to simulate paragraph breaks
                             const blockElements = ['P', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'DIV', 'LI'];
                             if (blockElements.includes(node.tagName)) {
                                 context.plainText += '\n';
                             }
                         }
                     }
-
                     processNode(doc.body);
-                    // --- END OF FIX ---
-
-                    // Clean up extra whitespace for the final result
                     context.plainText = context.plainText.replace(/\s+/g, ' ').trim();
-
                     sendResponse({ success: true, data: { plainText: context.plainText, linkMappings: context.linkMappings } });
                 } catch (error) {
                     sendResponse({ success: false, error: error.message });
                 }
-                return false; // Synchronous response
+                return false;
             case 'control-audio':
                 sendResponse(handleAudioControl(request.data));
                 return false; 

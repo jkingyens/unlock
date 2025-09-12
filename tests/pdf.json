@@ -1,0 +1,65 @@
+{
+  "id": "img_test_checkpoint_16627584002",
+  "title": "check pdf attachment",
+  "created": "2025-09-09T21:20:00Z",
+  "sourceContent": [
+    {
+      "origin": "internal",
+      "format": "pdf",
+      "access": "private",
+      "lrl": "/pages/visa.pdf",
+      "title": "Packet Summary (Does Not Grant Progress)",
+      "context": "An overview of this test packet.",
+      "cacheable": true,
+      "content": "../../evisa.pdf"
+    },
+    {
+      "origin": "external",
+      "format": "html",
+      "access": "public",
+      "url": "https://en.wikipedia.org/wiki/Test_case",
+      "title": "Core Concept A (Part 1 of Checkpoint 1)",
+      "context": "The first required item to complete the first checkpoint."
+    },
+    {
+      "origin": "external",
+      "format": "html",
+      "access": "public",
+      "url": "https://en.wikipedia.org/wiki/Unit_testing",
+      "title": "Core Concept B (Part 2 of Checkpoint 1)",
+      "context": "The second required item to complete the first checkpoint."
+    },
+    {
+      "origin": "external",
+      "format": "html",
+      "access": "public",
+      "url": "https://en.wikipedia.org/wiki/Software_testing",
+      "title": "Key Example (Completes Checkpoint 2)",
+      "context": "Visiting this single item will complete the second checkpoint."
+    },
+    {
+      "origin": "external",
+      "format": "html",
+      "access": "public",
+      "url": "https://en.wikipedia.org/wiki/Test-driven_development",
+      "title": "Further Reading (Optional)",
+      "context": "This item is not part of any checkpoint and will not affect progress."
+    }
+  ],
+  "checkpoints": [
+    {
+      "title": "Checkpoint 1: Understand Core Concepts",
+      "requiredItems": [
+        { "url": "https://en.wikipedia.org/wiki/Test_case" },
+        { "url": "https://en.wikipedia.org/wiki/Unit_testing" }
+      ]
+    },
+    {
+      "title": "Checkpoint 2: Review Key Example",
+      "requiredItems": [
+        { "url": "https://en.wikipedia.org/wiki/Software_testing" }
+      ]
+    }
+  ],
+  "moments": []
+}
