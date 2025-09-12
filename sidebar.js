@@ -59,7 +59,8 @@ async function initialize() {
     settingsView.setupSettingsListeners();
     setupGlobalListeners();
 
-    chrome.runtime.connect({ name: 'sidebar' });
+    // --- REMOVED: chrome.runtime.connect({ name: 'sidebar' }); ---
+    // The explicit messaging system is more reliable.
 
     try {
         await sendMessageToBackground({ action: 'sidebar_ready' });
@@ -98,8 +99,7 @@ function setupGlobalListeners() {
     });
     domRefs.settingsBtn?.addEventListener('click', () => navigateTo('settings'));
 
-    // --- START OF FIX ---
-    // Use the Page Visibility API to reliably inform the background script of the sidebar's state.
+    // --- START OF FIX: Restored stable visibility handling ---
     document.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'visible') {
             sendMessageToBackground({ action: 'sidebar_opened' });
@@ -197,7 +197,6 @@ async function updateSidebarContext(contextData) {
     const newPacketUrl = contextData?.packetUrl ?? null;
     let newInstanceData = contextData?.instance ?? null;
 
-    // MODIFIED: Add check for active media playback
     if (newInstanceId === null && currentView === 'packet-detail' && currentInstanceId === activeMediaInstanceId) {
         logger.log('Sidebar:updateSidebarContext', 'Ignoring context change to null because active media packet is being viewed.');
         return;
@@ -301,7 +300,6 @@ async function handleBackgroundMessage(message) {
             }
             break;
         case 'playback_state_updated':
-            // MODIFIED: Track active media instance ID
             if (data.state === 'playing') {
                 activeMediaInstanceId = data.instanceId;
             } else if (activeMediaInstanceId === data.instanceId) {
