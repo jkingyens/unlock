@@ -522,6 +522,28 @@ async function createContentCard(contentItem, instance) {
                  <canvas class="waveform-canvas"></canvas>
                  <div class="waveform-marker-container"></div>
             </div>`;
+    } else if (format === 'pdf') {
+        let iconHTML = '📄';
+        let displayUrl = title;
+        
+        card.innerHTML = `
+            <div class="card-icon-container" style="display: flex; align-items: center; padding-left: 12px;">
+                 <div class="download-icon" style="display: none;"></div>
+                 <div class="card-icon">${iconHTML}</div>
+            </div>
+            <div class="card-text">
+                <div class="card-title">${title}</div>
+                <div class="card-url">${displayUrl}</div>
+            </div>`;
+        
+        const iconContainer = card.querySelector('.card-icon-container');
+        const indexedDbKey = sanitizeForFileName(lrl);
+        const cachedContent = await indexedDbStorage.getGeneratedContent(instance.instanceId, indexedDbKey);
+
+        if (!cachedContent || !cachedContent[0]?.content) {
+            iconContainer.classList.add('needs-download');
+            iconContainer.querySelector('.download-icon').style.display = 'block';
+        }
     }
     
     if (!isClickable) {
@@ -567,9 +589,19 @@ async function createContentCard(contentItem, instance) {
             playMediaInCard(card, contentItem, instance);
         } else {
             card.addEventListener('click', async (e) => {
-                if (card.classList.contains('opening')) {
-                    return;
+                if (card.classList.contains('opening')) return;
+
+                const iconContainer = card.querySelector('.card-icon-container');
+                if (iconContainer && iconContainer.classList.contains('needs-download')) {
+                    iconContainer.classList.remove('needs-download');
+                    iconContainer.classList.add('loading');
+                    await sendMessageToBackground({
+                        action: 'ensure_pdf_is_cached',
+                        data: { instanceId: instance.instanceId, url: url, lrl: lrl }
+                    });
+                    iconContainer.classList.remove('loading');
                 }
+                
                 card.classList.add('opening');
                 setTimeout(() => card.classList.remove('opening'), 2000);
 

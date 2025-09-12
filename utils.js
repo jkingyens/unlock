@@ -792,13 +792,16 @@ function arrayBufferToBase64(buffer) {
     return btoa(binary);
 }
 
-function base64Decode(base64) {
-    const binaryString = atob(base64);
-    const bytes = new Uint8Array(binaryString.length);
-    for (let i = 0; i < binaryString.length; i++) {
-        bytes[i] = binaryString.charCodeAt(i);
+// Replace the old base64Decode function with this new async one.
+async function base64Decode(base64) {
+    const dataUrl = `data:application/octet-stream;base64,${base64}`;
+    try {
+        const response = await fetch(dataUrl);
+        return await response.arrayBuffer();
+    } catch (error) {
+        logger.error('Utils:base64Decode', 'Failed to decode base64 using fetch.', error);
+        throw new Error('Could not decode base64 data.');
     }
-    return bytes.buffer;
 }
 
 function sanitizeForFileName(input) {
