@@ -1,68 +1,72 @@
-# Unlock
+# Unlock: Reprogramming the Web
 
-Unlock is a Chrome extension to unlock the web. It fundamentally transforms the web from being a sea of content "out there" that you merely consume into a programmable system for building experiences to completing tasks and get shit done. It shifts the nature of the web as a surface for reading into a surface for doing. It expands the web from a repository of public documents to include your own private realms that reference a mix of extenral public pages and internal documents only accessible to you. Think of this like a container format but for end users. While HTML is a core piece of this, it treats media files like audio and pdf files as native types. All of these types and more get bundled into packets. We have a CLI for creating, manipulating and publishing them. The focus of the chrome extension is for executing packets as the end user. This extension also serves as a working prototype for mobile native applications we are buiding next.
+Unlock is a Chrome extension that reimagines the web as an interactive, programmable environment. It moves beyond passive consumption, transforming the web from a surface for *reading* into a surface for *doing*.
 
-[@jkingyens.bsky.social](https://bsky.app/profile/jkingyens.bsky.social)
+With Unlock, you can create "packets" that bundle public webpages with your own private documents, media, and interactive elements. This creates self-contained experiences for accomplishing tasks, completing projects, or exploring topics in depth. The extension serves as the runtime for these packets and is a prototype for upcoming native mobile applications.
 
 ---
 
-## CLI Setup
+### Core Features
 
-To use the command-line tool (`pkt`) for validating and exporting packets, follow these steps.
+* **From Content to Experiences**: Shift from merely browsing content to engaging with structured, task-oriented experiences.
+* **Private Realms**: Seamlessly blend public web content with your own private notes, media, and generated pages.
+* **A New Container Format**: Think of Unlock packets as a container for the web, treating HTML, audio, and PDFs as native components of a larger experience.
+* **Powerful Tooling**: A command-line interface (`pkt`) allows for the creation, validation, and publication of packets.
 
-1. Install the Command
+---
 
-The recommended way to install the CLI is to configure npm to use a local directory, which avoids all permission issues.
+### Getting Started
 
-First, create a directory for global packages and configure npm to use it:
+#### CLI Setup
 
-```
+To use the `pkt` command-line tool for managing your packets, follow these installation steps.
+
+**1. Install the Command**
+
+To avoid potential permission issues, we recommend configuring `npm` to use a local directory for global packages.
+
+First, create the directory and configure `npm`:
+```shell
 mkdir ~/.npm-global
 npm config set prefix '~/.npm-global'
 ```
 
-Next, add this new directory to your shell's configuration file (e.g., ~/.zshrc, ~/.bash_profile, or ~/.bashrc):
-
-```
+Next, add the new directory to your shell's `PATH` (e.g., in `~/.zshrc`, `~/.bash_profile`, or `~/.bashrc`):
+```shell
 export PATH=~/.npm-global/bin:$PATH
 ```
 
-Finally, open a new terminal and, from the project's root directory, run:
-
-```
+Finally, open a new terminal and run `npm link` from the project's root directory:
+```shell
 npm link
 ```
+The `pkt` command will now be available globally in your terminal.
 
-The pkt command should now be available everywhere.
+**2. Create Your Config File**
 
-2. Create Your Config File
-
-Once the pkt command is installed, create the configuration file in your home directory:
-
-```
+With the CLI installed, generate the configuration file in your home directory:
+```shell
 pkt config
 ```
+This creates a file at `~/.unlockrc`. You must edit this file to add your cloud storage and LLM API keys.
 
-This will create a file at ~/.unlockrc. You must edit this file to add your cloud storage and LLM API keys.
+**3. Test Your Credentials**
 
-3. Test Your Credentials
-
-After editing the config file, you can verify that your keys and settings are correct by running:
-
-```
+After editing your config file, verify that your credentials and settings are correct:
+```shell
 pkt test-creds
 ```
 
-Loading the Extension
+#### Loading the Extension
 
-To test the extension, you need to load it as an unpacked extension in a Chromium-based browser (like Google Chrome, Arc, or Brave).
+To run the extension locally, you'll need to load it as an unpacked extension in a Chromium-based browser (e.g., Google Chrome, Arc, Brave).
 
-Navigate to chrome://extensions in your browser.
+1.  Navigate to `chrome://extensions` in your browser.
+2.  Enable **Developer mode** using the toggle switch.
+3.  Click the **Load unpacked** button.
+4.  In the file dialog, navigate to your project and select the `ext` folder.
 
-Enable "Developer mode" using the toggle switch, which is usually in the top-right corner.
+The Unlock extension will now appear in your list of extensions. To apply any code changes you make, simply click the "Reload" icon on the extension's card.
 
-Click the "Load unpacked" button that appears.
-
-In the file selection dialog, navigate to your project directory and select the ext folder.
-
-The "Unlock" extension should now appear in your list of extensions. As you make changes to the code, you can click the "Reload" icon on the extension's card to apply them.
+---
+*Connect with the creator on Bluesky: [@jkingyens.bsky.social](https://bsky.app/profile/jkingyens.bsky.social)*
