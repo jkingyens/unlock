@@ -1,12 +1,9 @@
 // ext/background-modules/sidebar-handler.js
-// REVISED: The function signature for handleSidebarReady has been corrected to accept
-// the 'data' argument from the message handler. This fixes a TypeError that occurred
-// because the arguments were being misinterpreted.
+// FINAL FIX: Corrected a TypeError caused by not awaiting the result of chrome.tabs.query,
+// which prevented tab reordering and syncing from working correctly.
 
 import { logger, storage, isSidePanelAvailable, getPacketContext } from '../utils.js';
 
-let pendingSidebarNotifications = [];
-let isSidebarReady = false;
 let activeInstanceId = null; // Tracks the InstanceID the background thinks the sidebar should be focused on
 
 export async function updateActionForTab(tabId) {
@@ -55,16 +52,18 @@ export function getActivePacketId() {
     return activeInstanceId;
 }
 
-export function notifySidebar(action, data, retry = true) {
-    const noisyActions = ['update_sidebar_context', 'playback_state_updated'];
-    if (!noisyActions.includes(action)) {
-        logger.log('SidebarHandler:notify', 'Attempting', { action });
-    }
-
+// --- START OF FIX: More resilient notification system ---
+export async function notifySidebar(action, data) {
     if (!isSidePanelAvailable()) {
         return;
     }
-
+    
+    // Proactively check if the sidebar is open before attempting to send a message.
+    const { isSidebarOpen } = await storage.getSession({ isSidebarOpen: false });
+    if (!isSidebarOpen) {
+        return; // Don't even try to send if we know it's closed.
+    }
+    
     const messageData = { ...data };
     if ('instanceId' in messageData && !('packetId' in messageData)) {
          messageData.packetId = messageData.instanceId;
@@ -81,43 +80,11 @@ export function notifySidebar(action, data, retry = true) {
              if (!isExpectedError) {
                   logger.warn('SidebarHandler:notify', 'Send failed with an unexpected error', { action, error: errorMsg });
              }
-             isSidebarReady = false;
-             if (retry) {
-                 pendingSidebarNotifications.push({ action, data: data, timestamp: Date.now() });
-             }
-        } else {
-             if (!isSidebarReady) {
-                  isSidebarReady = true;
-                  processPendingNotifications();
-             }
         }
     });
 }
+// --- END OF FIX ---
 
-export async function processPendingNotifications() {
-    if (pendingSidebarNotifications.length === 0 || !isSidebarReady) return;
-    const notificationsToProcess = [...pendingSidebarNotifications];
-    pendingSidebarNotifications = [];
-
-    for (const n of notificationsToProcess) {
-        if ((n.action === 'show_confetti' || n.action === 'prompt_close_tab_group')) {
-            const instanceId = n.data.packetId || n.data.instanceId;
-            if (instanceId) {
-                try {
-                    const instance = await storage.getPacketInstance(instanceId);
-                    if (!instance || instance.completionAcknowledged) {
-                        logger.log('SidebarHandler:processPending', `Skipping stale completion notification for ${instanceId}`, { action: n.action });
-                        continue; 
-                    }
-                } catch (e) {
-                    logger.error('SidebarHandler:processPending', `Error checking instance state for pending notification`, e);
-                }
-            }
-        }
-        
-        notifySidebar(n.action, n.data, false);
-    }
-}
 
 /**
  * Handles the 'sidebar_ready' message from the sidebar UI script.
@@ -127,9 +94,5 @@ export async function processPendingNotifications() {
  */
 export async function handleSidebarReady(data, sender, sendResponse) {
      logger.log('SidebarHandler:handleSidebarReady', 'Ready message received from sidebar UI');
-
-     isSidebarReady = true;
-     processPendingNotifications();
-
      sendResponse({ success: true, message: "Sidebar readiness acknowledged." });
 }

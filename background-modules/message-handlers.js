@@ -46,7 +46,8 @@ import {
     resetActiveMediaPlayback,
     notifyUIsOfStateChange,
     saveCurrentTime,
-    setupOffscreenDocument
+    setupOffscreenDocument,
+    stopAndClearActiveAudio
 } from '../background.js';
 import { checkAndPromptForCompletion, startVisitTimer } from './navigation-handler.js';
 
@@ -335,7 +336,7 @@ async function ensureMediaIsCached(instanceId, url, lrl) {
         throw new Error(`Failed to download audio from cloud: ${downloadResult.error}`);
     }
 
-    const audioBuffer = downloadResult.content;
+    const audioBuffer = await downloadResult.content.arrayBuffer();
     await indexedDbStorage.saveGeneratedContent(instanceId, indexedDbKey, [{
         name: lrl.split('/').pop(),
         content: audioBuffer,
@@ -435,7 +436,7 @@ export async function ensureHtmlIsCached(instanceId, url, lrl) {
         throw new Error(`Failed to download HTML from cloud: ${downloadResult.error}`);
     }
 
-    const htmlBuffer = downloadResult.content;
+    const htmlBuffer = await downloadResult.content.arrayBuffer();
     await indexedDbStorage.saveGeneratedContent(instanceId, indexedDbKey, [{
         name: lrl.split('/').pop(),
         content: htmlBuffer,
@@ -469,7 +470,7 @@ export async function ensurePdfIsCached(instanceId, url, lrl) {
         throw new Error(`Failed to download PDF from cloud: ${downloadResult.error}`);
     }
 
-    const pdfBuffer = downloadResult.content;
+    const pdfBuffer = await downloadResult.content.arrayBuffer();
     await indexedDbStorage.saveGeneratedContent(instanceId, indexedDbKey, [{
         name: lrl.split('/').pop(),
         content: pdfBuffer,
@@ -597,21 +598,15 @@ const actionHandlers = {
         activeMediaPlayback.duration = data.duration;
 
         const instance = activeMediaPlayback.instance;
-        let animateMomentMention = false;
+        let momentTripped = false;
         
         if (Array.isArray(instance.moments)) {
-            let momentTripped = false;
             instance.moments.forEach((moment, index) => {
                 if (moment.type === 'mediaTimestamp' && 
                     moment.sourceUrl === activeMediaPlayback.lrl &&
                     data.currentTime >= moment.timestamp &&
                     instance.momentsTripped[index] === 0) {
                     
-                    logger.log('MomentLogger:Media', `Tripping Moment #${index} for instance ${instance.instanceId}`, { 
-                        currentTime: data.currentTime, 
-                        requiredTimestamp: moment.timestamp 
-                    });
-
                     instance.momentsTripped[index] = 1;
                     momentTripped = true;
                     
@@ -621,11 +616,20 @@ const actionHandlers = {
                     );
 
                     if (revealedItem) {
+                        const momentId = `moment_${Date.now()}`;
                         activeMediaPlayback.lastTrippedMoment = {
+                            id: momentId,
                             title: revealedItem.title,
                             url: revealedItem.url
                         };
-                        animateMomentMention = true;
+                        notifyUIsOfStateChange({ animateMomentMention: true });
+                        
+                        setTimeout(() => {
+                            if (activeMediaPlayback.lastTrippedMoment?.id === momentId) {
+                                activeMediaPlayback.lastTrippedMoment = null;
+                                notifyUIsOfStateChange({ animate: true });
+                            }
+                        }, 5000);
                     }
                 }
             });
@@ -639,17 +643,13 @@ const actionHandlers = {
             mediaItem.currentTime = data.currentTime;
             mediaItem.duration = data.duration;
         }
-        
-        await notifyUIsOfStateChange({ animateMomentMention });
        
-        if (animateMomentMention) {
-            setTimeout(() => {
-                if (activeMediaPlayback.lastTrippedMoment) {
-                    activeMediaPlayback.lastTrippedMoment = null;
-                    notifyUIsOfStateChange({ animate: true });
-                }
-            }, 6000);
-        }
+        const fullStateForSidebar = {
+            ...activeMediaPlayback,
+            instance: activeMediaPlayback.instance,
+            momentsTripped: activeMediaPlayback.instance?.momentsTripped || [],
+        };
+        sidebarHandler.notifySidebar('playback_state_updated', fullStateForSidebar);
     },
     'overlay_setting_updated': async (data, sender, sendResponse) => {
         await notifyUIsOfStateChange();
@@ -747,10 +747,11 @@ const actionHandlers = {
     'delete_packets': async (data, sender, sendResponse) => {
         if (data?.packetIds && activeMediaPlayback.instanceId) {
             if (data.packetIds.includes(activeMediaPlayback.instanceId)) {
-                await resetActiveMediaPlayback();
+                await stopAndClearActiveAudio();
             }
         }
         const result = await processDeletePacketsRequest(data);
+        await notifyUIsOfStateChange(); 
         sendResponse(result);
     },
     'mark_url_visited': handleMarkUrlVisited,

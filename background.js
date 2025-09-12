@@ -48,7 +48,6 @@ async function migratePacketImagesIfNecessary() {
     const flags = await storage.getLocal([MIGRATION_FLAG_LRL]);
 
     if (flags[MIGRATION_FLAG_LRL]) {
-        logger.log('Background:Migration', 'All migrations already completed. Skipping.');
         return;
     }
 
@@ -63,10 +62,9 @@ async function migratePacketImagesIfNecessary() {
 
         if (image.sourceContent && Array.isArray(image.sourceContent)) {
             image.sourceContent.forEach(item => {
-                // If an item is internal and has a URL but no LRL, it's from the old format.
                 if (item.origin === 'internal' && item.url && !item.lrl) {
-                    item.lrl = item.url; // The old URL is the new LRL.
-                    item.url = null;      // The new URL should be null until published.
+                    item.lrl = item.url;
+                    item.url = null;
                     wasModified = true;
                 }
             });
@@ -74,7 +72,6 @@ async function migratePacketImagesIfNecessary() {
 
         if (wasModified) {
             migrationNeeded = true;
-            logger.log('Background:Migration', `Migrated LRL fields for packet image: ${imageId}`);
         }
         
         imagesToUpdate[imageId] = image;
@@ -82,7 +79,6 @@ async function migratePacketImagesIfNecessary() {
 
     if (migrationNeeded) {
         await storage.setLocal({ [CONFIG.STORAGE_KEYS.PACKET_IMAGES]: imagesToUpdate });
-        logger.log('Background:Migration', 'Completed LRL field migration for all applicable Packet Images.');
     }
 
     await storage.setLocal({ [MIGRATION_FLAG_LRL]: true });
@@ -93,7 +89,6 @@ async function migrateHtmlContentToIndexedDb() {
     const flags = await storage.getLocal([MIGRATION_FLAG_HTML]);
 
     if (flags[MIGRATION_FLAG_HTML]) {
-        logger.log('Background:Migration', 'HTML content migration already completed. Skipping.');
         return;
     }
 
@@ -108,7 +103,6 @@ async function migrateHtmlContentToIndexedDb() {
 
         if (image.sourceContent && Array.isArray(image.sourceContent)) {
             for (const item of image.sourceContent) {
-                // Check for internal HTML items with the old base64 property
                 if (item.origin === 'internal' && item.format === 'html' && item.contentB64) {
                     try {
                         const htmlBuffer = base64Decode(item.contentB64);
@@ -120,11 +114,9 @@ async function migrateHtmlContentToIndexedDb() {
                             contentType: item.contentType || 'text/html'
                         }]);
                         
-                        // Clean the property from the image object
                         delete item.contentB64;
                         
                         wasModified = true;
-                        logger.log('Background:Migration', `Migrated HTML content for item "${item.lrl}" in image: ${imageId}`);
 
                     } catch (error) {
                         logger.error('Background:Migration', `Failed to migrate HTML content for item in image ${imageId}`, { item, error });
@@ -140,9 +132,6 @@ async function migrateHtmlContentToIndexedDb() {
 
     if (migrationNeeded) {
         await storage.setLocal({ [CONFIG.STORAGE_KEYS.PACKET_IMAGES]: imagesToUpdate });
-        logger.log('Background:Migration', 'Completed saving all packet images after HTML content migration.');
-    } else {
-        logger.log('Background:Migration', 'No embedded HTML content found to migrate.');
     }
 
     await storage.setLocal({ [MIGRATION_FLAG_HTML]: true });
@@ -153,7 +142,7 @@ async function migrateSummaryPagesToCacheable() {
     const flags = await storage.getLocal([MIGRATION_FLAG_CACHEABLE]);
 
     if (flags[MIGRATION_FLAG_CACHEABLE]) {
-        return; // Migration already done
+        return;
     }
 
     logger.log('Background:Migration', 'Running one-time migration to mark summary pages as cacheable...');
@@ -176,13 +165,11 @@ async function migrateSummaryPagesToCacheable() {
 
         if (wasModified) {
             migrationNeeded = true;
-            logger.log('Background:Migration', `Marked internal HTML as cacheable for packet image: ${imageId}`);
         }
     }
 
     if (migrationNeeded) {
         await storage.setLocal({ [CONFIG.STORAGE_KEYS.PACKET_IMAGES]: imagesToUpdate });
-        logger.log('Background:Migration', 'Completed updating cacheable flags for all applicable packet images.');
     }
 
     await storage.setLocal({ [MIGRATION_FLAG_CACHEABLE]: true });
@@ -236,7 +223,6 @@ const initializationPromise = new Promise(resolve => {
     const isBrowserStartupComplete = await storage.getSession('isBrowserStartupComplete');
     if (isBrowserStartupComplete) {
         isRestoring = false;
-        logger.log('Background:Lifecycle', 'Service worker woke up. Initialization complete.');
         resolveInitialization();
     }
 })();
@@ -260,7 +246,6 @@ export async function resetActiveMediaPlayback() {
     if (activeMediaPlayback.isPlaying && activeMediaPlayback.instance) {
         await saveCurrentTime(activeMediaPlayback.instanceId, activeMediaPlayback.url, 0, true);
     }
-    logger.log('Background', 'CRITICAL LOG: Resetting global activeMediaPlayback state.');
     activeMediaPlayback = {
         instanceId: null, url: null, lrl: null, isPlaying: false, title: '',
         currentTime: 0, duration: 0, instance: null, lastTrippedMoment: null,
@@ -269,11 +254,19 @@ export async function resetActiveMediaPlayback() {
     await notifyUIsOfStateChange();
 }
 
+export async function stopAndClearActiveAudio() {
+    await controlAudioInOffscreen('stop', {});
+    activeMediaPlayback = {
+        instanceId: null, url: null, lrl: null, isPlaying: false, title: '',
+        currentTime: 0, duration: 0, instance: null, lastTrippedMoment: null,
+    };
+    await storage.removeSession(CONFIG.STORAGE_KEYS.ACTIVE_MEDIA_KEY);
+}
+
 const RULE_REFRESH_ALARM_NAME = 'refreshRedirectRules';
 
 async function initializeStorageAndSettings() {
     await storage.getSettings();
-    logger.log('Background', 'Storage and settings initialized/verified.');
 }
 
 let creatingOffscreenDocument;
@@ -326,8 +319,6 @@ export async function controlAudioInOffscreen(command, data) {
 async function injectOverlayScripts(tabId) {
     try {
         const tab = await chrome.tabs.get(tabId);
-        // This function now ONLY injects into external web pages.
-        // Internal pages like preview.html handle their own overlay.
         if (!tab || !tab.url || !tab.url.startsWith('http')) {
             return;
         }
@@ -361,7 +352,6 @@ export async function saveCurrentTime(instanceId, url, providedCurrentTime, isSt
         if (typeof timeToSave === 'number') {
             mediaItem.currentTime = isStopping ? 0 : timeToSave;
             await storage.savePacketInstance(instance);
-            logger.log('Background:saveCurrentTime', `Saved currentTime ${mediaItem.currentTime} for ${url}`);
         }
     } catch (error) {
         logger.error('Background:saveCurrentTime', 'Error saving playback time', error);
@@ -375,48 +365,51 @@ export async function notifyUIsOfStateChange(options) {
         ? effectiveOptions.isSidebarOpen
         : (await storage.getSession({ isSidebarOpen: false })).isSidebarOpen;
 
-    const fullStateForSidebar = {
-        ...activeMediaPlayback,
-        instance: activeMediaPlayback.instance,
-        momentsTripped: activeMediaPlayback.instance?.momentsTripped || [],
-        ...effectiveOptions
-    };
-    sidebarHandler.notifySidebar('playback_state_updated', fullStateForSidebar);
-
+    if (!effectiveOptions.excludeSidebar) {
+        const fullStateForSidebar = {
+            ...activeMediaPlayback,
+            instance: activeMediaPlayback.instance,
+            momentsTripped: activeMediaPlayback.instance?.momentsTripped || [],
+            ...effectiveOptions
+        };
+        sidebarHandler.notifySidebar('playback_state_updated', fullStateForSidebar);
+    }
+    
+    // --- START OF FIX: Revert to targeted active tab updates ---
     try {
-        const tabs = await chrome.tabs.query({ url: ["http://*/*", "https://*/*"] });
-        for (const tab of tabs) {
-            if (!tab.id) continue;
+        const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (!activeTab || !activeTab.id) return;
 
-            const overlayEnabled = await shouldShowOverlay();
-            let isPathBlocked = false;
-            if (tab.url) {
-                try {
-                    const url = new URL(tab.url);
-                    if (url.pathname === '/item') isPathBlocked = true;
-                } catch (e) {}
-            }
-
-            const lightweightStateForOverlay = {
-                isVisible: !isSidebarOpen && !!activeMediaPlayback.url && overlayEnabled && !isPathBlocked,
-                isPlaying: activeMediaPlayback.isPlaying,
-                title: activeMediaPlayback.title,
-                lastTrippedMoment: activeMediaPlayback.lastTrippedMoment,
-                showVisitedAnimation: !!effectiveOptions.showVisitedAnimation,
-                animate: !!effectiveOptions.animate,
-            };
-            
-            await injectOverlayScripts(tab.id);
-            await chrome.tabs.sendMessage(tab.id, {
-                action: 'update_overlay_state',
-                data: lightweightStateForOverlay
-            }).catch(() => {});
+        const overlayEnabled = await shouldShowOverlay();
+        let isPathBlocked = false;
+        if (activeTab.url) {
+            try {
+                const url = new URL(activeTab.url);
+                if (url.pathname === '/item') isPathBlocked = true;
+            } catch (e) {}
         }
+
+        const lightweightStateForOverlay = {
+            isVisible: !isSidebarOpen && !!activeMediaPlayback.url && overlayEnabled && !isPathBlocked,
+            isPlaying: activeMediaPlayback.isPlaying,
+            title: activeMediaPlayback.title,
+            lastTrippedMoment: activeMediaPlayback.lastTrippedMoment,
+            showVisitedAnimation: !!effectiveOptions.showVisitedAnimation,
+            animate: !!effectiveOptions.animate,
+        };
+        
+        await injectOverlayScripts(activeTab.id);
+        await chrome.tabs.sendMessage(activeTab.id, {
+            action: 'update_overlay_state',
+            data: lightweightStateForOverlay
+        }).catch(() => {});
+
     } catch (e) {
         if (!e.message.toLowerCase().includes('no tab with id')) {
             logger.error('Background:notifyUIs', 'Error notifying overlay', e);
         }
     }
+    // --- END OF FIX ---
 }
 
 export async function setMediaPlaybackState(newState, options = { animate: false, source: 'unknown' }) {
@@ -426,7 +419,6 @@ export async function setMediaPlaybackState(newState, options = { animate: false
     if (newInstanceId && (newInstanceId !== oldInstanceId || !activeMediaPlayback.instance)) {
         try {
             activeMediaPlayback.instance = await storage.getPacketInstance(newInstanceId);
-            logger.log('Background:setMediaPlaybackState', `Loaded/reloaded live instance data for ${newInstanceId} into active media state.`);
         } catch (error) {
             logger.error('Background:setMediaPlaybackState', `Failed to load instance ${newInstanceId}`, error);
             await resetActiveMediaPlayback();
@@ -460,7 +452,6 @@ async function restoreMediaStateOnStartup() {
 
 chrome.runtime.onInstalled.addListener(async (details) => {
     try {
-        logger.log('Background:onInstalled', `Extension ${details.reason}`);
         await initializeStorageAndSettings();
         
         await indexedDbStorage.garbageCollectIndexedDbContent();
@@ -474,11 +465,10 @@ chrome.runtime.onInstalled.addListener(async (details) => {
         
         await ruleManager.refreshAllRules();
         
-        logger.log('Background:onInstalled', 'Re-injecting overlay scripts into existing web tabs.');
         const tabs = await chrome.tabs.query({ url: ["http://*/*", "https://*/*"] });
         for (const tab of tabs) {
             if (tab.id) {
-                injectOverlayScripts(tab.id).catch(e => { /* Silently ignore errors for restricted pages */ });
+                injectOverlayScripts(tab.id).catch(e => {});
             }
         }
         
@@ -494,14 +484,12 @@ chrome.runtime.onInstalled.addListener(async (details) => {
         await chrome.storage.session.set({ isBrowserStartupComplete: true });
     } finally {
         isRestoring = false;
-        logger.log('Background:onInstalled', 'Installation complete. Navigation processing is now enabled.');
         resolveInitialization();
     }
 });
 
 chrome.runtime.onStartup.addListener(async () => {
     try {
-        logger.log('Background:onStartup', 'Browser startup detected. Navigation processing is paused.');
         await initializeStorageAndSettings();
 
         await initializationPromise;
@@ -519,17 +507,15 @@ chrome.runtime.onStartup.addListener(async () => {
         await garbageCollectTabContexts();
         await tabGroupHandler.cleanupDraftGroup();
         
-        logger.log('Background:onStartup', 'Injecting overlay scripts into existing web tabs.');
         const tabs = await chrome.tabs.query({ url: ["http://*/*", "https://*/*"] });
         for (const tab of tabs) {
             if (tab.id) {
-                injectOverlayScripts(tab.id).catch(e => { /* Silently ignore errors for restricted pages */ });
+                injectOverlayScripts(tab.id).catch(e => {});
             }
         }
         
     } finally {
         isRestoring = false;
-        logger.log('Background:onStartup', 'Startup process complete. Navigation processing is now enabled.');
         resolveInitialization();
     }
 });
@@ -574,7 +560,6 @@ async function reorderGroupFromChangeEvent(groupId) {
         if (instanceId) {
             const instance = await storage.getPacketInstance(instanceId);
             if (instance) {
-                logger.log('Background:reorderGroup', `Re-ordering group ${groupId} due to tab change.`);
                 await tabGroupHandler.orderTabsInGroup(groupId, instance);
             }
         }
@@ -589,7 +574,6 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     const tabContext = await getPacketContext(tabId);
 
     if (tabContext?.currentBrowserUrl?.startsWith('blob:') && tab.url !== tabContext.currentBrowserUrl) {
-        logger.log('Background:onUpdated', `Stale blob URL detected for tab ${tabId}. Attempting proactive restoration.`);
         
         try {
             const instance = await storage.getPacketInstance(tabContext.instanceId);
@@ -607,7 +591,6 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
                     });
 
                     if (offscreenResponse.success) {
-                        logger.log('Background:onUpdated', `Restoring content for tab ${tabId} with new blob URL.`);
                         const trustedIntent = {
                             instanceId: tabContext.instanceId,
                             canonicalPacketUrl: tabContext.canonicalPacketUrl
@@ -619,7 +602,6 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
                 }
             }
             
-            logger.warn('Background:onUpdated', `Could not restore blob content for tab ${tabId}. Falling back to cloud URL.`);
             const fallbackUrl = cloudStorage.constructPublicUrl(tabContext.canonicalPacketUrl, item.publishContext);
             if (fallbackUrl) {
                 await chrome.tabs.update(tabId, { url: fallbackUrl });
@@ -635,7 +617,6 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 chrome.tabs.onActivated.addListener(async (activeInfo) => {
     const closingState = await storage.getSession('isClosingGroup');
     if (closingState && closingState.isClosingGroup) {
-        logger.log('Background:onActivated', 'Ignoring tab activation event due to tab group closure in progress.');
         return;
     }
     
@@ -683,9 +664,6 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
              }
         }
     }
-
-    // Always notify the UI (especially the overlay) of the current media state
-    // when a tab is activated. This ensures stale overlays are hidden.
     await notifyUIsOfStateChange({ animate: false });
 });
 
@@ -714,7 +692,6 @@ function attachNavigationListeners() {
     const onCommittedWrapper = async (details) => {
         await initializationPromise;
         if (isRestoring) {
-            logger.log('Background:onCommitted', 'Ignoring navigation event during restore.', { url: details.url });
             return;
         }
         onCommitted(details);
@@ -722,7 +699,6 @@ function attachNavigationListeners() {
     const onHistoryStateUpdatedWrapper = async (details) => {
         await initializationPromise;
         if (isRestoring) {
-            logger.log('Background:onHistoryStateUpdated', 'Ignoring navigation event during restore.', { url: details.url });
             return;
         }
         onHistoryStateUpdated(details);
@@ -743,24 +719,19 @@ function attachNavigationListeners() {
     chrome.webNavigation.onHistoryStateUpdated.addListener(onHistoryStateUpdatedWrapper);
 }
 
-// The onConnect listener was removed as part of a previous fix.
-// The sidebar now uses explicit messages ('sidebar_opened', 'sidebar_closed')
-// for more reliable state management.
-
 async function garbageCollectTabContexts() {
-    logger.log('Background:GC', 'Starting garbage collection for tab contexts...');
     let itemsRemovedCount = 0;
     try {
         const allLocalData = await storage.getLocal(null);
-        if (!allLocalData) { logger.log('Background:GC', 'No local data.'); return 0; }
+        if (!allLocalData) { return 0; }
         const contextPrefix = CONFIG.STORAGE_KEYS.PACKET_CONTEXT_PREFIX;
         const contextKeys = Object.keys(allLocalData).filter(key => key.startsWith(contextPrefix));
-        if (contextKeys.length === 0) { logger.log('Background:GC', 'No context keys found.'); return 0; }
+        if (contextKeys.length === 0) { return 0; }
         let allTabs = [];
         try {
             allTabs = await chrome.tabs.query({});
         } catch (e) {
-            logger.error("Background:GC", "Failed to query tabs during GC, might be running too early or in a restricted context. Assuming no open tabs for this GC pass.", e);
+            logger.error("Background:GC", "Failed to query tabs during GC", e);
         }
         const existingTabIds = new Set(allTabs.map(tab => tab.id));
         const keysToRemove = [];
@@ -774,9 +745,6 @@ async function garbageCollectTabContexts() {
         if (keysToRemove.length > 0) {
             await storage.removeLocal(keysToRemove);
             itemsRemovedCount = keysToRemove.length;
-            logger.log('Background:GC', `Removed ${itemsRemovedCount} stale context entries.`);
-        } else {
-            logger.log('Background:GC', 'No stale context entries found.');
         }
     } catch (error) {
         logger.error('Background:GC', 'Error during context garbage collection', error);
@@ -794,9 +762,6 @@ async function garbageCollectTabContexts() {
                 statesRemovedCount++;
             }
         }
-        if (statesRemovedCount > 0) {
-             logger.log('Background:GC', `Removed ${statesRemovedCount} stale browser state entries.`);
-        }
     } catch(error) {
         logger.error('Background:GC', 'Error during browser state garbage collection', error);
     }
@@ -804,9 +769,7 @@ async function garbageCollectTabContexts() {
 }
 
 async function restoreContextOnStartup() {
-    logger.log('Background:restoreContext', 'Starting context restoration using tab order...');
     if (!(await shouldUseTabGroups())) {
-        logger.log('Background:restoreContext', 'Tab Groups disabled, skipping restoration.');
         return;
     }
     try {
@@ -822,7 +785,6 @@ async function restoreContextOnStartup() {
                 const tab = tabsInGroup[i];
                 const contentItem = tabbableContents[i];
                 if (tab && contentItem && contentItem.url) {
-                    logger.log('Background:restoreContext', `Restoring context for tab ${tab.id} to packet item "${contentItem.title}" based on tab order.`);
                     await storage.setSession({
                         [`trusted_intent_${tab.id}`]: {
                             instanceId: instance.instanceId,
@@ -836,7 +798,6 @@ async function restoreContextOnStartup() {
                 }
             }
         }
-        logger.log('Background:restoreContext', 'Context restoration finished.');
     } catch (error) {
         logger.error('Background:restoreContext', 'Error during context restoration', error);
     }

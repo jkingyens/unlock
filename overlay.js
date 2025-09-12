@@ -9,7 +9,6 @@ if (!window.unlockOverlayInitialized) {
         // --- Globals ---
         let overlay, playPauseBtn, playIcon, pauseIcon, overlayText, linkMention;
         let isVisible = false;
-        let momentTimeout = null;
 
         /**
          * Injects the SVG filter definitions required for the liquid glass effect.
@@ -85,15 +84,9 @@ if (!window.unlockOverlayInitialized) {
             if (state.lastTrippedMoment) {
                 linkMention.querySelector('.link-text').textContent = state.lastTrippedMoment.title;
                 linkMention.dataset.url = state.lastTrippedMoment.url;
-                clearTimeout(momentTimeout);
-                overlay.classList.add('moment-visible');
                 linkMention.classList.add('visible');
-                momentTimeout = setTimeout(() => {
-                    overlay.classList.remove('moment-visible');
-                    if (!overlay.classList.contains('moment-visible')) {
-                        linkMention.classList.remove('visible');
-                    }
-                }, 5000);
+            } else {
+                linkMention.classList.remove('visible');
             }
 
             if (state.showVisitedAnimation) {
@@ -125,16 +118,27 @@ if (!window.unlockOverlayInitialized) {
             return true;
         });
         
+        // --- START OF FIX: Proactive State Synchronization ---
+        // This listener ensures that if the overlay missed messages while the tab was
+        // inactive (or during a refresh), it gets the correct state as soon as the
+        // user focuses the tab again.
         document.addEventListener('visibilitychange', () => {
             if (document.visibilityState === 'visible') {
                 chrome.runtime.sendMessage({ action: 'get_playback_state' }, (state) => {
-                    if (!chrome.runtime.lastError && state) syncState(state);
+                    // Check for runtime errors, which can happen if the background script is restarting
+                    if (!chrome.runtime.lastError && state) {
+                        syncState(state);
+                    }
                 });
             }
         });
+        // --- END OF FIX ---
 
+        // Also fetch the initial state when the script first loads
         chrome.runtime.sendMessage({ action: 'get_playback_state' }, (initialState) => {
-            if (!chrome.runtime.lastError && initialState) syncState(initialState);
+            if (!chrome.runtime.lastError && initialState) {
+                syncState(initialState);
+            }
         });
     }
 
