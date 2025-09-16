@@ -48,6 +48,14 @@ export function setupDialogListeners() {
         if (event.target === domRefs.shareDialog) hideShareDialog();
     });
 
+    document.getElementById('toggle-qr-code-btn')?.addEventListener('click', () => {
+        const qrCodeContainer = document.getElementById('share-dialog-qrcode');
+        const toggleBtn = document.getElementById('toggle-qr-code-btn');
+        const isVisible = qrCodeContainer.style.display === 'block';
+        qrCodeContainer.style.display = isVisible ? 'none' : 'block';
+        toggleBtn.textContent = isVisible ? 'Show QR Code' : 'Hide QR Code';
+    });
+
     // Import Dialog
     domRefs.confirmImportDialogBtn?.addEventListener('click', handleImportPacket);
     domRefs.cancelImportDialogBtn?.addEventListener('click', hideImportDialog);
@@ -121,9 +129,26 @@ export async function exportPacketAndShowDialog(imageId) {
 
 export function showShareDialog(url) {
     const dialog = domRefs.shareDialog;
-    if (!dialog || !domRefs.shareDialogUrlInput || !domRefs.copyShareLinkBtn) return;
+    const qrCodeContainer = document.getElementById('share-dialog-qrcode');
+    if (!dialog || !domRefs.shareDialogUrlInput || !domRefs.copyShareLinkBtn || !qrCodeContainer) return;
     domRefs.shareDialogUrlInput.value = url;
     domRefs.copyShareLinkBtn.textContent = 'Copy Link';
+    
+    qrCodeContainer.innerHTML = '';
+    if (typeof QRCode !== 'undefined') {
+        new QRCode(qrCodeContainer, {
+            text: url,
+            width: 256,
+            height: 256,
+            correctLevel: QRCode.CorrectLevel.L
+        });
+    } else {
+        qrCodeContainer.innerHTML = '<p style="color:red; font-size: 0.9em;">QR Code library failed to load.</p>';
+        console.error("QRCode library not loaded!");
+    }
+    qrCodeContainer.style.display = 'none';
+    document.getElementById('toggle-qr-code-btn').textContent = 'Show QR Code';
+
     dialog.style.display = 'flex';
     
     requestAnimationFrame(() => {

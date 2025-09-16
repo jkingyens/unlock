@@ -3,6 +3,7 @@
 <head>
   <title>Unlock Sidebar</title>
   <link rel="stylesheet" href="sidebar.css">
+  <script src="vendor/qrcode/qrcode.min.js"></script>
   <style>
     /* New style for the remove button on draft cards */
     .card .delete-draft-item-btn {
@@ -402,8 +403,12 @@
     <div class="share-dialog">
       <p id="share-dialog-message">Share this packet link:</p>
       <input type="text" id="share-dialog-url" readonly>
-      <button id="copy-share-link-btn">Copy Link</button>
-      <button id="close-share-dialog-btn" class="close-btn">Close</button>
+      <div id="share-dialog-qrcode" class="qr-code-container" style="display: none;"></div>
+      <div class="dialog-buttons">
+        <button id="copy-share-link-btn">Copy Link</button>
+        <button id="toggle-qr-code-btn" class="qr-code-btn">Show QR Code</button>
+        <button id="close-share-dialog-btn" class="close-btn">Close</button>
+      </div>
     </div>
   </div>
   <div id="make-page-dialog" class="make-page-dialog-overlay" style="display: none;">

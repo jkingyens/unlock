@@ -775,3 +775,15 @@ body.dark-mode .waveform-link-marker.visited {
     }
 }
 /* --- END: Download Placeholder & Shimmer Styles --- */
+.qr-code-container {
+    display: flex;
+    justify-content: center;
+    margin: 15px 0;
+}
+.qr-code-btn {
+    background-color: var(--button-secondary-bg) !important;
+    color: var(--text-on-secondary-button) !important;
+}
+.qr-code-btn:hover {
+    background-color: var(--button-secondary-hover-bg) !important;
+}
