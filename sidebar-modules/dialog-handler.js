@@ -13,6 +13,7 @@ let titlePromptResolve = null;
 let titlePromptConfirmListener = null;
 let titlePromptCancelListener = null;
 let titlePromptKeyListener = null;
+let qrCodeInstance = null; // To hold the single QRCode instance
 
 let sendMessageToBackground;
 let showRootViewStatus;
@@ -134,18 +135,22 @@ export function showShareDialog(url) {
     domRefs.shareDialogUrlInput.value = url;
     domRefs.copyShareLinkBtn.textContent = 'Copy Link';
     
-    qrCodeContainer.innerHTML = '';
     if (typeof QRCode !== 'undefined') {
-        new QRCode(qrCodeContainer, {
-            text: url,
-            width: 256,
-            height: 256,
-            correctLevel: QRCode.CorrectLevel.L
-        });
+        if (qrCodeInstance === null) {
+            qrCodeInstance = new QRCode(qrCodeContainer, {
+                text: url,
+                width: 256,
+                height: 256,
+                correctLevel: QRCode.CorrectLevel.L
+            });
+        } else {
+            qrCodeInstance.makeCode(url);
+        }
     } else {
         qrCodeContainer.innerHTML = '<p style="color:red; font-size: 0.9em;">QR Code library failed to load.</p>';
         console.error("QRCode library not loaded!");
     }
+    
     qrCodeContainer.style.display = 'none';
     document.getElementById('toggle-qr-code-btn').textContent = 'Show QR Code';
 
@@ -164,7 +169,12 @@ function hideShareDialog() {
     const dialog = domRefs.shareDialog;
     if (dialog) {
         dialog.classList.remove('visible');
-        setTimeout(() => { if (dialog) dialog.style.display = 'none'; }, 300);
+        setTimeout(() => {
+            if (dialog) dialog.style.display = 'none';
+            if (qrCodeInstance) {
+                qrCodeInstance.clear();
+            }
+        }, 300);
     }
 }
 
