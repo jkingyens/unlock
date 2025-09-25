@@ -59,9 +59,6 @@ async function initialize() {
     settingsView.setupSettingsListeners();
     setupGlobalListeners();
 
-    // --- REMOVED: chrome.runtime.connect({ name: 'sidebar' }); ---
-    // The explicit messaging system is more reliable.
-
     try {
         await sendMessageToBackground({ action: 'sidebar_ready' });
         const sessionData = await storage.getSession(PENDING_VIEW_KEY);
@@ -99,7 +96,6 @@ function setupGlobalListeners() {
     });
     domRefs.settingsBtn?.addEventListener('click', () => navigateTo('settings'));
 
-    // --- START OF FIX: Restored stable visibility handling ---
     document.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'visible') {
             sendMessageToBackground({ action: 'sidebar_opened' });
@@ -107,13 +103,22 @@ function setupGlobalListeners() {
             sendMessageToBackground({ action: 'sidebar_closed' });
         }
     });
-    // --- END OF FIX ---
 }
 
 
 // --- Navigation & View Management ---
 
 export async function navigateTo(viewName, instanceId = null, data = null) {
+    // --- START OF FIX: Logic for tab group synchronization ---
+    // If we are navigating away from a detail view, tell the background to collapse the group.
+    if (currentView === 'packet-detail' && currentInstanceId && (viewName !== 'packet-detail' || currentInstanceId !== instanceId)) {
+        sendMessageToBackground({
+            action: 'collapse_tab_group_for_instance',
+            data: { instanceId: currentInstanceId }
+        }).catch(e => logger.warn('Sidebar', 'Failed to send collapse message', e));
+    }
+    // --- END OF FIX ---
+
     if (viewName === 'root') {
         resetSidebarState();
     }
@@ -153,6 +158,14 @@ export async function navigateTo(viewName, instanceId = null, data = null) {
                 domRefs.packetDetailView.classList.remove('hidden');
 
                 await detailView.displayPacketContent(instanceData, browserState, currentPacketUrl);
+                
+                // --- START OF FIX: Logic for tab group synchronization ---
+                // If we are navigating to a detail view, tell the background to expand the group.
+                sendMessageToBackground({
+                    action: 'expand_tab_group_for_instance',
+                    data: { instanceId: currentInstanceId }
+                }).catch(e => logger.warn('Sidebar', 'Failed to send expand message', e));
+                // --- END OF FIX ---
                 break;
             case 'create':
                 currentView = 'create';

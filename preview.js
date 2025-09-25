@@ -19,11 +19,22 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     };
     
+    // --- START OF FIX: Send destination URL to background for robust handling ---
     window.addEventListener('message', (event) => {
         if (event.data && event.data.type === 'unlock-navigate' && event.data.url) {
-            window.location.href = event.data.url;
+            // Instead of navigating directly, ask the background script to handle it.
+            // This leverages the centralized openOrFocusContent logic which correctly
+            // handles finding existing tabs and preventing duplicates.
+            chrome.runtime.sendMessage({
+                action: 'open_content_from_preview',
+                data: { 
+                    instanceId: instanceId, // The instanceId is in the preview.html URL
+                    url: event.data.url 
+                }
+            });
         }
     });
+    // --- END OF FIX ---
 
     if (rlr) { // Handle draft previews
         chrome.runtime.sendMessage({
