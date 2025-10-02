@@ -364,6 +364,20 @@ export async function displayPacketContent(instance, browserState, canonicalPack
             cardsWrapper.dataset.instanceId = instance.instanceId;
             fragment.appendChild(cardsWrapper);
 
+            // --- START OF NEW CODE ---
+            const isCompleted = await packetUtils.isPacketInstanceCompleted(instance);
+            if (isCompleted && instance.packetOutputs && instance.packetOutputs.length > 0) {
+                const outputsHeader = document.createElement('h3');
+                outputsHeader.className = 'outputs-header';
+                outputsHeader.textContent = 'Collected Outputs';
+                cardsWrapper.appendChild(outputsHeader);
+
+                instance.packetOutputs.forEach(output => {
+                    cardsWrapper.appendChild(createOutputCard(output));
+                });
+            }
+            // --- END OF NEW CODE ---
+
             container.innerHTML = '';
             container.appendChild(fragment);
             updatePlaybackUI(currentState, instance);
@@ -562,6 +576,36 @@ function attachInteractiveCardHandlers(card, contentItem, instance) {
         }
     });
 }
+
+function linkify(text) {
+    const urlRegex = /(\b(https?|ftp|file):\/\/[-A-Z0-9+&@#\/%?=~_|!:,.;]*[-A-Z0-9+&@#\/%=~_|])/ig;
+    return text.replace(urlRegex, (url) => `<a href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>`);
+}
+
+function createOutputCard(outputItem) {
+    const card = document.createElement('div');
+    card.className = 'card output-card';
+
+    let iconHTML = '📝'; // Default for text
+    let capturedDataHTML = '';
+
+    if (outputItem.outputContentType.startsWith('image') || (outputItem.capturedData && (outputItem.capturedData.startsWith('http') || outputItem.capturedData.startsWith('data:image')))) {
+        iconHTML = '🖼️';
+        capturedDataHTML = `<img src="${outputItem.capturedData}" class="output-image-preview" alt="Captured image">`;
+    } else {
+        capturedDataHTML = `<p class="output-text-data">${linkify(outputItem.capturedData)}</p>`;
+    }
+
+    card.innerHTML = `
+        <div class="card-icon">${iconHTML}</div>
+        <div class="card-text">
+            <div class="card-title">${outputItem.outputDescription}</div>
+            <div class="card-url">Captured Data:</div>
+            ${capturedDataHTML}
+        </div>`;
+    return card;
+}
+
 
 async function createContentCard(contentItem, instance) {
     if (!contentItem) return null; 
