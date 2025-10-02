@@ -841,3 +841,36 @@ body.dark-mode .waveform-link-marker.visited {
     border-color: var(--status-success-color);
     background-color: var(--bg-accent);
 }
+
+/* --- START OF NEW CODE: Output Card Styles --- */
+.outputs-header {
+    margin-top: 20px;
+    margin-bottom: 10px;
+    font-size: 1.1em;
+    color: var(--text-secondary);
+    border-bottom: 1px solid var(--border-secondary);
+    padding-bottom: 5px;
+}
+.output-card {
+    background-color: var(--bg-primary);
+    border-left-color: var(--packet-color-accent, var(--border-focus));
+}
+.output-image-preview {
+    max-width: 100%;
+    border-radius: 4px;
+    margin-top: 5px;
+}
+.output-text-data {
+    margin-top: 5px;
+    white-space: pre-wrap;
+    word-break: break-all;
+    font-size: 0.9em;
+    color: var(--text-primary);
+    background-color: var(--bg-secondary);
+    padding: 8px;
+    border-radius: 4px;
+}
+.output-text-data a {
+    color: var(--link-color);
+}
+/* --- END OF NEW CODE --- */
