@@ -347,6 +347,10 @@ export async function displayPacketContent(instance, browserState, canonicalPack
                 oldActionButtonContainer.replaceWith(newActionButtonContainer);
             }
             
+            // --- START OF FIX ---
+            renderOutputsSection(instance, domRefs.detailCardsContainer);
+            // --- END OF FIX ---
+            
             await redrawAllVisibleWaveforms(currentState, instance);
 
         } else {
@@ -363,20 +367,10 @@ export async function displayPacketContent(instance, browserState, canonicalPack
             const cardsWrapper = await createCardsSection(instance);
             cardsWrapper.dataset.instanceId = instance.instanceId;
             fragment.appendChild(cardsWrapper);
-
-            // --- START OF NEW CODE ---
-            const isCompleted = await packetUtils.isPacketInstanceCompleted(instance);
-            if (isCompleted && instance.packetOutputs && instance.packetOutputs.length > 0) {
-                const outputsHeader = document.createElement('h3');
-                outputsHeader.className = 'outputs-header';
-                outputsHeader.textContent = 'Collected Outputs';
-                cardsWrapper.appendChild(outputsHeader);
-
-                instance.packetOutputs.forEach(output => {
-                    cardsWrapper.appendChild(createOutputCard(output));
-                });
-            }
-            // --- END OF NEW CODE ---
+            
+            // --- START OF FIX ---
+            renderOutputsSection(instance, cardsWrapper);
+            // --- END OF FIX ---
 
             container.innerHTML = '';
             container.appendChild(fragment);
@@ -529,6 +523,29 @@ async function createCardsSection(instance) {
     domRefs.detailCardsContainer = cardsWrapper;
     return cardsWrapper;
 }
+
+// --- START OF NEW CODE ---
+async function renderOutputsSection(instance, container) {
+    const existingHeader = container.querySelector('.outputs-header');
+    if (existingHeader) existingHeader.remove();
+    
+    const existingCards = container.querySelectorAll('.output-card');
+    existingCards.forEach(card => card.remove());
+
+    const isCompleted = await packetUtils.isPacketInstanceCompleted(instance);
+    if (isCompleted && instance.packetOutputs && instance.packetOutputs.length > 0) {
+        const outputsHeader = document.createElement('h3');
+        outputsHeader.className = 'outputs-header';
+        outputsHeader.textContent = 'Collected Outputs';
+        container.appendChild(outputsHeader);
+
+        instance.packetOutputs.forEach(output => {
+            container.appendChild(createOutputCard(output));
+        });
+    }
+}
+// --- END OF NEW CODE ---
+
 
 function attachInteractiveCardHandlers(card, contentItem, instance) {
     if (card.dataset.handlersAttached === 'true') return;

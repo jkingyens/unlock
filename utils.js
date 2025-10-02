@@ -36,8 +36,9 @@ const CONFIG = {
         name: 'Google Gemini 1.5 Pro (Default)',
         providerType: 'gemini',
         apiKey: '',
-        modelName: 'gemini-1.5-pro-latest',
+        modelName: 'gemini-pro', // --- START OF FIX --- Changed from 'gemini-1.5-pro-latest'
         apiEndpoint: 'https://generativelanguage.googleapis.com/v1beta/models/'
+        // --- END OF FIX ---
       },
       {
         id: 'default_perplexity_sonar_medium',

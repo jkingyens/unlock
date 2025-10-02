@@ -4,7 +4,7 @@
 
 import { domRefs } from './dom-references.js';
 import { logger, storage, packetUtils, isTabGroupsAvailable, shouldUseTabGroups } from '../utils.js';
-import { showConfirmDialog, showImportDialog, exportPacketAndShowDialog, showCreateSourceDialog, showCreateSourceDialogProgress, hideCreateSourceDialog } from './dialog-handler.js';
+import { showConfirmDialog, showImportDialog, exportPacketAndShowDialog, showCreateSourceDialog, showCreateSourceDialogProgress, hideCreateSourceDialog, showConfirmSettingsDialog } from './dialog-handler.js';
 
 // --- Module-specific State ---
 let activeListTab = 'library';
@@ -42,7 +42,7 @@ export function setupRootViewListeners() {
     domRefs.tabInbox?.addEventListener('click', () => switchListTab('library'));
     domRefs.tabInProgress?.addEventListener('click', () => switchListTab('in-progress'));
     domRefs.tabCompleted?.addEventListener('click', () => switchListTab('completed'));
-    domRefs.sidebarDeleteBtn?.addEventListener('click', handleDeleteSelectedInstances);
+    domRefs.sidebarDeleteBtn?.addEventListener('click', () => handleDeleteSelectedInstances());
     domRefs.createPacketSidebarBtn?.addEventListener('click', handleCreateButtonClick);
     domRefs.rootView?.addEventListener('change', (event) => {
         if (event.target.classList.contains('packet-checkbox')) {
@@ -103,7 +103,6 @@ async function handleCreateButtonClick() {
 // --- View Rendering & Management ---
 
 export async function displayRootNavigation() {
-    console.log('[rv_debug] displayRootNavigation START');
     const { inboxList, inProgressList, completedList } = domRefs;
     if (!inboxList || !inProgressList || !completedList) return;
     
@@ -121,8 +120,6 @@ export async function displayRootNavigation() {
         const images = Object.values(imagesMap);
         const instances = Object.values(instancesMap);
         
-        console.log(`[rv_debug] displayRootNavigation: Found ${instances.length} instances in storage. Stencil count: ${inProgressInstanceStencils.size}`);
-
         const sortFn = (a, b) => {
             const dateA = new Date(a.created || a.instantiated || 0).getTime();
             const dateB = new Date(b.created || b.instantiated || 0).getTime();
@@ -134,7 +131,6 @@ export async function displayRootNavigation() {
 
         for (const inst of instances) {
             if (inProgressInstanceStencils.has(inst.instanceId)) {
-                console.log(`[rv_debug] displayRootNavigation: Skipping render for instance ${inst.instanceId} because a stencil already exists.`);
                 continue;
             }
 
@@ -149,7 +145,6 @@ export async function displayRootNavigation() {
         renderInstanceList(inProgressItems.sort(sortFn), domRefs.inProgressList, "No packets Started.");
         renderInstanceList(completedItems.sort(sortFn), domRefs.completedList, "No completed packets yet.");
         
-        console.log('[rv_debug] displayRootNavigation: Re-rendering all stencils.');
         inProgressImageStencils.forEach(renderOrUpdateImageStencil);
         inProgressInstanceStencils.forEach(renderOrUpdateInstanceStencil);
 
@@ -161,7 +156,6 @@ export async function displayRootNavigation() {
         inProgressList.innerHTML = errorHTML;
         completedList.innerHTML = errorHTML;
     }
-    console.log('[rv_debug] displayRootNavigation END');
 }
 
 function renderImageList(images) {
@@ -306,17 +300,14 @@ function switchListTab(tabName) {
 }
 
 async function handleStartPacket(imageId) {
-    console.log(`[rv_debug] handleStartPacket: User clicked start for imageId: ${imageId}`);
     if (!imageId) return;
     try {
         const image = await storage.getPacketImage(imageId);
         if (!image) throw new Error("Packet not found in library.");
         
         const tempInstanceId = `inst_${Date.now()}_${Math.random().toString(36).substring(2, 10)}`;
-        console.log(`[rv_debug] handleStartPacket: Generated temporary instanceId: ${tempInstanceId}`);
         
         inProgressInstanceStencils.set(tempInstanceId, { imageId: imageId, instanceId: tempInstanceId, title: image.title });
-        console.log(`[rv_debug] handleStartPacket: Added stencil to map. Current stencil count: ${inProgressInstanceStencils.size}`);
         
         renderOrUpdateInstanceStencil({
             instanceId: tempInstanceId,
@@ -330,7 +321,6 @@ async function handleStartPacket(imageId) {
             action: 'instantiate_packet',
             data: { imageId, instanceId: tempInstanceId }
         });
-        console.log(`[rv_debug] handleStartPacket: Sent 'instantiate_packet' message to background for ${tempInstanceId}`);
     } catch (err) {
         showRootViewStatus(`Error: ${err.message}`, 'error');
         logger.error('RootView:handleStartPacket', 'Error during start packet logic', err);
@@ -398,14 +388,61 @@ function hideLibraryActionDialog() {
     }
 }
 
-
-async function handleDeleteSelectedInstances() {
-    const { selectedIds } = getSelectedInstanceIdsFromActiveList();
+async function handleDeleteSelectedInstances(instanceIdsFromContextMenu = null) {
+    const selectedIds = instanceIdsFromContextMenu || getSelectedInstanceIds();
     if (selectedIds.length === 0) return;
 
-    const confirmed = await showConfirmDialog(`Delete ${selectedIds.length} packet(s)? This cannot be undone.`, 'Delete', 'Cancel', true);
-    if (!confirmed) return;
+    console.log('[DEBUG] handleDeleteSelectedInstances called with IDs:', selectedIds);
 
+    let completedPacketToAnalyze = null;
+    for (const id of selectedIds) {
+        const instance = await storage.getPacketInstance(id);
+        if (instance && (await packetUtils.isPacketInstanceCompleted(instance)) && instance.packetOutputs && instance.packetOutputs.length > 0) {
+            completedPacketToAnalyze = instance;
+            console.log(`[DEBUG] Found completed packet with outputs to analyze: ${id}`);
+            break;
+        }
+    }
+
+    if (completedPacketToAnalyze) {
+        console.log('[DEBUG] Triggering settings proposal flow.');
+        try {
+            const response = await sendMessageToBackground({
+                action: 'propose_settings_update_from_packet',
+                data: { instance: completedPacketToAnalyze }
+            });
+
+            if (response && response.success && response.proposedChanges) {
+                console.log('[DEBUG] LLM proposed changes, showing confirmation dialog.');
+                const userConfirmed = await showConfirmSettingsDialog({
+                    proposedChanges: response.proposedChanges
+                });
+                console.log(`[DEBUG] User confirmation result: ${userConfirmed}`);
+
+                if (userConfirmed) {
+                    await sendMessageToBackground({
+                        action: 'apply_proposed_settings',
+                        data: { proposedChanges: response.proposedChanges }
+                    });
+                    showRootViewStatus('Settings updated!', 'success');
+                }
+            } else {
+                 console.log('[DEBUG] LLM proposed no changes or call failed.');
+            }
+        } catch (error) {
+            logger.error('RootView', 'Error during settings proposal flow', error);
+        }
+    } else {
+        console.log('[DEBUG] No completed packets with outputs found among selected IDs.');
+    }
+
+    const confirmed = await showConfirmDialog(`Delete ${selectedIds.length} packet(s)? This cannot be undone.`, 'Delete', 'Cancel', true);
+    if (!confirmed) {
+        console.log('[DEBUG] User cancelled deletion.');
+        return;
+    }
+
+    console.log('[DEBUG] User confirmed deletion, sending request to background.');
     showRootViewStatus(`Deleting ${selectedIds.length}...`, 'info', false);
     try {
         await sendMessageToBackground({ action: 'delete_packets', data: { packetIds: selectedIds } });
@@ -413,6 +450,7 @@ async function handleDeleteSelectedInstances() {
         showRootViewStatus(`Delete Error: ${error.message}`, 'error');
     }
 }
+
 
 function setupInstanceContextMenu(row, instance) {
     row.addEventListener('contextmenu', async (e) => {
@@ -435,11 +473,8 @@ function setupInstanceContextMenu(row, instance) {
         
         addDivider(menu);
 
-        addMenuItem(menu, 'Delete Packet', async () => {
-            const confirmed = await showConfirmDialog(`Delete packet "${instance.title}"? This cannot be undone.`, 'Delete', 'Cancel', true);
-            if (confirmed) {
-                sendMessageToBackground({action:'delete_packets', data:{packetIds:[instance.instanceId]}});
-            }
+        addMenuItem(menu, 'Delete Packet', () => {
+            handleDeleteSelectedInstances([instance.instanceId]);
         }, 'delete-action');
 
         document.body.appendChild(menu);
@@ -489,19 +524,17 @@ function removeContextMenus() {
     }
 }
 
-function getSelectedInstanceIdsFromActiveList() {
-    const listElement = activeListTab === 'in-progress' ? domRefs.inProgressList : domRefs.completedList;
-    if (!listElement) return { selectedIds: [] };
-    const checkboxes = listElement.querySelectorAll('.packet-checkbox:checked:not(:disabled)');
-    return { selectedIds: Array.from(checkboxes).map(cb => cb.dataset.instanceId).filter(Boolean) };
+function getSelectedInstanceIds() {
+    const checkboxes = domRefs.rootView.querySelectorAll('.packet-checkbox:checked:not(:disabled)');
+    return Array.from(checkboxes).map(cb => cb.dataset.instanceId).filter(Boolean);
 }
 
 async function updateActionButtonsVisibility() {
     if (!domRefs.sidebarDeleteBtn) return;
-    const { selectedIds } = getSelectedInstanceIdsFromActiveList();
+    const selectedIds = getSelectedInstanceIds();
     const anySelected = selectedIds.length > 0;
     
-    domRefs.sidebarDeleteBtn.style.display = (activeListTab !== 'library' && anySelected) ? 'inline-block' : 'none';
+    domRefs.sidebarDeleteBtn.style.display = (anySelected) ? 'inline-block' : 'none';
     domRefs.showImportDialogBtn.style.display = (activeListTab === 'library' || !anySelected) ? 'inline-block' : 'none';
 }
 

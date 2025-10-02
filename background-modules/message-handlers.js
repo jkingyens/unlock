@@ -247,7 +247,7 @@ async function ensureMediaIsCached(instanceId, url, lrl) {
     if (!mediaItem) throw new Error(`Media item with url ${url} not found in instance.`);
     const downloadResult = await cloudStorage.downloadFile(url);
     if (!downloadResult.success) throw new Error(`Failed to download audio: ${downloadResult.error}`);
-    const audioBuffer = downloadResult.content; // FIX: content is already an ArrayBuffer
+    const audioBuffer = downloadResult.content;
     await indexedDbStorage.saveGeneratedContent(instanceId, indexedDbKey, [{
         name: lrl.split('/').pop(), content: audioBuffer, contentType: mediaItem.mimeType
     }]);
@@ -310,7 +310,7 @@ async function ensureHtmlIsCached(instanceId, url, lrl) {
     if (!htmlItem) throw new Error(`HTML item with url ${url} not found.`);
     const downloadResult = await cloudStorage.downloadFile(url);
     if (!downloadResult.success) throw new Error(`Failed to download HTML: ${downloadResult.error}`);
-    const htmlBuffer = downloadResult.content; // FIX: content is already an ArrayBuffer
+    const htmlBuffer = downloadResult.content;
     await indexedDbStorage.saveGeneratedContent(instanceId, indexedDbKey, [{
         name: lrl.split('/').pop(), content: htmlBuffer, contentType: htmlItem.mimeType
     }]);
@@ -327,7 +327,7 @@ async function ensurePdfIsCached(instanceId, url, lrl) {
     if (!pdfItem) throw new Error(`PDF item with url ${url} not found.`);
     const downloadResult = await cloudStorage.downloadFile(url);
     if (!downloadResult.success) throw new Error(`Failed to download PDF: ${downloadResult.error}`);
-    const pdfBuffer = downloadResult.content; // FIX: content is already an ArrayBuffer
+    const pdfBuffer = downloadResult.content;
     await indexedDbStorage.saveGeneratedContent(instanceId, indexedDbKey, [{
         name: lrl.split('/').pop(), content: pdfBuffer, contentType: pdfItem.mimeType || 'application/pdf'
     }]);
@@ -375,32 +375,139 @@ async function handleSavePacketOutput(data, sender, sendResponse) {
     }
 }
 
+async function handleProposeSettingsUpdate(data, sender, sendResponse) {
+    const { instance } = data;
+    if (!instance || !instance.packetOutputs || instance.packetOutputs.length === 0) {
+        return sendResponse({ success: true, proposedChanges: null });
+    }
+
+    try {
+        const currentSettings = await storage.getSettings();
+        const simplifiedOutputs = instance.packetOutputs.map(o => ({
+            description: o.outputDescription,
+            data: o.capturedData,
+            contentType: o.outputContentType
+        }));
+
+        const systemPrompt = `
+You are an intelligent assistant integrated into a browser extension. Your task is to analyze the outputs from a completed "packet" (a guided task) and propose beneficial, non-destructive additions to the user's settings.
+
+**Policy:**
+- You MUST ONLY propose adding new, unique items.
+- You MUST NOT propose modifying or deleting any existing settings.
+- You MUST ONLY propose changes to the 'llmModels' array within the settings.
+- If no logical additions can be made, you MUST return an empty array.
+
+**Analysis Steps:**
+1. Examine the 'packetOutputs'. Pay close attention to the 'outputDescription' for context.
+2. Look for data that represents a credential, specifically an API key. Descriptions like "The user's Google Gemini API Key" are strong indicators.
+3. Compare any found API key with the 'apiKey' fields in the 'currentSettings.llmModels' array.
+4. If an output contains an API key that is NOT already present in any of the existing llmModels, construct a 'proposedChange' object.
+5. Identify the correct provider (e.g., 'gemini', 'openai') based on the context in the output description. Find the corresponding default model configuration in the existing settings to use as a template.
+6. Create a new model configuration object. It should have a new unique 'id', a descriptive 'name', and the captured API key. All other fields should be copied from the most appropriate existing default model.
+
+**Output Format:**
+- Your response MUST be a valid JSON array of 'proposedChange' objects.
+- Each object must have the format: { "operation": "add", "path": "llmModels", "value": { ...new model object... } }
+- If no changes are proposed, return an empty array: []
+`;
+        const userPrompt = `
+Here is the user's current settings object:
+\`\`\`json
+${JSON.stringify(currentSettings, null, 2)}
+\`\`\`
+
+Here are the outputs collected from the completed packet:
+\`\`\`json
+${JSON.stringify(simplifiedOutputs, null, 2)}
+\`\`\`
+
+Based on the policy and analysis steps, please propose any new additions to the 'llmModels' array.
+`;
+
+        const result = await llmService.callLLM('propose_settings_changes', { system: systemPrompt, user: userPrompt });
+        
+        // --- START OF DEBUG LOG ---
+        console.log('[DEBUG] Raw LLM response for settings proposal:', result);
+        // --- END OF DEBUG LOG ---
+
+        if (result.success) {
+            try {
+                // The response from the LLM might be a string that needs parsing,
+                // or the service might have already parsed it.
+                const proposedChanges = typeof result.data === 'string' ? JSON.parse(result.data) : result.data;
+                
+                if (Array.isArray(proposedChanges) && proposedChanges.length > 0) {
+                    sendResponse({ success: true, proposedChanges });
+                } else {
+                    sendResponse({ success: true, proposedChanges: null });
+                }
+            } catch (e) {
+                throw new Error("LLM returned invalid JSON.");
+            }
+        } else {
+            throw new Error(result.error || "LLM call failed.");
+        }
+
+    } catch (error) {
+        logger.error('MessageHandler', 'Error proposing settings update', error);
+        sendResponse({ success: false, error: error.message });
+    }
+    return true; 
+}
+
+async function handleApplyProposedSettings(data, sender, sendResponse) {
+    const { proposedChanges } = data;
+    if (!proposedChanges || !Array.isArray(proposedChanges) || proposedChanges.length === 0) {
+        return sendResponse({ success: false, error: 'No changes to apply.' });
+    }
+
+    try {
+        const currentSettings = await storage.getSettings();
+        
+        proposedChanges.forEach(change => {
+            if (change.operation === 'add' && change.path === 'llmModels') {
+                const exists = currentSettings.llmModels.some(m => m.apiKey === change.value.apiKey && m.apiKey !== '');
+                if (!exists) {
+                    currentSettings.llmModels.push(change.value);
+                }
+            }
+        });
+
+        await storage.saveSettings(currentSettings);
+        sendResponse({ success: true });
+    } catch (error) {
+        logger.error('MessageHandler', 'Error applying proposed settings', error);
+        sendResponse({ success: false, error: error.message });
+    }
+}
+
+
 const actionHandlers = {
     'save_packet_output': handleSavePacketOutput,
-    // --- START OF NEW CODE ---
     'activate_selector_tool': async (data, sender, sendResponse) => {
         const { toolType, sourceUrl } = data;
-        const allTabs = await chrome.tabs.query({});
-        for (const tab of allTabs) {
-            const context = await getPacketContext(tab.id);
-            if (context && context.canonicalPacketUrl === sourceUrl) {
-                try {
-                    await chrome.tabs.sendMessage(tab.id, { action: 'activate_selector_tool', data: { toolType } });
-                } catch (e) { /* Tab might not be ready, which is okay */ }
+        const allTabs = await chrome.tabs.query({ url: sourceUrl });
+        let targetTab = allTabs.length > 0 ? allTabs[0] : null;
+        
+        if (targetTab) {
+            try {
+                await chrome.tabs.sendMessage(targetTab.id, { action: 'activate_selector_tool', data: { toolType } });
+                sendResponse({ success: true });
+            } catch (e) {
+                sendResponse({ success: false, error: 'Tab not ready to receive message.' });
             }
+        } else {
+            sendResponse({ success: false, error: 'Could not find the target tab.' });
         }
-        sendResponse({ success: true });
     },
     'deactivate_selector_tool': async (data, sender, sendResponse) => {
         const { sourceUrl } = data;
-        const allTabs = await chrome.tabs.query({});
+        const allTabs = await chrome.tabs.query({ url: sourceUrl });
         for (const tab of allTabs) {
-            const context = await getPacketContext(tab.id);
-            if (context && context.canonicalPacketUrl === sourceUrl) {
-                try {
-                    await chrome.tabs.sendMessage(tab.id, { action: 'deactivate_selector_tool' });
-                } catch (e) { /* Tab might not be ready */ }
-            }
+            try {
+                await chrome.tabs.sendMessage(tab.id, { action: 'deactivate_selector_tool' });
+            } catch (e) { /* Tab might not be ready */ }
         }
         sendResponse({ success: true });
     },
@@ -411,16 +518,13 @@ const actionHandlers = {
                 await chrome.tabs.sendMessage(tab.id, { action: 'deactivate_selector_tool' });
             } catch (e) { /* Tab might not be ready or have the content script */ }
         }
-        // Also notify the sidebar to update its UI
         sidebarHandler.notifySidebar('deactivate_all_interactive_cards');
         sendResponse({ success: true });
     },
     'content_script_data_captured': (data, sender, sendResponse) => {
-        // Relay this message directly to the sidebar
         sidebarHandler.notifySidebar('data_captured_from_content', data);
         sendResponse({ success: true });
     },
-    // --- END OF NEW CODE ---
     'prepare_in_packet_navigation': async (data, sender, sendResponse) => {
         const tabId = sender.tab?.id;
         const destinationUrl = data?.destinationUrl;
@@ -434,7 +538,7 @@ const actionHandlers = {
                 if (targetItem) {
                     const trustedIntent = {
                         instanceId: currentContext.instanceId,
-                        canonicalPacketUrl: targetItem.url // Use the CANONICAL URL from the packet definition
+                        canonicalPacketUrl: targetItem.url
                     };
                     await storage.setSession({ [`trusted_intent_${tabId}`]: trustedIntent });
                     logger.log(`MessageHandler`, `Set trusted intent for tab ${tabId} to navigate to ${targetItem.url}`);
@@ -699,6 +803,8 @@ const actionHandlers = {
         } catch (error) { sendResponse({ success: false, error: error.message }); }
     },
     'request_rule_refresh': async (d, s, r) => { await ruleManager.refreshAllRules(); r({ success: true }); },
+    'propose_settings_update_from_packet': (data, s, r) => handleProposeSettingsUpdate(data, s, r),
+    'apply_proposed_settings': (data, s, r) => handleApplyProposedSettings(data, s, r),
 };
 
 export function handleMessage(message, sender, sendResponse) {

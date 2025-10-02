@@ -15,6 +15,10 @@ let titlePromptCancelListener = null;
 let titlePromptKeyListener = null;
 let qrCodeInstance = null; // To hold the single QRCode instance
 
+// --- START OF NEW CODE ---
+let confirmSettingsResolve = null;
+// --- END OF NEW CODE ---
+
 let sendMessageToBackground;
 let showRootViewStatus;
 let navigateTo;
@@ -75,6 +79,18 @@ export function setupDialogListeners() {
     domRefs.genericConfirmDialog?.addEventListener('click', (event) => {
         if (event.target === domRefs.genericConfirmDialog) hideConfirmDialog(false);
     });
+
+    // --- START OF NEW CODE ---
+    // Confirm Settings Dialog
+    const settingsDialog = document.getElementById('confirm-settings-dialog-overlay');
+    if (settingsDialog) {
+        settingsDialog.querySelector('.confirm-btn')?.addEventListener('click', () => hideConfirmSettingsDialog(true));
+        settingsDialog.querySelector('.cancel-btn')?.addEventListener('click', () => hideConfirmSettingsDialog(false));
+        settingsDialog.addEventListener('click', (e) => { 
+            if (e.target === settingsDialog) hideConfirmSettingsDialog(false);
+        });
+    }
+    // --- END OF NEW CODE ---
 }
 
 
@@ -457,3 +473,54 @@ export function hideCreateSourceDialog(reason) {
     }
     createSourceDialogResolve = null;
 }
+
+// --- START OF NEW CODE ---
+export function showConfirmSettingsDialog(options) {
+    return new Promise((resolve) => {
+        confirmSettingsResolve = resolve;
+        const { proposedChanges } = options;
+        const dialog = document.getElementById('confirm-settings-dialog-overlay');
+        const contentContainer = document.getElementById('confirm-settings-dialog-content');
+        
+        if (!dialog || !contentContainer) {
+            logger.error("DialogHandler", "Confirm Settings dialog elements not found!");
+            return resolve(false);
+        }
+
+        contentContainer.innerHTML = ''; // Clear previous content
+
+        proposedChanges.forEach(change => {
+            const changeElement = document.createElement('div');
+            changeElement.className = 'proposed-change';
+
+            if (change.operation === 'add' && change.path === 'llmModels' && change.value) {
+                const model = change.value;
+                changeElement.innerHTML = `
+                    <p class="change-description">Add a new LLM configuration:</p>
+                    <div class="model-details">
+                        <strong>Name:</strong> <span>${model.name}</span><br>
+                        <strong>Provider:</strong> <span>${model.providerType}</span><br>
+                        <strong>API Key:</strong> <span class="api-key-value">${model.apiKey.substring(0, 4)}...${model.apiKey.substring(model.apiKey.length - 4)}</span>
+                    </div>
+                `;
+            }
+            contentContainer.appendChild(changeElement);
+        });
+
+        dialog.style.display = 'flex';
+        setTimeout(() => dialog.classList.add('visible'), 10);
+    });
+}
+
+function hideConfirmSettingsDialog(confirmedResult = false) {
+    const dialog = document.getElementById('confirm-settings-dialog-overlay');
+    if (dialog) {
+        dialog.classList.remove('visible');
+        setTimeout(() => { if (dialog) dialog.style.display = 'none'; }, 300);
+    }
+    if (confirmSettingsResolve) {
+        confirmSettingsResolve(confirmedResult);
+    }
+    confirmSettingsResolve = null;
+}
+// --- END OF NEW CODE ---
