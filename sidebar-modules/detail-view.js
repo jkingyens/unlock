@@ -26,22 +26,16 @@ export function init(dependencies) {
     navigateTo = dependencies.navigateTo;
     openUrl = dependencies.openUrl;
 
-    // --- START OF NEW CODE ---
-    // Listen for data captured by the content script (for text selection)
     chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         if (message.action === 'data_captured_from_content') {
-            console.log("LOG: Sidebar received 'data_captured_from_content'", message.data);
             handleDataCaptured(message.data);
         }
     });
-    // --- END OF NEW CODE ---
 }
 
-// --- START OF NEW CODE ---
 async function handleDataCaptured(data) {
     const listeningCard = document.querySelector('.card.listening-for-input');
     if (!listeningCard) {
-        console.log("LOG: Data captured but no card is listening.");
         return;
     }
 
@@ -53,7 +47,6 @@ async function handleDataCaptured(data) {
         const contentItem = instance.contents.find(item => item.lrl === lrl);
         
         if (contentItem) {
-            console.log("LOG: Found matching card and item. Saving data.", { lrl, capturedData: data.payload });
             listeningCard.classList.remove('listening-for-input');
             listeningCard.classList.add('visited');
             
@@ -68,7 +61,6 @@ async function handleDataCaptured(data) {
                 }
             });
 
-            // Deactivate the tool on the content page
             sendMessageToBackground({ 
                 action: 'deactivate_selector_tool', 
                 data: { sourceUrl: contentItem.sourceUrl } 
@@ -76,7 +68,6 @@ async function handleDataCaptured(data) {
         }
     }
 }
-// --- END OF NEW CODE ---
 
 
 /**
@@ -96,7 +87,6 @@ export function updatePlaybackUI(state, instance) {
 
     currentPlayingUrl = state.isPlaying ? state.url : null;
 
-    // Update play/pause icon on all media cards
     const allMediaCards = domRefs.packetDetailView.querySelectorAll('.card.media');
     allMediaCards.forEach(card => {
         const cardUrl = card.dataset.url;
@@ -104,7 +94,6 @@ export function updatePlaybackUI(state, instance) {
         card.classList.toggle('playing', isPlayingThisCard);
     });
 
-    // Update waveform for the active track
     if (state.url) {
         redrawAllVisibleWaveforms(state, instance);
     }
@@ -119,18 +108,10 @@ function requestDebouncedStateSave(instance) {
             logger.log("DetailView:Debounce", "Saving packet instance state after delay.", { id: instance.instanceId });
             await storage.savePacketInstance(instance);
         }
-    }, 1500); // 1.5 second delay
+    }, 1500);
 }
 
-// --- START OF FIX: Waveform Performance Optimization ---
 
-/**
- * Calculates the bar heights for a waveform from audio samples.
- * This is the expensive operation that should only be run once per audio track.
- * @param {Float32Array} audioSamples - The raw audio sample data.
- * @param {number} canvasWidth - The width of the canvas to calculate for.
- * @returns {number[]} An array of bar heights normalized from 0 to 1.
- */
 function calculateWaveformBars(audioSamples, canvasWidth) {
     const barWidth = 2;
     const barGap = 1;
@@ -153,12 +134,6 @@ function calculateWaveformBars(audioSamples, canvasWidth) {
 }
 
 
-/**
- * Draws a waveform on a canvas using pre-calculated bar heights.
- * This is the cheap operation that runs on every time update.
- * @param {HTMLCanvasElement} canvas - The canvas element to draw on.
- * @param {object} options - Drawing options.
- */
 function drawWaveform(canvas, options) {
     const { barHeights, accentColor, playedColor, currentTime, audioDuration } = options;
     const dpr = window.devicePixelRatio || 1;
@@ -189,12 +164,11 @@ function drawWaveform(canvas, options) {
         ctx.fillRect(i * (barWidth + barGap), y, barWidth, barHeight);
     }
 }
-// --- END OF FIX ---
 
 
 function drawLinkMarkers(markerContainer, options) {
     const { moments, audioDuration, visitedUrlsSet, linkMarkersEnabled } = options;
-    markerContainer.innerHTML = ''; // Clear existing markers
+    markerContainer.innerHTML = '';
 
     if (!moments || moments.length === 0) {
         return;
@@ -210,14 +184,11 @@ function drawLinkMarkers(markerContainer, options) {
         const percentage = (moment.timestamp / audioDuration) * 100;
         marker.style.left = `${percentage}%`;
 
-        // This part needs adaptation if we want to show 'visited' markers
-        // based on the moments system. For now, it's simplified.
         markerContainer.appendChild(marker);
     });
 }
 
 
-// --- Function to redraw waveforms on state update ---
 async function redrawAllVisibleWaveforms(playbackState = {}, instance) {
     if (!instance || !domRefs.packetDetailView) return;
 
@@ -241,7 +212,7 @@ async function redrawAllVisibleWaveforms(playbackState = {}, instance) {
         const audioCacheKey = `${instance.instanceId}::${url}`;
         
         const cachedAudioData = audioDataCache.get(audioCacheKey);
-        if (!cachedAudioData || !cachedAudioData.barHeights) continue; // Check for barHeights
+        if (!cachedAudioData || !cachedAudioData.barHeights) continue;
         
         const { barHeights, duration: cachedDuration } = cachedAudioData;
 
@@ -426,7 +397,6 @@ export async function displayPacketContent(instance, browserState, canonicalPack
                             logger.error("DetailView", "Failed to draw initial waveform post-render", err);
                         }
                     } else {
-                        // Media is not cached, show placeholder.
                         waveformContainer.classList.add('needs-download');
                     }
                 }
@@ -442,12 +412,7 @@ export async function displayPacketContent(instance, browserState, canonicalPack
     }
 }
 
-
-/**
- * A lightweight function to update only the visibility and visited status of cards.
- * Avoids a full re-render.
- * @param {object} instance - The latest packet instance data.
- */
+// --- START OF FIX: This function now attaches handlers when a card is revealed ---
 export function updateCardVisibility(instance) {
     if (!domRefs.detailCardsContainer || !instance) return;
     
@@ -469,6 +434,14 @@ export function updateCardVisibility(instance) {
                 if (isRevealed) {
                     card.style.opacity = '1.0';
                     card.classList.add('drop-zone-active'); 
+                    // If the card was hidden and is now revealed, attach its handlers.
+                    if (wasHidden) {
+                        const lrl = card.dataset.lrl;
+                        const contentItem = instance.contents.find(item => item.lrl === lrl);
+                        if (contentItem) {
+                            attachInteractiveCardHandlers(card, contentItem, instance);
+                        }
+                    }
                 } else {
                     card.style.opacity = '0.7';
                     card.classList.remove('drop-zone-active', 'listening-for-input');
@@ -477,6 +450,7 @@ export function updateCardVisibility(instance) {
         }
     });
 }
+// --- END OF FIX ---
 
 
 function processQueuedDisplayRequest() {
@@ -545,6 +519,55 @@ async function createCardsSection(instance) {
     return cardsWrapper;
 }
 
+// --- START OF FIX: New function to attach event handlers ---
+function attachInteractiveCardHandlers(card, contentItem, instance) {
+    if (card.dataset.handlersAttached === 'true') return;
+    card.dataset.handlersAttached = 'true';
+
+    const { output, sourceUrl } = contentItem;
+
+    card.addEventListener('click', () => {
+        const isActive = card.classList.contains('listening-for-input');
+        
+        if (isActive) {
+            sendMessageToBackground({ action: 'deactivate_selector_tool_global' });
+        } else {
+            sendMessageToBackground({ action: 'deactivate_selector_tool_global' }).then(() => {
+                card.classList.add('listening-for-input');
+                const toolType = output.contentType.startsWith('image') ? 'image' : 'text';
+                sendMessageToBackground({ 
+                    action: 'activate_selector_tool', 
+                    data: { sourceUrl, toolType, instanceId: instance.instanceId }
+                });
+            });
+        }
+    });
+
+    card.addEventListener('dragover', (e) => { e.preventDefault(); card.classList.add('drag-over'); });
+    card.addEventListener('dragleave', () => { card.classList.remove('drag-over'); });
+    card.addEventListener('drop', async (e) => {
+        e.preventDefault();
+        card.classList.remove('drag-over', 'listening-for-input');
+        sendMessageToBackground({ action: 'deactivate_selector_tool', data: { sourceUrl } });
+        
+        const data = e.dataTransfer.getData('text/uri-list') || e.dataTransfer.getData('text/plain');
+        if (data) {
+            card.classList.add('visited');
+            await sendMessageToBackground({
+                action: 'save_packet_output',
+                data: {
+                    instanceId: instance.instanceId,
+                    lrl: contentItem.lrl,
+                    capturedData: data,
+                    outputDescription: output.description,
+                    outputContentType: output.contentType
+                }
+            });
+        }
+    });
+}
+// --- END OF FIX ---
+
 async function createContentCard(contentItem, instance) {
     if (!contentItem) return null; 
 
@@ -559,7 +582,7 @@ async function createContentCard(contentItem, instance) {
     let isClickable = (origin === 'external') || (origin === 'internal' && (contentItem.published || cacheable));
     
     if (format === 'html') {
-        let iconHTML = origin === 'external' ? '🔗' : '📄';
+        let iconHTML = origin === 'external' ? '🌐' : '📄';
         let displayUrl = '';
         if (origin === 'external') {
             try { displayUrl = new URL(url).hostname.replace(/^www\./, ''); } catch (e) { displayUrl = url || '(URL missing)'; }
@@ -600,20 +623,19 @@ async function createContentCard(contentItem, instance) {
             iconContainer.querySelector('.download-icon').style.display = 'block';
         }
     } else if (format === 'interactive-input') {
+        const toolType = output.contentType.startsWith('image') ? 'image' : 'text';
         card.innerHTML = `
-            <div class="card-icon">📥</div>
+            <div class="card-icon interactive-icon">
+                <span class="indicator-light"></span>
+                📥
+            </div>
             <div class="card-text">
                 <div class="card-title">${title}</div>
-                <div class="card-url">${context || 'Click to activate...'}</div>
+                <div class="card-url">Click to activate, then select ${toolType} on the page.</div>
             </div>`;
         isClickable = false;
     } else {
-        card.innerHTML = `
-            <div class="card-icon">❓</div>
-            <div class="card-text">
-                <div class="card-title">${title}</div>
-                <div class="card-url">Unknown item type: ${format}</div>
-            </div>`;
+        card.innerHTML = `<div class="card-icon">❓</div><div class="card-text"><div class="card-title">${title}</div><div class="card-url">Unknown item type: ${format}</div></div>`;
         card.style.opacity = '0.6';
         isClickable = false;
     }
@@ -640,52 +662,10 @@ async function createContentCard(contentItem, instance) {
 
         if (isRevealed && format === 'interactive-input') {
             card.style.opacity = '1.0';
-            card.classList.add('drop-zone-active', 'clickable'); // It's clickable to activate
-            
-            card.addEventListener('click', () => {
-                const isActive = card.classList.contains('listening-for-input');
-                console.log(`LOG: Interactive card clicked. Is active? ${isActive}`);
-                
-                // Deactivate all other listening cards
-                document.querySelectorAll('.listening-for-input').forEach(c => {
-                    if (c !== card) {
-                        c.classList.remove('listening-for-input');
-                    }
-                });
-
-                if (isActive) {
-                    card.classList.remove('listening-for-input');
-                    sendMessageToBackground({ action: 'deactivate_selector_tool', data: { sourceUrl } });
-                } else {
-                    card.classList.add('listening-for-input');
-                    const toolType = output.contentType.startsWith('image') ? 'image' : 'text';
-                    sendMessageToBackground({ action: 'activate_selector_tool', data: { sourceUrl, toolType } });
-                }
-            });
-
-            // The rest of the drag/drop listeners remain
-            card.addEventListener('dragover', (e) => { e.preventDefault(); card.classList.add('drag-over'); });
-            card.addEventListener('dragleave', () => { card.classList.remove('drag-over'); });
-            card.addEventListener('drop', async (e) => {
-                e.preventDefault();
-                card.classList.remove('drag-over', 'listening-for-input');
-                sendMessageToBackground({ action: 'deactivate_selector_tool', data: { sourceUrl } });
-                
-                const data = e.dataTransfer.getData('text/uri-list') || e.dataTransfer.getData('text/plain');
-                if (data) {
-                    card.classList.add('visited');
-                    await sendMessageToBackground({
-                        action: 'save_packet_output',
-                        data: {
-                            instanceId: instance.instanceId,
-                            lrl: contentItem.lrl,
-                            capturedData: data,
-                            outputDescription: output.description,
-                            outputContentType: output.contentType
-                        }
-                    });
-                }
-            });
+            card.classList.add('drop-zone-active', 'clickable');
+            // --- START OF FIX: Call the handler attachment function ---
+            attachInteractiveCardHandlers(card, contentItem, instance);
+            // --- END OF FIX ---
         }
     }
 
@@ -695,10 +675,7 @@ async function createContentCard(contentItem, instance) {
             playMediaInCard(card, contentItem, instance);
         } else {
             card.addEventListener('click', async (e) => {
-                // --- START OF FIX ---
-                // This handler is for navigation, so we explicitly ignore our interactive cards.
                 if (card.classList.contains('opening') || format === 'interactive-input') return;
-                // --- END OF FIX ---
 
                 const iconContainer = card.querySelector('.card-icon-container');
                 if (iconContainer && iconContainer.classList.contains('needs-download')) {
@@ -723,6 +700,7 @@ async function createContentCard(contentItem, instance) {
 
     return card;
 }
+
 
 // --- UI Updates ---
 
@@ -799,7 +777,7 @@ async function playMediaInCard(card, contentItem, instance) {
                 action: 'ensure_media_is_cached',
                 data: { instanceId: instance.instanceId, url: contentItem.url, lrl: contentItem.lrl }
             });
-            return; // Don't try to play yet, wait for cache to populate.
+            return;
         }
 
         const isThisCardPlaying = currentPlayingUrl === contentItem.url;
@@ -816,7 +794,7 @@ async function playMediaInCard(card, contentItem, instance) {
                     intent: 'play',
                     instanceId: instance.instanceId,
                     url: contentItem.url,
-                    lrl: contentItem.lrl // Pass the LRL for DB lookup
+                    lrl: contentItem.lrl
                 }
             });
         }

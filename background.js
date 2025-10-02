@@ -32,6 +32,26 @@ export let activeMediaPlayback = {
 let creatingOffscreenDocument;
 const reorderDebounceTimers = new Map();
 
+// --- Service Worker Keepalive ---
+const ALARM_NAME = 'keep-alive';
+
+function setupKeepaliveAlarm() {
+  chrome.alarms.get(ALARM_NAME, (alarm) => {
+    if (!alarm) {
+      chrome.alarms.create(ALARM_NAME, { periodInMinutes: 0.33 }); // Every 20 seconds
+    }
+  });
+}
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === ALARM_NAME) {
+    // This is just to keep the service worker alive. No action needed.
+    // Accessing an API like this is enough.
+    chrome.runtime.getManifest();
+  }
+});
+
+
 // --- Offscreen Document and Audio Management ---
 
 async function hasOffscreenDocument() {
@@ -140,6 +160,7 @@ export async function setMediaPlaybackState(newState, options = {}) {
 // --- Initialization and Event Listeners ---
 
 async function initializeExtension() {
+    setupKeepaliveAlarm();
     await storage.getSettings();
     await restoreMediaStateOnStartup();
     await ruleManager.refreshAllRules();
@@ -189,7 +210,8 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
 });
 
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
-    if (changeInfo.status === 'complete' && tab.url && tab.url.startsWith('http')) {
+    // Inject scripts on every update to a valid URL to ensure they are always present.
+    if (tab.url && tab.url.startsWith('http')) {
         try {
             await chrome.scripting.executeScript({
                 target: { tabId: tabId },
@@ -200,7 +222,8 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
                 files: ['selector.css']
             });
         } catch (e) {
-            // This can fail on certain pages, which is acceptable.
+            // This can fail on certain protected pages (e.g., chrome web store), which is acceptable.
+            // We don't log this as an error to avoid console noise.
         }
     }
 });
