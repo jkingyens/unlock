@@ -115,10 +115,18 @@ function _parseJsonArticleResponse(contentStr, providerNameForLog) {
         }
 
         let parsedJson = JSON.parse(jsonString);
+
         if (Array.isArray(parsedJson)) { 
-            logger.warn(`LLMService:_parseJsonArticleResponse[${providerNameForLog}]`, `Returned JSON array directly for articles. Wrapping it.`);
-            return { contents: parsedJson };
+            return parsedJson;
         }
+        
+        // --- START OF FIX ---
+        // If the LLM returns a single settings change object, wrap it in an array
+        if (parsedJson.operation === 'add' && parsedJson.path === 'llmModels') {
+            return [parsedJson];
+        }
+        // --- END OF FIX ---
+
         if (parsedJson.title && parsedJson.contentSummary) { // For extract_title_from_html
             return parsedJson;
         }
@@ -179,10 +187,7 @@ Your entire response must be a single JSON object as specified.`;
 
 function getSummaryPromptText(context) {
     const { title, allPacketContents } = context;
-    // --- START OF FIX ---
-    // The filter was incorrectly using 'item.type' instead of 'item.origin'.
     const externalArticlesForSynthesis = allPacketContents.filter(item => item.origin === 'external' && item.url);
-    // --- END OF FIX ---
     const articleSynthesisInfo = externalArticlesForSynthesis.map(a => `- ${a.title}: ${a.url} (Context: ${a.context || 'N/A'})`).join('\n');
 
     const originalSourcePage = allPacketContents.find(item => item.context === 'The original source page this packet was created from.');
@@ -369,6 +374,10 @@ const llmService = {
             ({ systemPrompt, userPrompt } = getCustomPagePromptText(context.prompt, context.context));
         } else if (promptType === 'modify_html_for_completion') {
             ({ systemPrompt, userPrompt } = getModificationPromptText(context.htmlContent));
+        } else if (promptType === 'propose_settings_changes') {
+            systemPrompt = context.system;
+            userPrompt = context.user;
+            responseFormat = { type: "json_object" };
         }
         else { throw new Error(`Invalid promptType for OpenAI: ${promptType}`); }
         
@@ -389,7 +398,7 @@ const llmService = {
         if (promptType === 'custom_page' || promptType === 'modify_html_for_completion') {
             return _cleanFullHtmlOutput(contentStr);
         }
-        if (promptType === 'article_suggestions' || promptType === 'extract_title_from_html' || promptType === 'extract_media') {
+        if (promptType === 'article_suggestions' || promptType === 'extract_title_from_html' || promptType === 'extract_media' || promptType === 'propose_settings_changes') {
             return _parseJsonArticleResponse(contentStr, `OpenAI (${responseData.model || ''})`);
         }
         if (promptType === 'summary_page' || promptType === 'quiz_page') {
@@ -399,7 +408,7 @@ const llmService = {
     },
     prepareGeminiPayload(promptType, context, activeModelConfig) {
         let systemPrompt, userPrompt, promptText;
-        let maxOutputTokensForTask = 8192; // Default high for Gemini
+        let maxOutputTokensForTask = 8192; 
         let generationConfig = { temperature: CONFIG.TEMPERATURE, maxOutputTokens: maxOutputTokensForTask };
         let responseMimeType = "text/plain"; 
         
@@ -422,6 +431,10 @@ const llmService = {
             ({ systemPrompt, userPrompt } = getModificationPromptText(context.htmlContent));
         } else if (promptType === 'generate_packet_title') {
             ({ systemPrompt, userPrompt } = getPacketTitlePromptText(context));
+        } else if (promptType === 'propose_settings_changes') { 
+            systemPrompt = context.system;
+            userPrompt = context.user;
+            responseMimeType = "application/json";
         }
         else { throw new Error(`Invalid promptType for Gemini: ${promptType}`); }
         
@@ -448,7 +461,7 @@ const llmService = {
         if (promptType === 'custom_page' || promptType === 'modify_html_for_completion') {
             return _cleanFullHtmlOutput(contentStr);
         }
-        if (promptType === 'article_suggestions' || promptType === 'extract_title_from_html' || promptType === 'extract_media') return _parseJsonArticleResponse(contentStr, `Gemini (${responseData.model || ''})`);
+        if (promptType === 'article_suggestions' || promptType === 'extract_title_from_html' || promptType === 'extract_media' || promptType === 'propose_settings_changes') return _parseJsonArticleResponse(contentStr, `Gemini (${responseData.model || ''})`);
         else if (promptType === 'summary_page' || promptType === 'quiz_page') return _cleanHtmlOutput(contentStr);
         else if (promptType === 'generate_packet_title') return contentStr.trim().replace(/["']/g, '');
         else throw new Error(`Invalid promptType for Gemini parsing: ${promptType}`);
@@ -532,6 +545,9 @@ const llmService = {
             const { systemPrompt, userPrompt } = getModificationPromptText(context.htmlContent);
             systemPromptText = systemPrompt;
             userMessages = [{role: "user", content: userPrompt }];
+        } else if (promptType === 'propose_settings_changes') { 
+            systemPromptText = context.system;
+            userMessages = [{role: "user", content: context.user }];
         }
         else { throw new Error(`Invalid promptType for Anthropic: ${promptType}`); }
 
@@ -565,7 +581,7 @@ const llmService = {
         if (promptType === 'custom_page' || promptType === 'modify_html_for_completion') {
             return _cleanFullHtmlOutput(contentStr);
         }
-        if (promptType === 'article_suggestions' || promptType === 'extract_title_from_html' || promptType === 'extract_media') return _parseJsonArticleResponse(contentStr, `Anthropic (${responseData.model || ''})`);
+        if (promptType === 'article_suggestions' || promptType === 'extract_title_from_html' || promptType === 'extract_media' || promptType === 'propose_settings_changes') return _parseJsonArticleResponse(contentStr, `Anthropic (${responseData.model || ''})`);
         else if (promptType === 'summary_page' || promptType === 'quiz_page') return _cleanHtmlOutput(contentStr);
         else throw new Error(`Invalid promptType for Anthropic parsing: ${promptType}`);
     },
@@ -629,7 +645,7 @@ const llmService = {
         getHeaders: (apiKey) => ({
             'x-api-key': apiKey,
             'anthropic-version': '2023-06-01', 
-            'content-type': 'application/json',
+            'Content-Type': 'application/json',
             'anthropic-dangerous-direct-browser-access': 'true' 
         }),
         isLocalApi: false
@@ -657,6 +673,11 @@ const llmService = {
         }
     
         const { id: modelId, name: modelFriendlyName, providerType, apiKey, modelName, apiEndpoint } = activeModelConfig;
+        
+        if (!apiKey) {
+             return { success: false, error: `API key for model '${modelFriendlyName}' is missing. Please check your settings.` };
+        }
+
         const processor = this.LLM_PROCESSORS[providerType];
     
         if (!processor) {

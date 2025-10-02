@@ -509,6 +509,17 @@
     </div>
   </div>
 
-  <script type="module" src="sidebar.js"></script>
+    <div id="confirm-settings-dialog-overlay" class="confirm-dialog-overlay" style="display: none;">
+        <div class="confirm-dialog">
+            <p>The AI suggests adding this to your settings. Is this okay?</p>
+            <div id="confirm-settings-dialog-content">
+                </div>
+            <div class="dialog-buttons">
+                <button class="cancel-btn">Decline</button>
+                <button class="confirm-btn">Accept & Delete Packet</button>
+            </div>
+        </div>
+    </div>
+    <script type="module" src="sidebar.js"></script>
 </body>
 </html>
