@@ -1,10 +1,58 @@
 /* ext/selector.css */
 
-body.unlock-tool-active-text {
+/* --- NEW: General styles when any tool is active --- */
+body.unlock-tool-active {
+    outline: 3px solid #8ab4f8 !important;
+    outline-offset: -3px;
+    box-shadow: inset 0 0 20px rgba(138, 180, 248, 0.4);
+}
+
+/* --- NEW: Overlay styles --- */
+#unlock-selector-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    z-index: 2147483647;
+    background: rgba(32, 33, 36, 0.8);
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+    padding: 8px 0;
+    text-align: center;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+}
+.unlock-selector-box {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 10px;
+}
+.unlock-selector-box p {
+    margin: 0;
+    padding: 0;
+    color: #e8eaed;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-size: 14px;
+}
+.unlock-selector-indicator {
+    width: 10px;
+    height: 10px;
+    background-color: #f28b82;
+    border-radius: 50%;
+    animation: unlock-blink 1.5s infinite ease-in-out;
+}
+@keyframes unlock-blink {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+}
+
+
+/* --- Original styles for tool-specific cursors/highlights --- */
+body.unlock-text-tool-active {
     cursor: text !important;
 }
 
-body.unlock-tool-active-image img {
+body.unlock-image-tool-active img {
     cursor: grab !important;
     outline: 3px dashed #8ab4f8 !important;
     outline-offset: 3px;
@@ -12,7 +60,7 @@ body.unlock-tool-active-image img {
     transition: outline 0.2s ease, box-shadow 0.2s ease;
 }
 
-body.unlock-tool-active-image img:hover {
+body.unlock-image-tool-active img:hover {
     outline-color: #f28b82 !important;
     box-shadow: 0 0 20px rgba(242, 139, 130, 0.9);
 }

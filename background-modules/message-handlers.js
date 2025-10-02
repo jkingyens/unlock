@@ -380,27 +380,39 @@ const actionHandlers = {
     // --- START OF NEW CODE ---
     'activate_selector_tool': async (data, sender, sendResponse) => {
         const { toolType, sourceUrl } = data;
-        // Find the tab that is showing the sourceUrl for the current packet
-        const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-        const context = await getPacketContext(activeTab.id);
-
-        if (context && context.canonicalPacketUrl === sourceUrl) {
-            try {
-                await chrome.tabs.sendMessage(activeTab.id, { action: 'activate_selector_tool', data: { toolType } });
-            } catch (e) { /* Tab might not be ready, which is okay */ }
+        const allTabs = await chrome.tabs.query({});
+        for (const tab of allTabs) {
+            const context = await getPacketContext(tab.id);
+            if (context && context.canonicalPacketUrl === sourceUrl) {
+                try {
+                    await chrome.tabs.sendMessage(tab.id, { action: 'activate_selector_tool', data: { toolType } });
+                } catch (e) { /* Tab might not be ready, which is okay */ }
+            }
         }
         sendResponse({ success: true });
     },
     'deactivate_selector_tool': async (data, sender, sendResponse) => {
         const { sourceUrl } = data;
-        const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-        const context = await getPacketContext(activeTab.id);
-        
-        if (context && context.canonicalPacketUrl === sourceUrl) {
-            try {
-                await chrome.tabs.sendMessage(activeTab.id, { action: 'deactivate_selector_tool' });
-            } catch (e) { /* Tab might not be ready */ }
+        const allTabs = await chrome.tabs.query({});
+        for (const tab of allTabs) {
+            const context = await getPacketContext(tab.id);
+            if (context && context.canonicalPacketUrl === sourceUrl) {
+                try {
+                    await chrome.tabs.sendMessage(tab.id, { action: 'deactivate_selector_tool' });
+                } catch (e) { /* Tab might not be ready */ }
+            }
         }
+        sendResponse({ success: true });
+    },
+    'deactivate_selector_tool_global': async (data, sender, sendResponse) => {
+        const allTabs = await chrome.tabs.query({});
+        for (const tab of allTabs) {
+            try {
+                await chrome.tabs.sendMessage(tab.id, { action: 'deactivate_selector_tool' });
+            } catch (e) { /* Tab might not be ready or have the content script */ }
+        }
+        // Also notify the sidebar to update its UI
+        sidebarHandler.notifySidebar('deactivate_all_interactive_cards');
         sendResponse({ success: true });
     },
     'content_script_data_captured': (data, sender, sendResponse) => {

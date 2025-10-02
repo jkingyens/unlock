@@ -109,13 +109,13 @@ function setupGlobalListeners() {
 // --- Navigation & View Management ---
 
 export async function navigateTo(viewName, instanceId = null, data = null) {
-    // --- START OF FIX: Logic for tab group synchronization ---
+    // --- START OF FIX: Gracefully handle messaging errors for tab groups ---
     // If we are navigating away from a detail view, tell the background to collapse the group.
     if (currentView === 'packet-detail' && currentInstanceId && (viewName !== 'packet-detail' || currentInstanceId !== instanceId)) {
         sendMessageToBackground({
             action: 'collapse_tab_group_for_instance',
             data: { instanceId: currentInstanceId }
-        }).catch(e => logger.warn('Sidebar', 'Failed to send collapse message', e));
+        }).catch(e => logger.warn('Sidebar', 'Failed to send collapse message (service worker may be waking up).', e.message));
     }
     // --- END OF FIX ---
 
@@ -159,12 +159,12 @@ export async function navigateTo(viewName, instanceId = null, data = null) {
 
                 await detailView.displayPacketContent(instanceData, browserState, currentPacketUrl);
                 
-                // --- START OF FIX: Logic for tab group synchronization ---
+                // --- START OF FIX: Gracefully handle messaging errors for tab groups ---
                 // If we are navigating to a detail view, tell the background to expand the group.
                 sendMessageToBackground({
                     action: 'expand_tab_group_for_instance',
                     data: { instanceId: currentInstanceId }
-                }).catch(e => logger.warn('Sidebar', 'Failed to send expand message', e));
+                }).catch(e => logger.warn('Sidebar', 'Failed to send expand message (service worker may be waking up).', e.message));
                 // --- END OF FIX ---
                 break;
             case 'create':
@@ -289,6 +289,11 @@ async function handleBackgroundMessage(message) {
     const { action, data } = message;
 
     switch (action) {
+        case 'deactivate_all_interactive_cards':
+            document.querySelectorAll('.card.listening-for-input').forEach(card => {
+                card.classList.remove('listening-for-input');
+            });
+            break;
         case 'draft_packet_created':
             if (data.draft) {
                 dialogHandler.hideCreateSourceDialog();
