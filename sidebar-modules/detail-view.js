@@ -404,7 +404,7 @@ export function updateCardVisibility(instance) {
 
     domRefs.detailCardsContainer.querySelectorAll('.card').forEach(card => {
         const cardUrl = card.dataset.url;
-        const isVisited = cardUrl && visitedUrlsSet.has(cardUrl);
+        const isVisited = (cardUrl && visitedUrlsSet.has(cardUrl)) || (card.dataset.lrl && visitedUrlsSet.has(card.dataset.lrl));
         card.classList.toggle('visited', isVisited);
 
         const momentIndices = card.dataset.momentIndices ? JSON.parse(card.dataset.momentIndices) : [];
@@ -412,14 +412,17 @@ export function updateCardVisibility(instance) {
             const isRevealed = momentIndices.some(index => instance.momentsTripped && instance.momentsTripped[index] === 1);
             
             const wasHidden = card.classList.contains('hidden-by-rule');
-            if (isRevealed && wasHidden) {
-                logger.log('CardLogger:Reveal', `Revealing card: "${card.querySelector('.card-title')?.textContent.trim()}"`, {
-                    momentIndices: momentIndices,
-                    momentsTrippedState: instance.momentsTripped
-                });
-            }
-            
             card.classList.toggle('hidden-by-rule', !isRevealed);
+
+            if (card.dataset.format === 'interactive-input') {
+                if (isRevealed) {
+                    card.style.opacity = '1.0';
+                    card.classList.add('drop-zone-active'); 
+                } else {
+                    card.style.opacity = '0.7';
+                    card.classList.remove('drop-zone-active');
+                }
+            }
         }
     });
 }
@@ -492,11 +495,12 @@ async function createCardsSection(instance) {
 }
 
 async function createContentCard(contentItem, instance) {
-    if (!contentItem || !contentItem.format) return null;
+    if (!contentItem) return null; 
 
     const card = document.createElement('div');
     card.className = 'card';
-    const { url, lrl, title = 'Untitled', context = '', format, origin, cacheable } = contentItem;
+    const { url, lrl, title = 'Untitled', context = '', format = 'unknown', origin, cacheable, output, sourceUrl } = contentItem;
+    card.dataset.format = format;
 
     if (url) card.dataset.url = url;
     if (lrl) card.dataset.lrl = lrl;
@@ -544,6 +548,46 @@ async function createContentCard(contentItem, instance) {
             iconContainer.classList.add('needs-download');
             iconContainer.querySelector('.download-icon').style.display = 'block';
         }
+    } else if (format === 'interactive-input') {
+        card.innerHTML = `
+            <div class="card-icon">📥</div>
+            <div class="card-text">
+                <div class="card-title">${title}</div>
+                <div class="card-url">${context || 'Awaiting input...'}</div>
+            </div>`;
+        isClickable = false;
+        // --- START OF NEW CODE ---
+        card.addEventListener('mouseenter', () => {
+            if (card.classList.contains('drop-zone-active')) {
+                console.log('LOG: Mouse enter on active drop zone. Activating tool.');
+                sendMessageToBackground({
+                    action: 'activate_selector_tool',
+                    data: {
+                        sourceUrl: sourceUrl,
+                        toolType: output.contentType.startsWith('image') ? 'image' : 'text'
+                    }
+                });
+            }
+        });
+        card.addEventListener('mouseleave', () => {
+             if (card.classList.contains('drop-zone-active')) {
+                console.log('LOG: Mouse leave from active drop zone. Deactivating tool.');
+                sendMessageToBackground({
+                    action: 'deactivate_selector_tool',
+                    data: { sourceUrl: sourceUrl }
+                });
+            }
+        });
+        // --- END OF NEW CODE ---
+    } else {
+        card.innerHTML = `
+            <div class="card-icon">❓</div>
+            <div class="card-text">
+                <div class="card-title">${title}</div>
+                <div class="card-url">Unknown item type: ${format}</div>
+            </div>`;
+        card.style.opacity = '0.6';
+        isClickable = false;
     }
     
     if (!isClickable) {
@@ -551,35 +595,50 @@ async function createContentCard(contentItem, instance) {
     }
 
     const visitedUrlsSet = new Set(instance.visitedUrls || []);
-    const isVisited = url && visitedUrlsSet.has(url);
+    const isVisited = (url && visitedUrlsSet.has(url)) || (lrl && visitedUrlsSet.has(lrl));
 
     if (isVisited) {
         card.classList.add('visited');
     }
     
-    if (!instance.sourceContent) {
-        instance.sourceContent = instance.contents; // Fallback for older instances
-    }
-
-    const imageItem = instance.sourceContent.find(item => {
-        if (origin === 'external') {
-            return item.url === url;
-        } else { // 'internal'
-            return item.lrl === lrl;
-        }
-    }) || contentItem;
-    if (!imageItem) {
-        logger.error("DetailView", "Could not find matching image item for instance item", { contentItem });
-        return card; // Return a partially rendered card to prevent a crash
-    }
-    
     const momentIndices = Array.isArray(contentItem.revealedByMoments) ? contentItem.revealedByMoments : [];
-
     if (momentIndices.length > 0) {
         card.dataset.momentIndices = JSON.stringify(momentIndices);
         const isRevealed = momentIndices.some(index => instance.momentsTripped && instance.momentsTripped[index] === 1);
+        
         if (!isRevealed) {
             card.classList.add('hidden-by-rule');
+        }
+
+        if (isRevealed && format === 'interactive-input') {
+            card.style.opacity = '1.0';
+            card.classList.add('drop-zone-active');
+            
+            card.addEventListener('dragover', (e) => {
+                e.preventDefault();
+                card.classList.add('drag-over');
+            });
+            card.addEventListener('dragleave', () => {
+                card.classList.remove('drag-over');
+            });
+            card.addEventListener('drop', async (e) => {
+                e.preventDefault();
+                card.classList.remove('drag-over');
+                const data = e.dataTransfer.getData('text/uri-list') || e.dataTransfer.getData('text/plain');
+                if (data) {
+                    card.classList.add('visited');
+                    await sendMessageToBackground({
+                        action: 'save_packet_output',
+                        data: {
+                            instanceId: instance.instanceId,
+                            lrl: contentItem.lrl,
+                            capturedData: data,
+                            outputDescription: output.description,
+                            outputContentType: output.contentType
+                        }
+                    });
+                }
+            });
         }
     }
 

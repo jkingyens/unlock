@@ -171,14 +171,12 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
         packetUrl = null;
     }
 
-    // --- START OF FIX ---
     if (instance && packetUrl) {
         const itemForVisitTimer = instance.contents.find(i => i.url === packetUrl);
         if (itemForVisitTimer && !itemForVisitTimer.interactionBasedCompletion) {
             startVisitTimer(activeInfo.tabId, instance.instanceId, itemForVisitTimer.url, `[onActivated]`);
         }
     }
-    // --- END OF FIX ---
 
     sidebarHandler.notifySidebar('update_sidebar_context', {
         tabId: activeInfo.tabId,
@@ -189,6 +187,24 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
 
     await notifyUIsOfStateChange({ animate: false });
 });
+
+chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+    if (changeInfo.status === 'complete' && tab.url && tab.url.startsWith('http')) {
+        try {
+            await chrome.scripting.executeScript({
+                target: { tabId: tabId },
+                files: ['selector.js']
+            });
+            await chrome.scripting.insertCSS({
+                target: { tabId: tabId },
+                files: ['selector.css']
+            });
+        } catch (e) {
+            // This can fail on certain pages, which is acceptable.
+        }
+    }
+});
+
 
 chrome.tabs.onRemoved.addListener((tabId, removeInfo) => {
     tabGroupHandler.handleTabRemovalCleanup(tabId, removeInfo);
@@ -212,13 +228,11 @@ chrome.tabs.onMoved.addListener(async (tabId, moveInfo) => {
     } catch (e) {}
 });
 
-// --- START OF FIX: Add robust listener for all group changes ---
 chrome.tabGroups.onUpdated.addListener(async (group) => {
     if (group.title && group.title.startsWith(GROUP_TITLE_PREFIX)) {
         await scheduleReorder(group.id);
     }
 });
-// --- END OF FIX ---
 
 chrome.webNavigation.onBeforeNavigate.addListener(onBeforeNavigate);
 chrome.webNavigation.onCommitted.addListener(onCommitted);

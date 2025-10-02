@@ -584,13 +584,27 @@ const packetUtils = {
         if (!Array.isArray(instance.contents)) {
             return { visitedCount: 0, totalCount: 0, progressPercentage: 0 };
         }
-        const trackableItems = instance.contents.filter(item => item.url && item.format === 'html');
+        
+        // --- START OF FIX ---
+        // A trackable item is now any item with a URL OR any interactive item.
+        const trackableItems = instance.contents.filter(item => 
+            item.url || item.format === 'interactive-input'
+        );
+        // --- END OF FIX ---
+
         const totalCount = trackableItems.length;
         if (totalCount === 0) {
             return { visitedCount: 0, totalCount: 0, progressPercentage: 100 };
         }
         const visitedUrlsSet = new Set(instance.visitedUrls || []);
-        const visitedCount = trackableItems.filter(item => visitedUrlsSet.has(item.url)).length;
+        
+        // --- START OF FIX ---
+        // The visited count now checks for either the URL or the LRL in the visited set.
+        const visitedCount = trackableItems.filter(item => 
+            (item.url && visitedUrlsSet.has(item.url)) || 
+            (item.format === 'interactive-input' && item.lrl && visitedUrlsSet.has(item.lrl))
+        ).length;
+        // --- END OF FIX ---
         
         return {
             visitedCount: visitedCount,

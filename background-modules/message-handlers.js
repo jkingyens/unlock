@@ -334,8 +334,81 @@ async function ensurePdfIsCached(instanceId, url, lrl) {
     return { success: true, wasCached: false, content: pdfBuffer };
 }
 
+async function handleSavePacketOutput(data, sender, sendResponse) {
+    const { instanceId, lrl, capturedData, outputDescription, outputContentType } = data;
+    if (!instanceId || !lrl || !capturedData) {
+        return sendResponse({ success: false, error: 'Missing required data for saving packet output.' });
+    }
+
+    try {
+        const instance = await storage.getPacketInstance(instanceId);
+        if (!instance) {
+            throw new Error(`Instance ${instanceId} not found.`);
+        }
+
+        if (!Array.isArray(instance.packetOutputs)) {
+            instance.packetOutputs = [];
+        }
+
+        instance.packetOutputs.push({
+            sourceLrl: lrl,
+            capturedData: capturedData,
+            outputDescription: outputDescription,
+            outputContentType: outputContentType
+        });
+
+        if (!Array.isArray(instance.visitedUrls)) {
+            instance.visitedUrls = [];
+        }
+        if (!instance.visitedUrls.includes(lrl)) {
+            instance.visitedUrls.push(lrl);
+        }
+
+        await storage.savePacketInstance(instance);
+
+        sidebarHandler.notifySidebar('packet_instance_updated', { instance });
+        sendResponse({ success: true });
+
+    } catch (error) {
+        logger.error('MessageHandler:handleSavePacketOutput', 'Error saving packet output', error);
+        sendResponse({ success: false, error: error.message });
+    }
+}
+
 const actionHandlers = {
-    
+    'save_packet_output': handleSavePacketOutput,
+    // --- START OF NEW CODE ---
+    'activate_selector_tool': async (data, sender, sendResponse) => {
+        const { toolType, sourceUrl } = data;
+        // Find the tab that is showing the sourceUrl for the current packet
+        const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        const context = await getPacketContext(activeTab.id);
+
+        if (context && context.canonicalPacketUrl === sourceUrl) {
+            try {
+                await chrome.tabs.sendMessage(activeTab.id, { action: 'activate_selector_tool', data: { toolType } });
+            } catch (e) { /* Tab might not be ready, which is okay */ }
+        }
+        sendResponse({ success: true });
+    },
+    'deactivate_selector_tool': async (data, sender, sendResponse) => {
+        const { sourceUrl } = data;
+        const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        const context = await getPacketContext(activeTab.id);
+        
+        if (context && context.canonicalPacketUrl === sourceUrl) {
+            try {
+                await chrome.tabs.sendMessage(activeTab.id, { action: 'deactivate_selector_tool' });
+            } catch (e) { /* Tab might not be ready */ }
+        }
+        sendResponse({ success: true });
+    },
+    'content_script_data_captured': (data, sender, sendResponse) => {
+        // Relay this message directly to the sidebar
+        sidebarHandler.notifySidebar('data_captured_from_content', data);
+        sendResponse({ success: true });
+    },
+    // --- END OF NEW CODE ---
     'prepare_in_packet_navigation': async (data, sender, sendResponse) => {
         const tabId = sender.tab?.id;
         const destinationUrl = data?.destinationUrl;
@@ -504,7 +577,6 @@ const actionHandlers = {
     },
     'initiate_packet_creation_from_tab': (data, s, r) => processCreatePacketRequestFromTab(s.tab.id).then(r),
     'initiate_packet_creation': (data, s, r) => processCreatePacketRequest(data, s.tab?.id).then(r),
-    // --- START OF FIX: Notify sidebar upon successful instantiation ---
     'instantiate_packet': async (data, sender, sendResponse) => {
         const result = await instantiatePacket(data.imageId, data.instanceId, sender.tab?.id);
         if (result.success) {
@@ -512,7 +584,6 @@ const actionHandlers = {
         }
         sendResponse(result);
     },
-    // --- END OF FIX ---
     'delete_packets': (data, s, r) => processDeletePacketsRequest(data).then(r),
     'mark_url_visited': handleMarkUrlVisited,
     'media_playback_complete': async (data, sender, sendResponse) => {
@@ -521,9 +592,7 @@ const actionHandlers = {
         const visitResult = await packetUtils.markUrlAsVisited(activeMediaPlayback.instance, data.url);
         if (visitResult.success && visitResult.modified) {
             await storage.savePacketInstance(visitResult.instance);
-            // --- START OF FIX ---
-            activeMediaPlayback.instance = visitResult.instance; // Keep the global state in sync
-            // --- END OF FIX ---
+            activeMediaPlayback.instance = visitResult.instance; 
             await notifyUIsOfStateChange({ showVisitedAnimation: true });
             await checkAndPromptForCompletion('MessageHandler', visitResult, data.instanceId);
         }
@@ -565,7 +634,9 @@ const actionHandlers = {
             const instance = await storage.getPacketInstance(instanceId);
             if (!instance) throw new Error(`Instance ${instanceId} not found.`);
             return handleOpenContent({ instance, url }, sender, sendResponse);
-        } catch (error) { sendResponse({ success: false, error: error.message }); }
+        } catch (error) {
+            sendResponse({ success: false, error: error.message });
+        }
     },
     'get_context_for_tab': handleGetContextForTab,
     'get_current_tab_context': handleGetCurrentTabContext,

@@ -1,0 +1,18 @@
+/* ext/selector.css */
+
+body.unlock-tool-active-text {
+    cursor: text !important;
+}
+
+body.unlock-tool-active-image img {
+    cursor: grab !important;
+    outline: 3px dashed #8ab4f8 !important;
+    outline-offset: 3px;
+    box-shadow: 0 0 15px rgba(138, 180, 248, 0.7);
+    transition: outline 0.2s ease, box-shadow 0.2s ease;
+}
+
+body.unlock-tool-active-image img:hover {
+    outline-color: #f28b82 !important;
+    box-shadow: 0 0 20px rgba(242, 139, 130, 0.9);
+}
