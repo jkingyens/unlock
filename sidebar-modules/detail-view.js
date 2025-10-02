@@ -412,7 +412,6 @@ export async function displayPacketContent(instance, browserState, canonicalPack
     }
 }
 
-// --- START OF FIX: This function now attaches handlers when a card is revealed ---
 export function updateCardVisibility(instance) {
     if (!domRefs.detailCardsContainer || !instance) return;
     
@@ -433,8 +432,7 @@ export function updateCardVisibility(instance) {
             if (card.dataset.format === 'interactive-input') {
                 if (isRevealed) {
                     card.style.opacity = '1.0';
-                    card.classList.add('drop-zone-active'); 
-                    // If the card was hidden and is now revealed, attach its handlers.
+                    card.classList.add('drop-zone-active', 'clickable'); 
                     if (wasHidden) {
                         const lrl = card.dataset.lrl;
                         const contentItem = instance.contents.find(item => item.lrl === lrl);
@@ -450,7 +448,6 @@ export function updateCardVisibility(instance) {
         }
     });
 }
-// --- END OF FIX ---
 
 
 function processQueuedDisplayRequest() {
@@ -519,7 +516,6 @@ async function createCardsSection(instance) {
     return cardsWrapper;
 }
 
-// --- START OF FIX: New function to attach event handlers ---
 function attachInteractiveCardHandlers(card, contentItem, instance) {
     if (card.dataset.handlersAttached === 'true') return;
     card.dataset.handlersAttached = 'true';
@@ -566,7 +562,6 @@ function attachInteractiveCardHandlers(card, contentItem, instance) {
         }
     });
 }
-// --- END OF FIX ---
 
 async function createContentCard(contentItem, instance) {
     if (!contentItem) return null; 
@@ -663,9 +658,7 @@ async function createContentCard(contentItem, instance) {
         if (isRevealed && format === 'interactive-input') {
             card.style.opacity = '1.0';
             card.classList.add('drop-zone-active', 'clickable');
-            // --- START OF FIX: Call the handler attachment function ---
             attachInteractiveCardHandlers(card, contentItem, instance);
-            // --- END OF FIX ---
         }
     }
 
