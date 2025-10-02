@@ -42,7 +42,9 @@
         "overlay.js",
         "overlay.css",
         "preview.html",
-        "page_interceptor.js"
+        "page_interceptor.js",
+        "selector.js",
+        "selector.css"
       ],
       "matches": [
         "<all_urls>"

@@ -790,3 +790,14 @@ body.dark-mode .waveform-link-marker.visited {
 .qr-code-btn:hover {
     background-color: var(--button-secondary-hover-bg) !important;
 }
+
+/* --- Interactive Drop Zone Styles --- */
+.card.drop-zone-active {
+    border: 2px dashed var(--text-accent);
+    background-color: var(--bg-accent);
+}
+
+.card.drop-zone-active.drag-over {
+    transform: scale(1.03);
+    box-shadow: 0 0 15px var(--link-pulse-glow-color);
+}

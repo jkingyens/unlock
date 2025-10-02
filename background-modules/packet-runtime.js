@@ -151,25 +151,31 @@ class PacketRuntime {
             if (itemForVisitTimer && !itemForVisitTimer.interactionBasedCompletion) {
                 startVisitTimer(tabId, this.instance.instanceId, itemForVisitTimer.url, this.logPrefix);
             }
-            if (itemForVisitTimer) {
-                let momentTripped = false;
-                (this.instance.moments || []).forEach((moment, index) => {
-                    if (moment.type === 'visit' && moment.sourceUrl === itemForVisitTimer.lrl && this.instance.momentsTripped[index] === 0) {
-                        this.instance.momentsTripped[index] = 1;
-                        momentTripped = true;
-                    }
-                });
-                if (momentTripped) {
-                    await storage.savePacketInstance(this.instance);
-                    if (activeMediaPlayback.instanceId === this.instance.instanceId) {
-                        activeMediaPlayback.instance = this.instance;
-                    }
-                    sidebarHandler.notifySidebar('moment_tripped', {
-                        instanceId: this.instance.instanceId,
-                        instance: this.instance,
-                    });
+
+            // --- START OF NEW CODE ---
+            let momentTripped = false;
+            console.log(`[DEBUG_LOG 4/4] Checking for visit moments. Current URL in context: ${finalContext.canonicalPacketUrl}`); // ADDED FOR DEBUGGING
+            (this.instance.moments || []).forEach((moment, index) => {
+                // ADDED FOR DEBUGGING
+                console.log(`[DEBUG_LOG 4/4]   - Comparing with moment #${index} (${moment.type}) for URL: ${moment.sourceUrl}`);
+                if (moment.type === 'visit' && moment.sourceUrl === finalContext.canonicalPacketUrl && this.instance.momentsTripped[index] === 0) {
+                    this.instance.momentsTripped[index] = 1;
+                    momentTripped = true;
+                    logger.log(this.logPrefix, `Tripped 'visit' moment for URL: ${moment.sourceUrl}`);
                 }
+            });
+
+            if (momentTripped) {
+                await storage.savePacketInstance(this.instance);
+                if (activeMediaPlayback.instanceId === this.instance.instanceId) {
+                    activeMediaPlayback.instance = this.instance;
+                }
+                sidebarHandler.notifySidebar('packet_instance_updated', {
+                    instance: this.instance,
+                    source: 'moment_trip'
+                });
             }
+            // --- END OF NEW CODE ---
         }
     }
     

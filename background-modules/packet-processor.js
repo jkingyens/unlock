@@ -63,7 +63,7 @@ export async function instantiatePacket(imageId, preGeneratedInstanceId, initiat
             }
         }
 
-        const internalContentToUpload = packetImage.sourceContent.filter(item => item.origin === 'internal');
+        const internalContentToUpload = packetImage.sourceContent.filter(item => item.origin === 'internal' && item.format !== 'interactive-input');
         const totalFilesToUpload = internalContentToUpload.length;
         let filesUploaded = 0;
         let activeCloudConfig = null;
@@ -80,6 +80,13 @@ export async function instantiatePacket(imageId, preGeneratedInstanceId, initiat
         
         for (const item of packetInstanceContents) {
             if (item.origin === 'internal') {
+                // --- START OF FIX ---
+                // Interactive inputs are placeholders for user data; they have no content to upload.
+                if (item.format === 'interactive-input') {
+                    continue;
+                }
+                // --- END OF FIX ---
+
                 const lrl = item.lrl;
                 if (!lrl) continue;
                 
@@ -117,9 +124,12 @@ export async function instantiatePacket(imageId, preGeneratedInstanceId, initiat
 
         const validUrls = new Set(packetInstanceContents.map(item => item.url).filter(Boolean));
         const validLrls = new Set(packetInstanceContents.map(item => item.lrl).filter(Boolean));
-        const filteredMoments = (packetImage.moments || []).filter(moment => validLrls.has(moment.sourceUrl));
+        
+        const filteredMoments = (packetImage.moments || []).filter(moment => 
+            moment.sourceUrl.startsWith('/') ? validLrls.has(moment.sourceUrl) : validUrls.has(moment.sourceUrl)
+        );
         const filteredCheckpoints = (packetImage.checkpoints || []).filter(checkpoint => checkpoint.requiredItems.every(item => validUrls.has(item.url)));
-
+        
         const packetInstance = {
             instanceId: instanceId,
             imageId: imageId,
@@ -136,8 +146,6 @@ export async function instantiatePacket(imageId, preGeneratedInstanceId, initiat
 
         await storage.savePacketInstance(packetInstance);
         
-        // --- DELEGATION TO RUNTIME API ---
-        // Instead of managing rules and state here, we instantiate and start the runtime.
         const runtime = new PacketRuntime(packetInstance);
         await runtime.start();
         
@@ -149,10 +157,6 @@ export async function instantiatePacket(imageId, preGeneratedInstanceId, initiat
     } catch (error) {
         logger.error('PacketProcessor:instantiatePacket', 'Error during instantiation', { imageId, instanceId, error });
         sendProgressNotification('packet_creation_failed', { instanceId: instanceId, error: error.message });
-        
-        // Note: The rollback of cloud files would now be part of the runtime's delete logic,
-        // but since the runtime was never successfully started, a manual cleanup is okay here.
-        // In a more advanced version, this could be a static method on the runtime.
         
         return { success: false, error: error.message || 'Unknown instantiation error' };
     }
@@ -172,18 +176,14 @@ export async function processDeletePacketsRequest(data, initiatorTabId = null) {
             const instance = await storage.getPacketInstance(instanceId);
             if (!instance) {
                 logger.warn('PacketProcessor:delete', `Instance ${instanceId} not found, cleaning up any stale artifacts.`);
-                // Clean up potential orphaned browser state anyway
                 await storage.deletePacketBrowserState(instanceId).catch(()=>{});
                 await ruleManager.removePacketRules(instanceId);
                 continue;
             }
 
-            // --- DELEGATION TO RUNTIME API ---
-            // The runtime now handles the complex deletion of browser and cloud artifacts.
             const runtime = new PacketRuntime(instance);
             await runtime.delete();
             
-            // This module's remaining responsibility is to delete the core data object.
             await storage.deletePacketInstance(instanceId);
 
             sendProgressNotification('packet_instance_deleted', { packetId: instanceId, source: 'user_action' });
@@ -204,10 +204,6 @@ export async function processDeletePacketsRequest(data, initiatorTabId = null) {
     sendProgressNotification('packet_deletion_complete', result);
     return result;
 }
-
-// --- Unchanged Functions (publishImageForSharing, importImageFromUrl, etc.) ---
-// These functions already focus on the data/image layer and do not manage live
-// browser state, so they do not need to change.
 
 export async function processDeletePacketImageRequest(data) {
     const { imageId } = data;
@@ -237,7 +233,6 @@ export async function importImageFromUrl(url) {
     const newImageId = `img_${Date.now()}_imported_${Math.random().toString(36).substring(2, 9)}`;
 
     try {
-        // Stencil notifications are part of the UI feedback for data creation, so they remain.
         sendProgressNotification('packet_creation_progress', { imageId: newImageId, status: 'active', text: 'Downloading...', progressPercent: 10, title: 'Importing Packet...' });
         const response = await fetch(url, { cache: 'no-store' });
         if (!response.ok) throw new Error(`Failed to download packet from URL (${response.status})`);
