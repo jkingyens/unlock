@@ -25,7 +25,58 @@ export function init(dependencies) {
     sendMessageToBackground = dependencies.sendMessageToBackground;
     navigateTo = dependencies.navigateTo;
     openUrl = dependencies.openUrl;
+
+    // --- START OF NEW CODE ---
+    // Listen for data captured by the content script (for text selection)
+    chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+        if (message.action === 'data_captured_from_content') {
+            console.log("LOG: Sidebar received 'data_captured_from_content'", message.data);
+            handleDataCaptured(message.data);
+        }
+    });
+    // --- END OF NEW CODE ---
 }
+
+// --- START OF NEW CODE ---
+async function handleDataCaptured(data) {
+    const listeningCard = document.querySelector('.card.listening-for-input');
+    if (!listeningCard) {
+        console.log("LOG: Data captured but no card is listening.");
+        return;
+    }
+
+    const instanceId = listeningCard.closest('#detail-cards-container')?.dataset.instanceId;
+    const lrl = listeningCard.dataset.lrl;
+    
+    if (instanceId && lrl) {
+        const instance = await storage.getPacketInstance(instanceId);
+        const contentItem = instance.contents.find(item => item.lrl === lrl);
+        
+        if (contentItem) {
+            console.log("LOG: Found matching card and item. Saving data.", { lrl, capturedData: data.payload });
+            listeningCard.classList.remove('listening-for-input');
+            listeningCard.classList.add('visited');
+            
+            await sendMessageToBackground({
+                action: 'save_packet_output',
+                data: {
+                    instanceId: instanceId,
+                    lrl: lrl,
+                    capturedData: data.payload,
+                    outputDescription: contentItem.output.description,
+                    outputContentType: contentItem.output.contentType
+                }
+            });
+
+            // Deactivate the tool on the content page
+            sendMessageToBackground({ 
+                action: 'deactivate_selector_tool', 
+                data: { sourceUrl: contentItem.sourceUrl } 
+            });
+        }
+    }
+}
+// --- END OF NEW CODE ---
 
 
 /**
@@ -420,7 +471,7 @@ export function updateCardVisibility(instance) {
                     card.classList.add('drop-zone-active'); 
                 } else {
                     card.style.opacity = '0.7';
-                    card.classList.remove('drop-zone-active');
+                    card.classList.remove('drop-zone-active', 'listening-for-input');
                 }
             }
         }
@@ -553,32 +604,9 @@ async function createContentCard(contentItem, instance) {
             <div class="card-icon">📥</div>
             <div class="card-text">
                 <div class="card-title">${title}</div>
-                <div class="card-url">${context || 'Awaiting input...'}</div>
+                <div class="card-url">${context || 'Click to activate...'}</div>
             </div>`;
         isClickable = false;
-        // --- START OF NEW CODE ---
-        card.addEventListener('mouseenter', () => {
-            if (card.classList.contains('drop-zone-active')) {
-                console.log('LOG: Mouse enter on active drop zone. Activating tool.');
-                sendMessageToBackground({
-                    action: 'activate_selector_tool',
-                    data: {
-                        sourceUrl: sourceUrl,
-                        toolType: output.contentType.startsWith('image') ? 'image' : 'text'
-                    }
-                });
-            }
-        });
-        card.addEventListener('mouseleave', () => {
-             if (card.classList.contains('drop-zone-active')) {
-                console.log('LOG: Mouse leave from active drop zone. Deactivating tool.');
-                sendMessageToBackground({
-                    action: 'deactivate_selector_tool',
-                    data: { sourceUrl: sourceUrl }
-                });
-            }
-        });
-        // --- END OF NEW CODE ---
     } else {
         card.innerHTML = `
             <div class="card-icon">❓</div>
@@ -612,18 +640,37 @@ async function createContentCard(contentItem, instance) {
 
         if (isRevealed && format === 'interactive-input') {
             card.style.opacity = '1.0';
-            card.classList.add('drop-zone-active');
+            card.classList.add('drop-zone-active', 'clickable'); // It's clickable to activate
             
-            card.addEventListener('dragover', (e) => {
-                e.preventDefault();
-                card.classList.add('drag-over');
+            card.addEventListener('click', () => {
+                const isActive = card.classList.contains('listening-for-input');
+                console.log(`LOG: Interactive card clicked. Is active? ${isActive}`);
+                
+                // Deactivate all other listening cards
+                document.querySelectorAll('.listening-for-input').forEach(c => {
+                    if (c !== card) {
+                        c.classList.remove('listening-for-input');
+                    }
+                });
+
+                if (isActive) {
+                    card.classList.remove('listening-for-input');
+                    sendMessageToBackground({ action: 'deactivate_selector_tool', data: { sourceUrl } });
+                } else {
+                    card.classList.add('listening-for-input');
+                    const toolType = output.contentType.startsWith('image') ? 'image' : 'text';
+                    sendMessageToBackground({ action: 'activate_selector_tool', data: { sourceUrl, toolType } });
+                }
             });
-            card.addEventListener('dragleave', () => {
-                card.classList.remove('drag-over');
-            });
+
+            // The rest of the drag/drop listeners remain
+            card.addEventListener('dragover', (e) => { e.preventDefault(); card.classList.add('drag-over'); });
+            card.addEventListener('dragleave', () => { card.classList.remove('drag-over'); });
             card.addEventListener('drop', async (e) => {
                 e.preventDefault();
-                card.classList.remove('drag-over');
+                card.classList.remove('drag-over', 'listening-for-input');
+                sendMessageToBackground({ action: 'deactivate_selector_tool', data: { sourceUrl } });
+                
                 const data = e.dataTransfer.getData('text/uri-list') || e.dataTransfer.getData('text/plain');
                 if (data) {
                     card.classList.add('visited');
@@ -648,7 +695,10 @@ async function createContentCard(contentItem, instance) {
             playMediaInCard(card, contentItem, instance);
         } else {
             card.addEventListener('click', async (e) => {
-                if (card.classList.contains('opening')) return;
+                // --- START OF FIX ---
+                // This handler is for navigation, so we explicitly ignore our interactive cards.
+                if (card.classList.contains('opening') || format === 'interactive-input') return;
+                // --- END OF FIX ---
 
                 const iconContainer = card.querySelector('.card-icon-container');
                 if (iconContainer && iconContainer.classList.contains('needs-download')) {
