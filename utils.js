@@ -307,7 +307,6 @@ const indexedDbStorage = {
                         const currentKey = String(cursor.key);
                         const imageId = currentKey.split('::')[0];
                         
-                        // Only check keys that are not instance caches
                         if (!imageId.startsWith('inst_') && !validImageIds.has(imageId)) {
                             cursor.delete();
                             deletedCount++;
@@ -525,7 +524,6 @@ const storage = {
       chrome.storage.session.remove(key, () => resolve());
     });
   },
-  // --- START OF FIX: New function to clear all packet data ---
   async clearAllPacketData() {
     logger.log('Storage:clearAllPacketData', 'Clearing all packet images, instances, browser states, and cached content.');
     await Promise.all([
@@ -538,7 +536,6 @@ const storage = {
     ]);
     logger.log('Storage:clearAllPacketData', 'All packet data has been cleared.');
   }
-  // --- END OF FIX ---
 };
 
 const packetUtils = {
@@ -585,12 +582,9 @@ const packetUtils = {
             return { visitedCount: 0, totalCount: 0, progressPercentage: 0 };
         }
         
-        // --- START OF FIX ---
-        // A trackable item is now any item with a URL OR any interactive item.
         const trackableItems = instance.contents.filter(item => 
             item.url || item.format === 'interactive-input'
         );
-        // --- END OF FIX ---
 
         const totalCount = trackableItems.length;
         if (totalCount === 0) {
@@ -598,13 +592,10 @@ const packetUtils = {
         }
         const visitedUrlsSet = new Set(instance.visitedUrls || []);
         
-        // --- START OF FIX ---
-        // The visited count now checks for either the URL or the LRL in the visited set.
         const visitedCount = trackableItems.filter(item => 
             (item.url && visitedUrlsSet.has(item.url)) || 
             (item.format === 'interactive-input' && item.lrl && visitedUrlsSet.has(item.lrl))
         ).length;
-        // --- END OF FIX ---
         
         return {
             visitedCount: visitedCount,
@@ -707,20 +698,20 @@ const packetUtils = {
         }
 
         const wasCompletedBefore = await this.isPacketInstanceCompleted(instance);
-        const foundItem = this.isUrlInPacket(url, instance, { returnItem: true });
+        const foundItem = instance.contents.find(item => item.url === url || item.lrl === url);
 
         if (!foundItem) {
             return { success: true, notTrackable: true, instance: instance };
         }
-
-        const canonicalUrl = foundItem.url;
-        const alreadyVisited = (instance.visitedUrls || []).includes(canonicalUrl);
+        
+        const canonicalIdentifier = foundItem.url || foundItem.lrl;
+        const alreadyVisited = (instance.visitedUrls || []).includes(canonicalIdentifier);
 
         if (alreadyVisited) {
             return { success: true, alreadyVisited: true, instance: instance };
         }
         
-        instance.visitedUrls = [...(instance.visitedUrls || []), canonicalUrl];
+        instance.visitedUrls = [...(instance.visitedUrls || []), canonicalIdentifier];
         
         this._updateCheckpointsOnVisit(instance);
         

@@ -41,13 +41,11 @@ class PacketRuntime {
     }
 
    async reconcileTab(tabId, url, details) {
-        // --- START DEBUG LOGGING ---
         console.log(`[DEBUG_LOG 1/3] reconcileTab START for url: ${url}`, {
             tabId: tabId,
             transitionType: details.transitionType,
             transitionQualifiers: details.transitionQualifiers
         });
-        // --- END DEBUG LOGGING ---
 
         logger.log(this.logPrefix, `Reconciling navigation for tab ${tabId} to url: ${url}`);
         let currentContext = await getPacketContext(tabId);
@@ -57,17 +55,15 @@ class PacketRuntime {
             const isUserInitiated = ['link', 'typed', 'form_submit', 'reload'].includes(details.transitionType);
             if (newItemInPacket && isUserInitiated) {
                 logger.log(this.logPrefix, `Adopting tab ${tabId} into packet.`);
-                await setPacketContext(tabId, this.instance.instanceId, newItemInPacket.url, url);
+                const canonicalIdentifier = newItemInPacket.url || newItemInPacket.lrl;
+                await setPacketContext(tabId, this.instance.instanceId, canonicalIdentifier, url);
                 currentContext = await getPacketContext(tabId);
             } else {
-                // --- START DEBUG LOGGING ---
                 console.log(`[DEBUG_LOG 2/3] reconcileTab DECISION: No current context and not a user-initiated navigation into the packet. Bailing out.`);
-                // --- END DEBUG LOGGING ---
                 return;
             }
         }
         
-        // --- START OF FIX: Revert to setTimeout ---
         const gracePeriodKey = `grace_period_${tabId}`;
         const graceData = await storage.getSession(gracePeriodKey);
         const gracePeriodStart = graceData ? graceData[gracePeriodKey] : null;
@@ -81,26 +77,24 @@ class PacketRuntime {
                 await storage.removeSession(gracePeriodKey);
             }
         }
-        // --- END OF FIX ---
         
         const isRedirect = details.transitionQualifiers?.includes('server_redirect') || details.transitionQualifiers?.includes('client_redirect');
 
-        // --- START DEBUG LOGGING ---
         console.log(`[DEBUG_LOG 2/3] reconcileTab STATE`, {
             currentContext: currentContext,
-            newItemInPacket: newItemInPacket ? newItemInPacket.url : null,
+            newItemInPacket: newItemInPacket ? (newItemInPacket.url || newItemInPacket.lrl) : null,
             inGracePeriod: inGracePeriod,
             isRedirect: isRedirect,
         });
-        // --- END DEBUG LOGGING ---
 
         if (newItemInPacket) {
-            if (newItemInPacket.url !== currentContext.canonicalPacketUrl) {
+            const canonicalIdentifier = newItemInPacket.url || newItemInPacket.lrl;
+            if (canonicalIdentifier !== currentContext.canonicalPacketUrl) {
                 const allTabs = await chrome.tabs.query({});
                 for (const tab of allTabs) {
                     if (tab.id !== tabId) {
                         const otherContext = await getPacketContext(tab.id);
-                        if (otherContext?.instanceId === this.instance.instanceId && otherContext?.canonicalPacketUrl === newItemInPacket.url) {
+                        if (otherContext?.instanceId === this.instance.instanceId && otherContext?.canonicalPacketUrl === canonicalIdentifier) {
                             logger.log(this.logPrefix, `Found duplicate tab ${tab.id} for "${newItemInPacket.title}". Squashing it.`);
                             try { await chrome.tabs.remove(tab.id); } catch (e) {}
                             break; 
@@ -108,60 +102,50 @@ class PacketRuntime {
                     }
                 }
             }
-            // --- START DEBUG LOGGING ---
-            console.log(`[DEBUG_LOG 3/3] reconcileTab DECISION: Stamping context because newItemInPacket is TRUE.`);
-            // --- END DEBUG LOGGING ---
-            await setPacketContext(tabId, this.instance.instanceId, newItemInPacket.url, url);
+            console.log(`[DEBUG_LOG 3/3] reconcileTab DECISION: Stamping context because newItemInPacket is TRUE. Canonical ID: ${canonicalIdentifier}`);
+            await setPacketContext(tabId, this.instance.instanceId, canonicalIdentifier, url);
             if (inGracePeriod) { await storage.removeSession(gracePeriodKey); } 
 
         } else if (isRedirect) {
             logger.log(this.logPrefix, `Redirect detected for tab ${tabId}. Preserving context and updating browser URL.`);
             if (currentContext) {
-                // --- START DEBUG LOGGING ---
                 console.log(`[DEBUG_LOG 3/3] reconcileTab DECISION: Preserving context because isRedirect is TRUE.`);
-                // --- END DEBUG LOGGING ---
                 await setPacketContext(tabId, currentContext.instanceId, currentContext.canonicalPacketUrl, url);
             }
         } else if (!inGracePeriod) {
             logger.log(this.logPrefix, `Tab ${tabId} navigated outside the packet. Clearing context.`);
-            // --- START DEBUG LOGGING ---
             console.log(`[DEBUG_LOG 3/3] reconcileTab DECISION: Clearing context because newItemInPacket is FALSE and not in grace period.`);
-            // --- END DEBUG LOGGING ---
             await clearPacketContext(tabId);
             if (await shouldUseTabGroups()) {
                 await tabGroupHandler.ejectTabFromGroup(tabId, this.instance.instanceId);
             }
         } else {
-             // --- START DEBUG LOGGING ---
              console.log(`[DEBUG_LOG 3/3] reconcileTab DECISION: No action taken. In grace period but not a redirect or a new packet item.`);
-             // --- END DEBUG LOGGING ---
         }
 
         const finalContext = await getPacketContext(tabId);
         if (finalContext) {
-            // --- START OF FIX ---
-            // Always set a new grace period after successfully confirming a tab is in a packet.
             const gracePeriodKey = `grace_period_${tabId}`;
             await storage.setSession({ [gracePeriodKey]: Date.now() });
             setTimeout(() => storage.removeSession(gracePeriodKey), 1500);
-            // --- END OF FIX ---
 
             await this._updateBrowserState(tabId, url);
-            const itemForVisitTimer = this.orderedContent.find(i => i.url === finalContext.canonicalPacketUrl);
+            const itemForVisitTimer = this.orderedContent.find(i => i.url === finalContext.canonicalPacketUrl || i.lrl === finalContext.canonicalPacketUrl);
             if (itemForVisitTimer && !itemForVisitTimer.interactionBasedCompletion) {
-                startVisitTimer(tabId, this.instance.instanceId, itemForVisitTimer.url, this.logPrefix);
+                startVisitTimer(tabId, this.instance.instanceId, finalContext.canonicalPacketUrl, this.logPrefix);
             }
 
-            // --- START OF NEW CODE ---
             let momentTripped = false;
-            console.log(`[DEBUG_LOG 4/4] Checking for visit moments. Current URL in context: ${finalContext.canonicalPacketUrl}`); // ADDED FOR DEBUGGING
+            console.log(`[DEBUG_LOG 4/4] Checking for visit moments. Current canonical identifier: ${finalContext.canonicalPacketUrl}`);
             (this.instance.moments || []).forEach((moment, index) => {
-                // ADDED FOR DEBUGGING
-                console.log(`[DEBUG_LOG 4/4]   - Comparing with moment #${index} (${moment.type}) for URL: ${moment.sourceUrl}`);
-                if (moment.type === 'visit' && moment.sourceUrl === finalContext.canonicalPacketUrl && this.instance.momentsTripped[index] === 0) {
+                console.log(`[DEBUG_LOG 4/4]   - Comparing with moment #${index} (${moment.type}) for source: ${moment.sourceUrl}`);
+                if (moment.type === 'visit' && moment.sourceUrl === finalContext.canonicalPacketUrl && (!this.instance.momentsTripped || this.instance.momentsTripped[index] === 0)) {
+                    if (!this.instance.momentsTripped) {
+                        this.instance.momentsTripped = Array((this.instance.moments || []).length).fill(0);
+                    }
                     this.instance.momentsTripped[index] = 1;
                     momentTripped = true;
-                    logger.log(this.logPrefix, `Tripped 'visit' moment for URL: ${moment.sourceUrl}`);
+                    logger.log(this.logPrefix, `Tripped 'visit' moment for URL/LRL: ${moment.sourceUrl}`);
                 }
             });
 
@@ -175,7 +159,6 @@ class PacketRuntime {
                     source: 'moment_trip'
                 });
             }
-            // --- END OF NEW CODE ---
         }
     }
     
@@ -192,9 +175,12 @@ class PacketRuntime {
                     return { success: true, message: 'Focused existing tab.' };
                 }
             }
-            const contentItem = this.orderedContent.find(item => item.url === targetUrl);
-            if (!contentItem) throw new Error(`Content item not found for URL: ${targetUrl}`);
+            const contentItem = this.orderedContent.find(item => item.url === targetUrl || item.lrl === targetUrl);
+            if (!contentItem) throw new Error(`Content item not found for URL/LRL: ${targetUrl}`);
+            
             let finalUrlToOpen;
+            const canonicalIdentifier = contentItem.url || contentItem.lrl;
+
             if (contentItem.format === 'pdf' && contentItem.origin === 'internal' && contentItem.lrl) {
                 const cachedContent = await indexedDbStorage.getGeneratedContent(this.instance.instanceId, sanitizeForFileName(contentItem.lrl));
                 if (!cachedContent || !cachedContent[0]?.content) throw new Error(`PDF content for ${contentItem.lrl} is not cached.`);
@@ -207,14 +193,14 @@ class PacketRuntime {
                 if (!offscreenResponse?.success) throw new Error(offscreenResponse.error || 'Failed to create blob URL.');
                 finalUrlToOpen = offscreenResponse.blobUrl;
             } else if (contentItem.origin === 'internal' && contentItem.publishContext) {
-                finalUrlToOpen = cloudStorage.constructPublicUrl(targetUrl, contentItem.publishContext);
+                finalUrlToOpen = cloudStorage.constructPublicUrl(canonicalIdentifier, contentItem.publishContext);
             } else {
-                finalUrlToOpen = targetUrl;
+                finalUrlToOpen = canonicalIdentifier;
             }
             const newTab = await chrome.tabs.create({ url: finalUrlToOpen, active: true });
             const trustedIntent = {
                 instanceId: this.instance.instanceId,
-                canonicalPacketUrl: targetUrl
+                canonicalPacketUrl: canonicalIdentifier
             };
             await storage.setSession({ [`trusted_intent_${newTab.id}`]: trustedIntent });
             return { success: true, tabId: newTab.id };
