@@ -332,7 +332,7 @@ export async function displayPacketContent(instance, browserState, canonicalPack
         const { progressPercentage, visitedCount, totalCount } = packetUtils.calculateInstanceProgress(instance);
 
         if (isAlreadyRendered) {
-            updateCardVisibility(instance);
+            updateCardVisibility(instance, browserState);
             updateActiveCardHighlight(canonicalPacketUrl);
             
             const progressBar = domRefs.detailProgressContainer?.querySelector('.progress-bar');
@@ -420,8 +420,20 @@ export async function displayPacketContent(instance, browserState, canonicalPack
     }
 }
 
-export function updateCardVisibility(instance) {
+export async function updateCardVisibility(instance, browserState) {
     if (!domRefs.detailCardsContainer || !instance) return;
+    
+    // --- START OF FIX ---
+    let openTabUrls = new Set();
+    if (browserState?.tabGroupId && chrome?.tabs) {
+        try {
+            const tabsInGroup = await chrome.tabs.query({ groupId: browserState.tabGroupId });
+            tabsInGroup.forEach(tab => openTabUrls.add(tab.url));
+        } catch (e) {
+            // It's possible for the tab group to be gone, which is fine.
+        }
+    }
+    // --- END OF FIX ---
     
     const visitedUrlsSet = new Set(instance.visitedUrls || []);
 
@@ -432,7 +444,12 @@ export function updateCardVisibility(instance) {
 
         const momentIndices = card.dataset.momentIndices ? JSON.parse(card.dataset.momentIndices) : [];
         if (momentIndices.length > 0) {
-            const isRevealed = momentIndices.some(index => instance.momentsTripped && instance.momentsTripped[index] === 1);
+            // --- MODIFICATION 2 of 2: Update the reveal logic ---
+            const isRevealedByMoment = momentIndices.some(index => instance.momentsTripped && instance.momentsTripped[index] === 1);
+            const isOpenInTab = cardUrl && openTabUrls.has(cardUrl);
+
+            const isRevealed = isRevealedByMoment || isVisited || isOpenInTab;
+            // --- END OF MODIFICATION ---
             
             const wasHidden = card.classList.contains('hidden-by-rule');
             card.classList.toggle('hidden-by-rule', !isRevealed);
