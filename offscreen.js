@@ -103,10 +103,12 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
         return { success: true };
     }
 
-    async function normalizeAudio(audioBuffer) {
+    async function normalizeAudioAndGetDuration(audioBuffer) {
         try {
             const audioContext = new (window.AudioContext || window.webkitAudioContext)();
             const originalAudioBuffer = await audioContext.decodeAudioData(audioBuffer);
+            const duration = originalAudioBuffer.duration; // Get duration here
+
             const offlineContext = new OfflineAudioContext(originalAudioBuffer.numberOfChannels, originalAudioBuffer.length, originalAudioBuffer.sampleRate);
             const compressor = offlineContext.createDynamicsCompressor();
             compressor.threshold.setValueAtTime(-40, 0);
@@ -120,12 +122,14 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
             compressor.connect(offlineContext.destination);
             source.start(0);
             const processedAudioBuffer = await offlineContext.startRendering();
-            return encodeWAV(processedAudioBuffer);
+            
+            return { wavBuffer: encodeWAV(processedAudioBuffer), duration: duration };
         } catch (error) {
             console.error('[Offscreen] Audio normalization failed:', error);
             throw error;
         }
     }
+
 
     function encodeWAV(audioBuffer) {
         const numChannels = audioBuffer.numberOfChannels, sampleRate = audioBuffer.sampleRate, format = 1, bitDepth = 16;
@@ -277,9 +281,9 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
                 return false;
             case 'normalize-audio':
                 if (request.data && request.data.base64) {
-                    normalizeAudio(base64ToAb(request.data.base64)).then(processedBuffer => {
-                        const processedBase64 = btoa(new Uint8Array(processedBuffer).reduce((data, byte) => data + String.fromCharCode(byte), ''));
-                        sendResponse({ success: true, data: { base64: processedBase64, type: 'audio/wav' } });
+                    normalizeAudioAndGetDuration(base64ToAb(request.data.base64)).then(result => {
+                        const processedBase64 = btoa(new Uint8Array(result.wavBuffer).reduce((data, byte) => data + String.fromCharCode(byte), ''));
+                        sendResponse({ success: true, data: { base64: processedBase64, type: 'audio/wav', duration: result.duration } });
                     }).catch(error => sendResponse({ success: false, error: error.message }));
                 } else {
                     sendResponse({ success: false, error: 'No audio data provided.' });

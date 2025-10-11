@@ -50,25 +50,8 @@ async function handleCreatePacket() {
     const statusMessage = document.getElementById('status-message'); // This might not exist in your current popup, which is fine
     const createBtn = document.getElementById('create-btn');
 
-    // Pre-checks remain the same
-    const storageEnabled = await storage.isCloudStorageEnabled();
-    const activeModelConfig = await storage.getActiveModelConfig();
-    let modelConfigSufficient = false;
-    if (activeModelConfig) {
-        if (activeModelConfig.providerType === 'chrome-ai-gemini-nano') {
-            modelConfigSufficient = true;
-        } else if (activeModelConfig.apiKey && activeModelConfig.apiEndpoint) {
-            modelConfigSufficient = true;
-        }
-    }
-    if (!modelConfigSufficient || !storageEnabled) {
-        // This part of your code handles showing an onboarding message, which is correct.
-        return;
-    }
-
     try {
-
-        handleOpenSidebar();
+        await handleOpenSidebar();
         // The sender tab ID will be automatically available in the background script
         sendMessageToBackground({
             action: 'initiate_packet_creation_from_tab'

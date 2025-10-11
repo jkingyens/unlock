@@ -137,12 +137,12 @@ export function cacheDomReferences() {
         confirmCloseGroupBtn: document.getElementById('confirm-close-group-btn'),
         cancelCloseGroupBtn: document.getElementById('cancel-close-group-btn'),
 
-        // Title Prompt Dialog Refs
-        titlePromptDialog: document.getElementById('title-prompt-dialog'),
-        titlePromptMessage: document.getElementById('title-prompt-message'),
-        titlePromptInput: document.getElementById('title-prompt-input'),
-        confirmTitlePromptBtn: document.getElementById('confirm-title-prompt-btn'),
-        cancelTitlePromptBtn: document.getElementById('cancel-title-prompt-btn'),
+        // Input Prompt Dialog Refs
+        inputPromptDialog: document.getElementById('input-prompt-dialog'),
+        inputPromptMessage: document.getElementById('input-prompt-message'),
+        inputPromptInput: document.getElementById('input-prompt-input'),
+        confirmInputPromptBtn: document.getElementById('confirm-input-prompt-btn'),
+        cancelInputPromptBtn: document.getElementById('cancel-input-prompt-btn'),
     });
     logger.log('Sidebar:cacheDomReferences', 'DOM references cached.');
 }

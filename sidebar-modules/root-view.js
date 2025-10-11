@@ -4,7 +4,7 @@
 
 import { domRefs } from './dom-references.js';
 import { logger, storage, packetUtils, isTabGroupsAvailable, shouldUseTabGroups } from '../utils.js';
-import { showConfirmDialog, showImportDialog, exportPacketAndShowDialog, showCreateSourceDialog, showCreateSourceDialogProgress, hideCreateSourceDialog, showConfirmSettingsDialog } from './dialog-handler.js';
+import { showConfirmDialog, showImportDialog, exportPacketAndShowDialog, showCreateSourceDialog, showCreateSourceDialogProgress, hideCreateSourceDialog, showConfirmSettingsDialog, showInputPromptDialog } from './dialog-handler.js';
 
 // --- Module-specific State ---
 let activeListTab = 'library';
@@ -19,7 +19,7 @@ let showRootViewStatus;
 let sendMessageToBackground;
 
 // --- Constants ---
-const packetColorMap = { grey: { accent: '#90a4ae', progress: '#78909c' }, blue: { accent: '#64b5f6', progress: '#42a5f5' }, red: { accent: '#e57373', progress: '#ef5350' }, yellow: { accent: '#fff176', progress: '#ffee58' }, green: { accent: '#81c784', progress: '#66bb6a' }, pink: { accent: '#f06292', progress: '#ec407a' }, purple: { accent: '#ba68c8', progress: '#ab47bc' }, cyan: { accent: '#4dd0e1', progress: '#26c6da' }, orange: { accent: '#ffb74d', progress: '#ffa726' } };
+const packetColorMap = { grey: { accent: '#90a4ae', progress: '#78909c' }, blue: { accent: '#64b5f6', progress: '#42a5f5' }, red: { accent: '#e57373', progress: '#ef5350' }, yellow: { accent: '#fff176', progress: '#ffee58' }, green: { accent: '#81c784', progress: '#66bb6a' }, pink: { accent: '#f06292', progress: '#ec407a' }, purple: { accent: '#ba68c8', progress: '#ab47bc' }, cyan: { accent: '#4dd0e1', progress: '#26c6da' }, orange: { accent: '#ffb74d', progress: '#f57c00' } };
 const defaultPacketColors = packetColorMap.grey;
 
 
@@ -77,28 +77,34 @@ export function setupRootViewListeners() {
 
 async function handleCreateButtonClick() {
     try {
-        const response = await sendMessageToBackground({ action: 'is_current_tab_packetizable' });
-
-        if (response.success && response.isPacketizable) {
-            const choice = await showCreateSourceDialog(); 
-            
-            if (choice === 'blank') {
-                hideCreateSourceDialog();
-                navigateTo('create');
-            } else if (choice === 'tab') {
-                showCreateSourceDialogProgress('Analyzing page...');
-                sendMessageToBackground({ action: 'create_draft_from_tab' });
-            }
-
-        } else {
+        const choice = await showCreateSourceDialog();
+        
+        if (choice === 'blank') {
+            hideCreateSourceDialog();
             navigateTo('create');
+        } else if (choice === 'tab') {
+            showCreateSourceDialogProgress('Analyzing page...');
+            sendMessageToBackground({ action: 'create_draft_from_tab' });
+        } else if (choice === 'codebase') {
+            hideCreateSourceDialog();
+            const prompt = await showInputPromptDialog({
+                message: "Describe the packet you want to create:",
+                confirmText: "Generate",
+                defaultValuePromise: Promise.resolve(''),
+                placeholder: "e.g., 'A packet that teaches me about WWII'"
+            });
+            if (prompt) {
+                sendMessageToBackground({ action: 'create_from_codebase', data: { prompt } });
+            }
         }
     } catch (error) {
         logger.error("RootView", "Error in create button logic", error);
-        showRootViewStatus(`Error: ${error.message}`, 'error');
-        navigateTo('create');
+        if (error) { // Only show error if it's not a simple dialog cancellation
+            showRootViewStatus(`Error: ${error.message}`, 'error');
+        }
     }
 }
+
 
 // --- View Rendering & Management ---
 

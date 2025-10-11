@@ -482,8 +482,113 @@ async function handleApplyProposedSettings(data, sender, sendResponse) {
     }
 }
 
+async function handleCreateFromCodebase(data, sender, sendResponse) {
+    const { prompt } = data;
+    const imageId = `img_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+
+    try {
+        sendProgressNotification('packet_creation_progress', { imageId, status: 'active', text: 'Querying AI...', progressPercent: 25, title: prompt });
+
+        const codebase = await getCodebase();
+        const result = await llmService.callLLM('create_packet_from_codebase', { userPrompt: prompt, codebase });
+
+        if (result.success && result.data) {
+            const packetImage = result.data;
+
+            packetImage.id = imageId;
+            packetImage.created = new Date().toISOString();
+            
+            if (!packetImage.title || !Array.isArray(packetImage.sourceContent)) {
+                throw new Error("LLM returned invalid packet structure.");
+            }
+
+            // --- START OF FIX ---
+            // Process and save any inline 'content' to IndexedDB
+            for (const item of packetImage.sourceContent) {
+                if (item.origin === 'internal' && item.content) {
+                    const contentBuffer = new TextEncoder().encode(item.content);
+                    const indexedDbKey = sanitizeForFileName(item.lrl);
+                    await indexedDbStorage.saveGeneratedContent(imageId, indexedDbKey, [{
+                        name: item.lrl.split('/').pop(),
+                        content: contentBuffer,
+                        contentType: item.contentType || 'text/html'
+                    }]);
+                    delete item.content; // Remove inline content before saving the image
+                }
+            }
+            // --- END OF FIX ---
+
+            await storage.savePacketImage(packetImage);
+            sendProgressNotification('packet_image_created', { image: packetImage });
+            sendResponse({ success: true, image: packetImage });
+        } else {
+            throw new Error(result.error || "LLM failed to generate a valid packet.");
+        }
+    } catch (error) {
+        logger.error('MessageHandler:handleCreateFromCodebase', 'Error creating packet from codebase', error);
+        sendProgressNotification('packet_creation_failed', { imageId, error: error.message });
+        sendResponse({ success: false, error: error.message });
+    }
+}
+
+async function getCodebase() {
+    const manifest = await chrome.runtime.getManifest();
+    let codebase = '';
+    const filePaths = new Set([
+        // Core files
+        'background.js', 'manifest.json', 'sidebar.html', 'popup.html', 'offscreen.html', 'preview.html',
+        'cli.js', 'cloud-storage.js', 'llm_service.js', 'tts_service.js', 'utils.js', 'page_interceptor.js',
+        'popup.js', 'popup_actions.js', 'sidebar.js', 'offscreen.js', 'preview.js', 'selector.js', 'overlay.js',
+
+        // Modules
+        'background-modules/create-utils.js', 'background-modules/message-handlers.js', 'background-modules/navigation-handler.js',
+        'background-modules/packet-processor.js', 'background-modules/packet-runtime.js', 'background-modules/rule-manager.js',
+        'background-modules/sidebar-handler.js', 'background-modules/tab-group-handler.js',
+
+        'sidebar-modules/create-view.js', 'sidebar-modules/detail-view.js', 'sidebar-modules/dialog-handler.js',
+        'sidebar-modules/dom-references.js', 'sidebar-modules/root-view.js', 'sidebar-modules/settings-view.js',
+        
+        // CSS
+        'sidebar.css', 'popup.css', 'overlay.css', 'selector.css', 'generated_page_style.css', 'help_style.css',
+        
+        // Other assets
+        'readme.md', 'LICENSE', 'package.json'
+    ]);
+
+    // Add files from web_accessible_resources just in case
+    if (manifest.web_accessible_resources) {
+        manifest.web_accessible_resources.forEach(resource => {
+            resource.resources.forEach(path => filePaths.add(path));
+        });
+    }
+
+    for (const filePath of filePaths) {
+        try {
+            // Skip non-code files
+            if (filePath.endsWith('.png') || filePath.endsWith('.svg') || filePath.endsWith('.json')) {
+                 if (filePath.endsWith('package.json') || filePath.endsWith('manifest.json')) {
+                    // continue
+                 } else {
+                    continue;
+                 }
+            }
+            const url = chrome.runtime.getURL(filePath);
+            const response = await fetch(url);
+            if (response.ok) {
+                const content = await response.text();
+                codebase += `// File: ${filePath}\n\n${content}\n\n---\n\n`;
+            }
+        } catch (error) {
+            // This might fail for directories listed in manifest, which is fine.
+            // console.warn(`Could not fetch ${filePath}:`, error);
+        }
+    }
+    return codebase;
+}
+
 
 const actionHandlers = {
+    'create_from_codebase': handleCreateFromCodebase,
     'save_packet_output': handleSavePacketOutput,
     'activate_selector_tool': async (data, sender, sendResponse) => {
         const { toolType, sourceUrl } = data;
