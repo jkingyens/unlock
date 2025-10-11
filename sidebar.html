@@ -468,14 +468,14 @@
       </div>
     </div>
   </div>
-  <div id="title-prompt-dialog" class="confirm-dialog-overlay" style="display: none;">
+  <div id="input-prompt-dialog" class="confirm-dialog-overlay" style="display: none;">
     <div class="confirm-dialog">
-      <p id="title-prompt-message">Enter a title for your packet:</p>
-      <input type="text" id="title-prompt-input" placeholder="Packet title..." style="width: 100%; padding: 8px 10px; box-sizing: border-box; background-color: var(--input-bg); color: var(--text-primary); border: 1px solid var(--border-primary); border-radius: 4px;">
-      <div id="title-prompt-status" class="dialog-status-message" style="text-align: center; margin-top: 10px;"></div>
+      <p id="input-prompt-message">Enter a title for your packet:</p>
+      <input type="text" id="input-prompt-input" placeholder="Packet title..." style="width: 100%; padding: 8px 10px; box-sizing: border-box; background-color: var(--input-bg); color: var(--text-primary); border: 1px solid var(--border-primary); border-radius: 4px;">
+      <div id="input-prompt-status" class="dialog-status-message" style="text-align: center; margin-top: 10px;"></div>
       <div class="dialog-buttons">
-        <button id="cancel-title-prompt-btn" class="cancel-btn">Cancel</button>
-        <button id="confirm-title-prompt-btn" class="confirm-btn">Save</button>
+        <button id="cancel-input-prompt-btn" class="cancel-btn">Cancel</button>
+        <button id="confirm-input-prompt-btn" class="confirm-btn">Save</button>
       </div>
     </div>
   </div>
@@ -486,6 +486,7 @@
         <div class="dialog-buttons" style="flex-direction: column; gap: 12px;">
           <button id="create-from-blank-btn" class="sidebar-action-button">Blank Packet</button>
           <button id="create-from-tab-btn" class="sidebar-action-button primary">Current Tab</button>
+          <button id="create-from-codebase-btn" class="sidebar-action-button">With Codebase</button>
           <button id="cancel-create-source-btn" class="sidebar-action-button tertiary" style="margin-top: 10px;">Cancel</button>
         </div>
       </div>

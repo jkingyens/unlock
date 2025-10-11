@@ -9,10 +9,10 @@ let confirmDialogResolve = null;
 let closeGroupConfirmListener = null;
 let closeGroupCancelListener = null;
 let closeGroupOverlayClickListener = null;
-let titlePromptResolve = null;
-let titlePromptConfirmListener = null;
-let titlePromptCancelListener = null;
-let titlePromptKeyListener = null;
+let inputPromptResolve = null;
+let inputPromptConfirmListener = null;
+let inputPromptCancelListener = null;
+let inputPromptKeyListener = null;
 let qrCodeInstance = null; // To hold the single QRCode instance
 
 // --- START OF NEW CODE ---
@@ -332,74 +332,76 @@ function hideConfirmDialog(confirmedResult = false) {
     confirmDialogResolve = null;
 }
 
-export function showTitlePromptDialog(defaultValuePromise) {
+export function showInputPromptDialog(options) {
     return new Promise((resolve) => {
-        titlePromptResolve = resolve;
-        const dialog = domRefs.titlePromptDialog;
-        const statusEl = document.getElementById('title-prompt-status');
+        const { message, confirmText, defaultValuePromise, placeholder } = options;
+        inputPromptResolve = resolve;
+        const dialog = domRefs.inputPromptDialog;
+        const statusEl = document.getElementById('input-prompt-status');
         if (!dialog || !statusEl) {
-            logger.error("DialogHandler", "Title prompt dialog elements not found!");
+            logger.error("DialogHandler", "Input prompt dialog elements not found!");
             return resolve(null);
         }
 
-        // Initially disable save and show generating message
-        domRefs.titlePromptInput.value = '';
-        domRefs.confirmTitlePromptBtn.disabled = true;
-        showDialogStatus(statusEl, 'Generating suggested title...', 'info', false);
+        domRefs.inputPromptMessage.textContent = message;
+        domRefs.confirmInputPromptBtn.textContent = confirmText;
+        domRefs.inputPromptInput.placeholder = placeholder;
+        domRefs.inputPromptInput.value = '';
+        domRefs.confirmInputPromptBtn.disabled = true;
+        showDialogStatus(statusEl, 'Generating suggestion...', 'info', false);
         
         defaultValuePromise.then(defaultValue => {
-            domRefs.titlePromptInput.value = defaultValue;
-            domRefs.confirmTitlePromptBtn.disabled = false;
+            domRefs.inputPromptInput.value = defaultValue;
+            domRefs.confirmInputPromptBtn.disabled = false;
             clearDialogStatus(statusEl);
         }).catch(() => {
-            domRefs.confirmTitlePromptBtn.disabled = false;
+            domRefs.confirmInputPromptBtn.disabled = false;
             clearDialogStatus(statusEl);
         });
         
-        titlePromptConfirmListener = () => hideTitlePromptDialog(domRefs.titlePromptInput.value.trim());
-        titlePromptCancelListener = () => hideTitlePromptDialog(null);
-        titlePromptKeyListener = (e) => {
-            if (e.key === 'Enter' && !domRefs.confirmTitlePromptBtn.disabled) {
+        inputPromptConfirmListener = () => hideInputPromptDialog(domRefs.inputPromptInput.value.trim());
+        inputPromptCancelListener = () => hideInputPromptDialog(null);
+        inputPromptKeyListener = (e) => {
+            if (e.key === 'Enter' && !domRefs.confirmInputPromptBtn.disabled) {
                 e.preventDefault();
-                hideTitlePromptDialog(domRefs.titlePromptInput.value.trim());
+                hideInputPromptDialog(domRefs.inputPromptInput.value.trim());
             }
         };
 
-        domRefs.confirmTitlePromptBtn.addEventListener('click', titlePromptConfirmListener);
-        domRefs.cancelTitlePromptBtn.addEventListener('click', titlePromptCancelListener);
-        domRefs.titlePromptInput.addEventListener('keypress', titlePromptKeyListener);
+        domRefs.confirmInputPromptBtn.addEventListener('click', inputPromptConfirmListener);
+        domRefs.cancelInputPromptBtn.addEventListener('click', inputPromptCancelListener);
+        domRefs.inputPromptInput.addEventListener('keypress', inputPromptKeyListener);
 
         dialog.style.display = 'flex';
         
         requestAnimationFrame(() => {
             dialog.classList.add('visible');
             requestAnimationFrame(() => {
-                domRefs.titlePromptInput.focus();
-                domRefs.titlePromptInput.select();
+                domRefs.inputPromptInput.focus();
+                domRefs.inputPromptInput.select();
             });
         });
     });
 }
 
-function hideTitlePromptDialog(valueToResolve) {
-    const dialog = domRefs.titlePromptDialog;
+function hideInputPromptDialog(valueToResolve) {
+    const dialog = domRefs.inputPromptDialog;
     if (dialog) {
         dialog.classList.remove('visible');
         setTimeout(() => { if (dialog) dialog.style.display = 'none'; }, 300);
     }
 
-    // Clean up listeners to prevent memory leaks
-    if (titlePromptConfirmListener) domRefs.confirmTitlePromptBtn?.removeEventListener('click', titlePromptConfirmListener);
-    if (titlePromptCancelListener) domRefs.cancelTitlePromptBtn?.removeEventListener('click', titlePromptCancelListener);
-    if (titlePromptKeyListener) domRefs.titlePromptInput?.removeEventListener('keypress', titlePromptKeyListener);
+    if (inputPromptConfirmListener) domRefs.confirmInputPromptBtn?.removeEventListener('click', inputPromptConfirmListener);
+    if (inputPromptCancelListener) domRefs.cancelInputPromptBtn?.removeEventListener('click', inputPromptCancelListener);
+    if (inputPromptKeyListener) domRefs.inputPromptInput?.removeEventListener('keypress', inputPromptKeyListener);
     
-    titlePromptConfirmListener = null;
-    titlePromptCancelListener = null;
-    titlePromptKeyListener = null;
+    inputPromptConfirmListener = null;
+    inputPromptCancelListener = null;
+    inputPromptKeyListener = null;
 
-    if (titlePromptResolve) {
-        titlePromptResolve(valueToResolve);
-        titlePromptResolve = null;
+    if (inputPromptResolve) {
+        inputPromptResolve(valueToResolve);
+        inputPromptResolve = null;
     }
 }
 
@@ -407,26 +409,29 @@ function hideTitlePromptDialog(valueToResolve) {
 let createSourceDialogResolve = null;
 
 export function showCreateSourceDialog() {
-    return new Promise((resolve) => {
+    return new Promise(async (resolve) => {
         createSourceDialogResolve = resolve;
         const dialog = document.getElementById('create-source-dialog');
         if (dialog) {
-            // --- START OF THE FIX ---
-            // Reset the dialog to its initial state before showing it.
             const buttonDiv = document.getElementById('create-source-dialog-buttons');
             const progressDiv = document.getElementById('create-source-dialog-progress');
             if (buttonDiv) buttonDiv.classList.remove('hidden');
             if (progressDiv) progressDiv.classList.add('hidden');
-            // --- END OF THE FIX ---
+
+            const createFromTabBtn = dialog.querySelector('#create-from-tab-btn');
+            const { isPacketizable } = await sendMessageToBackground({ action: 'is_current_tab_packetizable' });
+            createFromTabBtn.style.display = isPacketizable ? 'block' : 'none';
 
             dialog.querySelector('#create-from-blank-btn').onclick = () => {
                 if (createSourceDialogResolve) createSourceDialogResolve('blank');
             };
-            dialog.querySelector('#create-from-tab-btn').onclick = () => {
+            createFromTabBtn.onclick = () => {
                 if (createSourceDialogResolve) createSourceDialogResolve('tab');
             };
+            dialog.querySelector('#create-from-codebase-btn').onclick = () => {
+                if (createSourceDialogResolve) createSourceDialogResolve('codebase');
+            };
 
-            // Cancel and overlay clicks still hide the dialog immediately.
             dialog.querySelector('#cancel-create-source-btn').onclick = () => hideCreateSourceDialog('cancel');
             dialog.onclick = (e) => { 
                 if (e.target === dialog) hideCreateSourceDialog('cancel');
@@ -439,6 +444,7 @@ export function showCreateSourceDialog() {
         }
     });
 }
+
 
 export function showCreateSourceDialogProgress(message) {
     const dialog = document.getElementById('create-source-dialog');
@@ -456,13 +462,11 @@ export function showCreateSourceDialogProgress(message) {
 export function hideCreateSourceDialog(reason) {
     const dialog = document.getElementById('create-source-dialog');
     if (dialog) {
-        // --- START OF THE FIX ---
-        // Explicitly clear the onclick handlers to prevent stale closures.
         dialog.querySelector('#create-from-blank-btn').onclick = null;
         dialog.querySelector('#create-from-tab-btn').onclick = null;
+        dialog.querySelector('#create-from-codebase-btn').onclick = null;
         dialog.querySelector('#cancel-create-source-btn').onclick = null;
         dialog.onclick = null;
-        // --- END OF THE FIX ---
 
         dialog.classList.remove('visible');
         setTimeout(() => { if (dialog) dialog.style.display = 'none'; }, 300);
