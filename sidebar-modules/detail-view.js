@@ -727,7 +727,13 @@ async function createContentCard(contentItem, instance) {
     const momentIndices = Array.isArray(contentItem.revealedByMoments) ? contentItem.revealedByMoments : [];
     if (momentIndices.length > 0) {
         card.dataset.momentIndices = JSON.stringify(momentIndices);
-        const isRevealed = momentIndices.some(index => instance.momentsTripped && instance.momentsTripped[index] === 1);
+
+
+        // --- START OF FIX ---
+        // Ensure the card is revealed if its moment is tripped OR if it has already been visited.
+        const isRevealedByMoment = momentIndices.some(index => instance.momentsTripped && instance.momentsTripped[index] === 1);
+        const isRevealed = isRevealedByMoment || isVisited;
+        // --- END OF FIX ---
         
         if (!isRevealed) {
             card.classList.add('hidden-by-rule');
