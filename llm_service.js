@@ -352,13 +352,38 @@ function getPacketTitlePromptText(context) {
 function getCodebasePacketCreationPromptText(context) {
     const { userPrompt, codebase } = context;
 
+    // --- START OF FIX ---
     const systemPrompt = `You are an expert software engineer and content creator for a Chrome extension called "Unlock". Your task is to generate a complete Packet JSON object based on a user's prompt and the extension's codebase.
 
+**Core Goal:** Create a step-by-step guide that helps the user accomplish the task in their prompt.
+
 **Analysis Steps:**
-1.  Understand the user's goal from their prompt.
-2.  Analyze the provided codebase to understand the structure of a Packet JSON, including the format for \`sourceContent\`, \`checkpoints\`, and \`moments\`.
-3.  Generate a valid Packet JSON object that fulfills the user's request. You can create links to external pages (like Wikipedia) or define internal, generated content.
-4.  Your entire response MUST be a single, valid JSON object and nothing else. Do not wrap it in markdown fences.`;
+1.  **Deconstruct the Goal:** Break down the user's prompt (e.g., "fetch a grok api key") into a logical sequence of actions.
+2.  **Find Relevant URLs:** If a step involves visiting a website (e.g., a sign-up page, an API keys page), use your knowledge to provide the direct URL.
+3.  **Incorporate Interactive Capture:** If a step requires the user to obtain a piece of information (like an API key, a password, or a specific piece of text), you MUST include an "interactive-input" item for that step.
+4.  **Structure the Packet:**
+    * Create a \`sourceContent\` item for each step in the process.
+    * Use the \`title\` field for the step description (e.g., "Step 1: Navigate to the API Console").
+    * Use the \`context\` field to provide helpful instructions for that step.
+    * For capture steps, use the \`interactive-input\` format. Define the \`output\` object with a clear \`description\` and the correct \`contentType\`.
+
+**Example of an \`interactive-input\` item:**
+\`\`\`json
+{
+  "origin": "internal",
+  "format": "interactive-input",
+  "lrl": "/inputs/capture-api-key",
+  "title": "Step 2: Save Your API Key",
+  "context": "Click to activate, then select the API key on the page or paste it from your clipboard.",
+  "output": {
+    "description": "The user's captured API Key",
+    "contentType": "text/plain"
+  }
+}
+\`\`\`
+
+**Final Output:** Your entire response MUST be a single, valid JSON object representing the complete packet. Do not wrap it in markdown fences or add any other explanatory text.`;
+    // --- END OF FIX ---
     
     const fullUserPrompt = `User Prompt: "${userPrompt}"\n\nFull Codebase:\n\n${codebase}`;
 
