@@ -15,7 +15,7 @@ let currentPlayingUrl = null; // Track which media item is active in this view
 let sendMessageToBackground;
 let navigateTo;
 let openUrl;
-
+let showRootViewStatus; // <-- FIX: Added variable to hold the function
 
 /**
  * Injects dependencies from the main sidebar module.
@@ -25,6 +25,7 @@ export function init(dependencies) {
     sendMessageToBackground = dependencies.sendMessageToBackground;
     navigateTo = dependencies.navigateTo;
     openUrl = dependencies.openUrl;
+    showRootViewStatus = dependencies.showRootViewStatus; // <-- FIX: Assign the function from dependencies
 
     chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         if (message.action === 'data_captured_from_content') {
@@ -332,7 +333,7 @@ export async function displayPacketContent(instance, browserState, canonicalPack
         const { progressPercentage, visitedCount, totalCount } = packetUtils.calculateInstanceProgress(instance);
 
         if (isAlreadyRendered) {
-            updateCardVisibility(instance, browserState);
+            await updateCardVisibility(instance, browserState);
             updateActiveCardHighlight(canonicalPacketUrl);
             
             const progressBar = domRefs.detailProgressContainer?.querySelector('.progress-bar');
@@ -347,9 +348,7 @@ export async function displayPacketContent(instance, browserState, canonicalPack
                 oldActionButtonContainer.replaceWith(newActionButtonContainer);
             }
             
-            // --- START OF FIX ---
             renderOutputsSection(instance, domRefs.detailCardsContainer);
-            // --- END OF FIX ---
             
             await redrawAllVisibleWaveforms(currentState, instance);
 
@@ -368,9 +367,7 @@ export async function displayPacketContent(instance, browserState, canonicalPack
             cardsWrapper.dataset.instanceId = instance.instanceId;
             fragment.appendChild(cardsWrapper);
             
-            // --- START OF FIX ---
             renderOutputsSection(instance, cardsWrapper);
-            // --- END OF FIX ---
 
             container.innerHTML = '';
             container.appendChild(fragment);
@@ -423,7 +420,6 @@ export async function displayPacketContent(instance, browserState, canonicalPack
 export async function updateCardVisibility(instance, browserState) {
     if (!domRefs.detailCardsContainer || !instance) return;
     
-    // --- START OF FIX ---
     let openTabUrls = new Set();
     if (browserState?.tabGroupId && chrome?.tabs) {
         try {
@@ -433,7 +429,6 @@ export async function updateCardVisibility(instance, browserState) {
             // It's possible for the tab group to be gone, which is fine.
         }
     }
-    // --- END OF FIX ---
     
     const visitedUrlsSet = new Set(instance.visitedUrls || []);
 
@@ -444,12 +439,10 @@ export async function updateCardVisibility(instance, browserState) {
 
         const momentIndices = card.dataset.momentIndices ? JSON.parse(card.dataset.momentIndices) : [];
         if (momentIndices.length > 0) {
-            // --- MODIFICATION 2 of 2: Update the reveal logic ---
             const isRevealedByMoment = momentIndices.some(index => instance.momentsTripped && instance.momentsTripped[index] === 1);
             const isOpenInTab = cardUrl && openTabUrls.has(cardUrl);
 
             const isRevealed = isRevealedByMoment || isVisited || isOpenInTab;
-            // --- END OF MODIFICATION ---
             
             const wasHidden = card.classList.contains('hidden-by-rule');
             card.classList.toggle('hidden-by-rule', !isRevealed);
@@ -541,7 +534,6 @@ async function createCardsSection(instance) {
     return cardsWrapper;
 }
 
-// --- START OF NEW CODE ---
 async function renderOutputsSection(instance, container) {
     const existingHeader = container.querySelector('.outputs-header');
     if (existingHeader) existingHeader.remove();
@@ -560,55 +552,6 @@ async function renderOutputsSection(instance, container) {
             container.appendChild(createOutputCard(output));
         });
     }
-}
-// --- END OF NEW CODE ---
-
-
-function attachInteractiveCardHandlers(card, contentItem, instance) {
-    if (card.dataset.handlersAttached === 'true') return;
-    card.dataset.handlersAttached = 'true';
-
-    const { output, sourceUrl } = contentItem;
-
-    card.addEventListener('click', () => {
-        const isActive = card.classList.contains('listening-for-input');
-        
-        if (isActive) {
-            sendMessageToBackground({ action: 'deactivate_selector_tool_global' });
-        } else {
-            sendMessageToBackground({ action: 'deactivate_selector_tool_global' }).then(() => {
-                card.classList.add('listening-for-input');
-                const toolType = output.contentType.startsWith('image') ? 'image' : 'text';
-                sendMessageToBackground({ 
-                    action: 'activate_selector_tool', 
-                    data: { sourceUrl, toolType, instanceId: instance.instanceId }
-                });
-            });
-        }
-    });
-
-    card.addEventListener('dragover', (e) => { e.preventDefault(); card.classList.add('drag-over'); });
-    card.addEventListener('dragleave', () => { card.classList.remove('drag-over'); });
-    card.addEventListener('drop', async (e) => {
-        e.preventDefault();
-        card.classList.remove('drag-over', 'listening-for-input');
-        sendMessageToBackground({ action: 'deactivate_selector_tool', data: { sourceUrl } });
-        
-        const data = e.dataTransfer.getData('text/uri-list') || e.dataTransfer.getData('text/plain');
-        if (data) {
-            card.classList.add('visited');
-            await sendMessageToBackground({
-                action: 'save_packet_output',
-                data: {
-                    instanceId: instance.instanceId,
-                    lrl: contentItem.lrl,
-                    capturedData: data,
-                    outputDescription: output.description,
-                    outputContentType: output.contentType
-                }
-            });
-        }
-    });
 }
 
 function linkify(text) {
@@ -704,7 +647,8 @@ async function createContentCard(contentItem, instance) {
             </div>
             <div class="card-text">
                 <div class="card-title">${title}</div>
-                <div class="card-url">Click to activate, then select ${toolType} on the page.</div>
+                <div class="card-url">Click to activate input capture.</div>
+                <button class="paste-from-clipboard-btn">Paste from Clipboard</button>
             </div>`;
         isClickable = false;
     } else {
@@ -727,13 +671,8 @@ async function createContentCard(contentItem, instance) {
     const momentIndices = Array.isArray(contentItem.revealedByMoments) ? contentItem.revealedByMoments : [];
     if (momentIndices.length > 0) {
         card.dataset.momentIndices = JSON.stringify(momentIndices);
-
-
-        // --- START OF FIX ---
-        // Ensure the card is revealed if its moment is tripped OR if it has already been visited.
         const isRevealedByMoment = momentIndices.some(index => instance.momentsTripped && instance.momentsTripped[index] === 1);
         const isRevealed = isRevealedByMoment || isVisited;
-        // --- END OF FIX ---
         
         if (!isRevealed) {
             card.classList.add('hidden-by-rule');
@@ -876,4 +815,107 @@ async function playMediaInCard(card, contentItem, instance) {
             });
         }
     });
+}
+
+function attachInteractiveCardHandlers(card, contentItem, instance) {
+    if (card.dataset.handlersAttached === 'true') return;
+    card.dataset.handlersAttached = 'true';
+
+    const { output, sourceUrl } = contentItem;
+    
+    const pasteButton = card.querySelector('.paste-from-clipboard-btn');
+
+    const saveData = async (capturedData) => {
+        card.classList.remove('listening-for-input', 'drag-over');
+        card.classList.add('visited');
+        
+        await sendMessageToBackground({
+            action: 'save_packet_output',
+            data: {
+                instanceId: instance.instanceId,
+                lrl: contentItem.lrl,
+                capturedData: capturedData,
+                outputDescription: output.description,
+                outputContentType: output.contentType
+            }
+        });
+        
+        sendMessageToBackground({ action: 'deactivate_selector_tool_global' });
+    };
+
+    if (pasteButton) {
+        pasteButton.addEventListener('click', async (event) => {
+            event.stopPropagation();
+            try {
+                // --- START OF FIX ---
+                const clipboardItems = await navigator.clipboard.read();
+                let found = false;
+                for (const item of clipboardItems) {
+                    if (item.types.includes('image/png') || item.types.includes('image/jpeg')) {
+                        const imageType = item.types.includes('image/png') ? 'image/png' : 'image/jpeg';
+                        const blob = await item.getType(imageType);
+                        
+                        // Convert blob to a data URL to be saved
+                        const reader = new FileReader();
+                        reader.onloadend = () => {
+                            saveData(reader.result);
+                        };
+                        reader.readAsDataURL(blob);
+                        found = true;
+                        break;
+                    } else if (item.types.includes('text/plain')) {
+                        const blob = await item.getType('text/plain');
+                        const text = await blob.text();
+                        if (text && text.trim() !== '') {
+                            saveData(text.trim());
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+                if (!found) {
+                    showRootViewStatus('No compatible content (text or image) found on clipboard.', 'error');
+                }
+                // --- END OF FIX ---
+            } catch (error) {
+                logger.error("DetailView", "Failed to read from clipboard", error);
+                showRootViewStatus('Could not read from clipboard. Permission may be missing or denied.', 'error');
+            }
+        });
+    }
+
+    card.addEventListener('click', () => {
+        const isActive = card.classList.contains('listening-for-input');
+        
+        document.querySelectorAll('.card.listening-for-input').forEach(otherCard => {
+            if (otherCard !== card) {
+                otherCard.classList.remove('listening-for-input');
+            }
+        });
+
+        card.classList.toggle('listening-for-input');
+
+        if (card.classList.contains('listening-for-input')) {
+            const toolType = output.contentType.startsWith('image') ? 'image' : 'text';
+            sendMessageToBackground({ 
+                action: 'activate_selector_tool', 
+                data: { sourceUrl, toolType, instanceId: instance.instanceId }
+            });
+        } else {
+            sendMessageToBackground({ action: 'deactivate_selector_tool_global' });
+        }
+    });
+
+    card.addEventListener('dragover', (e) => { e.preventDefault(); card.classList.add('drag-over'); });
+    card.addEventListener('dragleave', () => { card.classList.remove('drag-over'); });
+    card.addEventListener('drop', async (e) => {
+        e.preventDefault();
+        const droppedData = e.dataTransfer.getData('text/uri-list') || e.dataTransfer.getData('text/plain');
+        if (droppedData) {
+            saveData(droppedData);
+        }
+    });
+    
+    const toolType = output.contentType.startsWith('image') ? 'image' : 'text';
+    card.querySelector('.card-url').textContent = `Click to activate, then select ${toolType} on the page.`;
 }
