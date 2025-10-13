@@ -20,7 +20,8 @@
     "alarms",
     "offscreen",
     "activeTab",
-    "scripting"
+    "scripting",
+    "clipboardRead"
   ],
   "host_permissions": [
     "<all_urls>"
