@@ -653,6 +653,21 @@ const packetUtils = {
                 decodedItemUrl = item.url;
             }
         }
+
+        if (decodedItemUrl && decodedItemUrl.includes('*')) {
+            // 1. Escape the URL to be safe for regex, then replace our wildcard.
+            const regexString = decodedItemUrl
+                .replace(/[.*+?^${}()|[\]\\]/g, '\\$&') // Escape all special regex characters
+                .replace(/\\\*/g, '([^/]+)');          // Replace the escaped '*' with a pattern that matches any character except a slash.
+
+            // 2. Create a regex that matches the entire URL from start to finish.
+            const regex = new RegExp(`^${regexString}$`);
+
+            // 3. Test the loaded URL against the pattern.
+            if (regex.test(decodedLoadedUrl)) {
+                return options.returnItem ? item : true;
+            }
+        }
         
         if (item.origin === 'external' && decodedItemUrl && decodedItemUrl === decodedLoadedUrl) {
              return options.returnItem ? item : true;

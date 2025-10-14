@@ -21,6 +21,11 @@ import cloudStorage from '../cloud-storage.js';
 
 const pendingVisits = {};
 
+// --- START OF FIX: Add a queuing system to prevent race conditions ---
+const navigationQueues = new Map();
+const processingNavigation = new Set();
+// --- END OF FIX ---
+
 export function clearPendingVisitTimer(tabId) {
     if (pendingVisits[tabId]?.timerId) {
         clearTimeout(pendingVisits[tabId].timerId);
@@ -49,6 +54,22 @@ export async function onBeforeNavigate(details) {
     }
 
     const instances = await storage.getPacketInstances();
+
+    for (const instanceId in instances) {
+        const instance = instances[instanceId];
+        const targetItem = packetUtils.isUrlInPacket(details.url, instance, { returnItem: true });
+
+        if (targetItem) {
+            const navIntent = {
+                instanceId: instance.instanceId,
+                canonicalPacketUrl: targetItem.url || targetItem.lrl
+            };
+            await storage.setSession({ [`nav_intent_${details.tabId}`]: navIntent });
+            setTimeout(() => storage.removeSession(`nav_intent_${details.tabId}`), 5000);
+            break;
+        }
+    }
+
     for (const instanceId in instances) {
         const instance = instances[instanceId];
         const targetItem = packetUtils.isUrlInPacket(details.url, instance, { returnItem: true });
@@ -71,6 +92,7 @@ export async function onBeforeNavigate(details) {
     }
 }
 
+// --- START OF FIX: Route events through the queuing system ---
 export async function onCommitted(details) {
     if (details.frameId !== 0) return;
     await processNavigationEvent(details.tabId, details.url, details);
@@ -82,6 +104,34 @@ export async function onHistoryStateUpdated(details) {
 }
 
 async function processNavigationEvent(tabId, url, details) {
+    if (!navigationQueues.has(tabId)) {
+        navigationQueues.set(tabId, []);
+    }
+    navigationQueues.get(tabId).push({ url, details });
+
+    if (processingNavigation.has(tabId)) {
+        return; // Already processing, event is queued.
+    }
+
+    processingNavigation.add(tabId);
+
+    while (navigationQueues.get(tabId) && navigationQueues.get(tabId).length > 0) {
+        const event = navigationQueues.get(tabId).shift();
+        if (event) {
+            try {
+                await doProcessNavigationEvent(tabId, event.url, event.details);
+            } catch (e) {
+                logger.error('NavigationHandler', 'Error processing navigation event from queue', e);
+            }
+        }
+    }
+
+    processingNavigation.delete(tabId);
+    navigationQueues.delete(tabId);
+}
+// --- END OF FIX ---
+
+async function doProcessNavigationEvent(tabId, url, details) {
     const logPrefix = `[NavigationHandler Tab ${tabId}]`;
     if (!url || (!url.startsWith('http') && !url.startsWith('chrome-extension://'))) return;
 
@@ -89,14 +139,20 @@ async function processNavigationEvent(tabId, url, details) {
     await injectOverlayScripts(tabId);
 
     const trustedIntentKey = `trusted_intent_${tabId}`;
-    const sessionData = await storage.getSession(trustedIntentKey);
+    const navIntentKey = `nav_intent_${tabId}`;
+    const sessionData = await storage.getSession([trustedIntentKey, navIntentKey]);
     const trustedContext = sessionData[trustedIntentKey];
+    const navIntent = sessionData[navIntentKey];
+
 
     if (trustedContext) {
         logger.log(logPrefix, 'Found trusted intent token. Stamping tab context.');
         await setPacketContext(tabId, trustedContext.instanceId, trustedContext.canonicalPacketUrl, url);
-        // The grace period is now set by the PacketRuntime after it confirms the context.
         await storage.removeSession(trustedIntentKey);
+    } else if (navIntent) {
+        logger.log(logPrefix, 'Found navigation intent for redirect. Stamping tab context.');
+        await setPacketContext(tabId, navIntent.instanceId, navIntent.canonicalPacketUrl, url);
+        await storage.removeSession(navIntentKey);
     }
 
     const currentContext = await getPacketContext(tabId);
@@ -160,11 +216,9 @@ export async function startVisitTimer(tabId, instanceId, canonicalPacketUrl, log
 
                 if (visitResult.success && visitResult.modified) {
                     await storage.savePacketInstance(visitResult.instance);
-                    // --- START OF FIX ---
                     if (activeMediaPlayback.instanceId === instanceId) {
                         activeMediaPlayback.instance = visitResult.instance;
                     }
-                    // --- END OF FIX ---
                     sidebarHandler.notifySidebar('packet_instance_updated', { instance: visitResult.instance, source: 'dwell_visit' });
                     await checkAndPromptForCompletion(logPrefix, visitResult, instanceId);
                 }
