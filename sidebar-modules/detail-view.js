@@ -15,7 +15,7 @@ let currentPlayingUrl = null; // Track which media item is active in this view
 let sendMessageToBackground;
 let navigateTo;
 let openUrl;
-let showRootViewStatus; // <-- FIX: Added variable to hold the function
+let showRootViewStatus;
 
 /**
  * Injects dependencies from the main sidebar module.
@@ -25,7 +25,7 @@ export function init(dependencies) {
     sendMessageToBackground = dependencies.sendMessageToBackground;
     navigateTo = dependencies.navigateTo;
     openUrl = dependencies.openUrl;
-    showRootViewStatus = dependencies.showRootViewStatus; // <-- FIX: Assign the function from dependencies
+    showRootViewStatus = dependencies.showRootViewStatus;
 
     chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         if (message.action === 'data_captured_from_content') {
@@ -650,7 +650,7 @@ async function createContentCard(contentItem, instance) {
                 <div class="card-url">Click to activate input capture.</div>
                 <button class="paste-from-clipboard-btn">Paste from Clipboard</button>
             </div>`;
-        isClickable = false;
+        isClickable = true;
     } else {
         card.innerHTML = `<div class="card-icon">❓</div><div class="card-text"><div class="card-title">${title}</div><div class="card-url">Unknown item type: ${format}</div></div>`;
         card.style.opacity = '0.6';
@@ -683,15 +683,19 @@ async function createContentCard(contentItem, instance) {
             card.classList.add('drop-zone-active', 'clickable');
             attachInteractiveCardHandlers(card, contentItem, instance);
         }
+    } else if (format === 'interactive-input') {
+        card.classList.add('drop-zone-active');
+        attachInteractiveCardHandlers(card, contentItem, instance);
     }
+
 
     if (isClickable) {
         card.classList.add('clickable');
         if (format === 'audio') {
             playMediaInCard(card, contentItem, instance);
-        } else {
+        } else if (format !== 'interactive-input') { 
             card.addEventListener('click', async (e) => {
-                if (card.classList.contains('opening') || format === 'interactive-input') return;
+                if (card.classList.contains('opening')) return;
 
                 const iconContainer = card.querySelector('.card-icon-container');
                 if (iconContainer && iconContainer.classList.contains('needs-download')) {
@@ -708,7 +712,8 @@ async function createContentCard(contentItem, instance) {
                 setTimeout(() => card.classList.remove('opening'), 2000);
 
                 if (typeof openUrl === 'function') {
-                    openUrl(url, instance.instanceId);
+                    const urlToOpen = packetUtils.renderPacketUrl(url, instance.variables);
+                    openUrl(urlToOpen, instance.instanceId);
                 }
             });
         }
@@ -847,7 +852,6 @@ function attachInteractiveCardHandlers(card, contentItem, instance) {
         pasteButton.addEventListener('click', async (event) => {
             event.stopPropagation();
             try {
-                // --- START OF FIX ---
                 const clipboardItems = await navigator.clipboard.read();
                 let found = false;
                 for (const item of clipboardItems) {
@@ -855,7 +859,6 @@ function attachInteractiveCardHandlers(card, contentItem, instance) {
                         const imageType = item.types.includes('image/png') ? 'image/png' : 'image/jpeg';
                         const blob = await item.getType(imageType);
                         
-                        // Convert blob to a data URL to be saved
                         const reader = new FileReader();
                         reader.onloadend = () => {
                             saveData(reader.result);
@@ -876,7 +879,6 @@ function attachInteractiveCardHandlers(card, contentItem, instance) {
                 if (!found) {
                     showRootViewStatus('No compatible content (text or image) found on clipboard.', 'error');
                 }
-                // --- END OF FIX ---
             } catch (error) {
                 logger.error("DetailView", "Failed to read from clipboard", error);
                 showRootViewStatus('Could not read from clipboard. Permission may be missing or denied.', 'error');

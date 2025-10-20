@@ -269,9 +269,13 @@ export async function orderTabsInGroup(groupId, instance, attempt = 1) {
     try {
         const tabsInGroup = await chrome.tabs.query({ groupId });
         if (tabsInGroup.length <= 1) return true;
-
-        // --- THE FIX: The instance.contents are already flat after migration ---
-        const flatContents = instance.contents;
+        
+        const flatContents = instance.contents.flatMap(item => {
+            if (item.type === 'alternative' && Array.isArray(item.alternatives)) {
+                return item.alternatives;
+            }
+            return item;
+        });
 
         const contextPromises = tabsInGroup.map(tab => getPacketContext(tab.id).then(context => ({ tab, context })));
         const tabsWithContext = await Promise.all(contextPromises);
@@ -314,7 +318,6 @@ export function stopTabReorderingChecks() {
      }
 }
 
-// --- START OF THE FIX ---
 async function findOrCreateDraftGroup() {
     const [existingGroup] = await chrome.tabGroups.query({ title: DRAFT_GROUP_TITLE });
     if (existingGroup) {
@@ -390,7 +393,6 @@ export async function syncDraftGroup(desiredUrls) {
         return { success: false, error: error.message };
     }
 }
-// --- END OF THE FIX ---
 
 export async function focusOrCreateDraftTab(url) {
     if (!(await shouldUseTabGroups())) {
