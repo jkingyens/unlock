@@ -36,9 +36,8 @@ const CONFIG = {
         name: 'Google Gemini 1.5 Pro (Default)',
         providerType: 'gemini',
         apiKey: '',
-        modelName: 'gemini-pro', // --- START OF FIX --- Changed from 'gemini-1.5-pro-latest'
+        modelName: 'gemini-pro',
         apiEndpoint: 'https://generativelanguage.googleapis.com/v1beta/models/'
-        // --- END OF FIX ---
       },
       {
         id: 'default_perplexity_sonar_medium',
@@ -540,6 +539,109 @@ const storage = {
 };
 
 const packetUtils = {
+    _expressToRegex: (path) => {
+        const regexString = '^' + path.replace(/\//g, '\\/').replace(/:(\w+)/g, '(?<$1>[^/]+)') + '$';
+        return new RegExp(regexString);
+    },
+
+    renderPacketUrl: (templateUrl, variables) => {
+        if (!templateUrl || typeof templateUrl !== 'string') return templateUrl;
+        if (!variables) return templateUrl;
+        let renderedUrl = templateUrl;
+        for (const key in variables) {
+            const regex = new RegExp(`:${key}`, 'g');
+            renderedUrl = renderedUrl.replace(regex, variables[key]);
+        }
+        return renderedUrl;
+    },
+
+    isUrlInPacket(loadedUrl, instance, options = {}) {
+        if (!loadedUrl || !instance || !Array.isArray(instance.contents)) {
+            return options.returnItem ? null : false;
+        }
+
+        if (loadedUrl.startsWith('chrome-extension://')) {
+            try {
+                const urlObj = new URL(loadedUrl);
+                if (urlObj.pathname.endsWith('/preview.html')) {
+                    const urlInstanceId = urlObj.searchParams.get('instanceId');
+                    const urlLrl = urlObj.searchParams.get('lrl');
+                    
+                    if (urlInstanceId === instance.instanceId && urlLrl) {
+                        const matchedItem = instance.contents.find(item => item.lrl === decodeURIComponent(urlLrl));
+                        if (matchedItem) {
+                            return options.returnItem ? matchedItem : true;
+                        }
+                    }
+                }
+            } catch (e) {
+                logger.warn('isUrlInPacket', 'Could not parse chrome-extension URL', { loadedUrl, error: e });
+            }
+        }
+
+        let decodedLoadedUrl;
+        try {
+            decodedLoadedUrl = decodeURIComponent(loadedUrl);
+        } catch (e) {
+            decodedLoadedUrl = loadedUrl;
+        }
+
+        for (const item of instance.contents) {
+            let decodedItemUrl = item.url ? decodeURIComponent(item.url) : null;
+            if (!decodedItemUrl) continue;
+
+            if (decodedItemUrl) {
+                const renderedItemUrl = this.renderPacketUrl(decodedItemUrl, instance.variables);
+                
+                const isWildcard = renderedItemUrl.includes('*');
+                const urlPattern = isWildcard ? new RegExp('^' + renderedItemUrl.replace(/\*/g, '[^/]+') + '$') : null;
+
+                if ((!isWildcard && renderedItemUrl === decodedLoadedUrl) || (isWildcard && urlPattern.test(decodedLoadedUrl))) {
+                    return options.returnItem ? item : true;
+                }
+                
+                if (item.captures && item.captures.fromPath) {
+                    try {
+                        const itemUrlObject = new URL(item.url);
+                        const loadedUrlObject = new URL(decodedLoadedUrl);
+
+                        if (itemUrlObject.hostname === loadedUrlObject.hostname) {
+                            const regex = this._expressToRegex(item.captures.fromPath);
+                            const match = loadedUrlObject.pathname.match(regex);
+                            if (match) {
+                                if (options.returnItem) {
+                                    return { ...item, capturedParams: match.groups };
+                                }
+                                return true;
+                            }
+                        }
+                    } catch (e) { /* Invalid URL, skip */ }
+                }
+            }
+
+            if (item.origin === 'internal' && item.url) {
+                if (decodedItemUrl === decodedLoadedUrl) {
+                    return options.returnItem ? item : true;
+                }
+                
+                if (item.publishContext) {
+                    try {
+                        const loadedUrlObj = new URL(loadedUrl);
+                        const { publishContext } = item;
+                        let expectedPathname = (publishContext.provider === 'google')
+                            ? `/${publishContext.bucket}/${item.url}`
+                            : `/${item.url}`;
+                        
+                        if (decodeURIComponent(loadedUrlObj.pathname) === decodeURIComponent(expectedPathname)) {
+                            return options.returnItem ? item : true;
+                        }
+                    } catch (e) { /* loadedUrl might not be a valid URL. */ }
+                }
+            }
+        }
+        return options.returnItem ? null : false;
+    },
+  
     _updateCheckpointsOnVisit(instance) {
         if (!instance || !Array.isArray(instance.checkpoints) || !Array.isArray(instance.checkpointsTripped)) {
             return false;
@@ -552,7 +654,8 @@ const packetUtils = {
                 return;
             }
             const isCompleted = checkpoint.requiredItems.every(req => {
-                return req.url && visitedUrlsSet.has(req.url);
+                const identifier = req.url || req.lrl;
+                return visitedUrlsSet.has(identifier);
             });
             if (isCompleted) {
                 instance.checkpointsTripped[index] = 1;
@@ -593,10 +696,10 @@ const packetUtils = {
         }
         const visitedUrlsSet = new Set(instance.visitedUrls || []);
         
-        const visitedCount = trackableItems.filter(item => 
-            (item.url && visitedUrlsSet.has(item.url)) || 
-            (item.format === 'interactive-input' && item.lrl && visitedUrlsSet.has(item.lrl))
-        ).length;
+        const visitedCount = trackableItems.filter(item => {
+            return (item.url && visitedUrlsSet.has(item.url)) || 
+                   (item.format === 'interactive-input' && item.lrl && visitedUrlsSet.has(item.lrl));
+        }).length;
         
         return {
             visitedCount: visitedCount,
@@ -611,102 +714,6 @@ const packetUtils = {
         return progressPercentage >= 100;
     },
 
-  isUrlInPacket(loadedUrl, instance, options = {}) {
-    if (!loadedUrl || !instance || !Array.isArray(instance.contents)) {
-        return options.returnItem ? null : false;
-    }
-
-    if (loadedUrl.startsWith('chrome-extension://')) {
-        try {
-            const urlObj = new URL(loadedUrl);
-            if (urlObj.pathname.endsWith('/preview.html')) {
-                const urlInstanceId = urlObj.searchParams.get('instanceId');
-                const urlLrl = urlObj.searchParams.get('lrl');
-                
-                if (urlInstanceId === instance.instanceId && urlLrl) {
-                    const matchedItem = instance.contents.find(item => item.lrl === decodeURIComponent(urlLrl));
-                    if (matchedItem) {
-                        return options.returnItem ? matchedItem : true;
-                    }
-                }
-            }
-        } catch (e) {
-            logger.warn('isUrlInPacket', 'Could not parse chrome-extension URL', { loadedUrl, error: e });
-        }
-    }
-
-    let decodedLoadedUrl;
-    try {
-        decodedLoadedUrl = decodeURIComponent(loadedUrl);
-    } catch (e) {
-        logger.warn('isUrlInPacket', 'Could not decode loadedUrl', { loadedUrl, error: e });
-        decodedLoadedUrl = loadedUrl;
-    }
-
-    for (const item of instance.contents) {
-        let decodedItemUrl;
-        if (item.url) {
-            try {
-                decodedItemUrl = decodeURIComponent(item.url);
-            } catch (e) {
-                logger.warn('isUrlInPacket', 'Could not decode item.url', { itemUrl: item.url, error: e });
-                decodedItemUrl = item.url;
-            }
-        }
-
-        if (decodedItemUrl && decodedItemUrl.includes('*')) {
-            // 1. Escape the URL to be safe for regex, then replace our wildcard.
-            const regexString = decodedItemUrl
-                .replace(/[.*+?^${}()|[\]\\]/g, '\\$&') // Escape all special regex characters
-                .replace(/\\\*/g, '([^/]+)');          // Replace the escaped '*' with a pattern that matches any character except a slash.
-
-            // 2. Create a regex that matches the entire URL from start to finish.
-            const regex = new RegExp(`^${regexString}$`);
-
-            // 3. Test the loaded URL against the pattern.
-            if (regex.test(decodedLoadedUrl)) {
-                return options.returnItem ? item : true;
-            }
-        }
-        
-        if (item.origin === 'external' && decodedItemUrl && decodedItemUrl === decodedLoadedUrl) {
-             return options.returnItem ? item : true;
-        }
-
-        if (item.origin === 'internal' && item.url) {
-            if (decodedItemUrl === decodedLoadedUrl) {
-                return options.returnItem ? item : true;
-            }
-            
-            if (item.publishContext) {
-                try {
-                    const loadedUrlObj = new URL(loadedUrl);
-                    const { publishContext } = item;
-                    let expectedPathname = (publishContext.provider === 'google')
-                        ? `/${publishContext.bucket}/${item.url}`
-                        : `/${item.url}`;
-                    
-                    if (decodeURIComponent(loadedUrlObj.pathname) === decodeURIComponent(expectedPathname)) {
-                        return options.returnItem ? item : true;
-                    }
-                } catch (e) { /* loadedUrl might not be a valid URL. */ }
-            }
-        }
-    }
-    return options.returnItem ? null : false;
-  },
-
-  getColorForTopic(title) {
-    const colors = ['grey', 'blue', 'red', 'yellow', 'green', 'pink', 'purple', 'cyan', 'orange'];
-    if (!title) return colors[0];
-    let hash = 0;
-    for (let i = 0; i < title.length; i++) {
-        hash = ((hash << 5) - hash) + title.charCodeAt(i);
-        hash |= 0;
-    }
-    return colors[Math.abs(hash) % colors.length];
-  },
-  
     async markUrlAsVisited(instance, url) {
         if (!instance) {
             logger.warn('markUrlAsVisited', 'Packet instance not found');
@@ -714,37 +721,44 @@ const packetUtils = {
         }
 
         const wasCompletedBefore = await this.isPacketInstanceCompleted(instance);
-        const foundItem = instance.contents.find(item => item.url === url || item.lrl === url);
+        const foundItem = this.isUrlInPacket(url, instance, { returnItem: true });
 
         if (!foundItem) {
             return { success: true, notTrackable: true, instance: instance };
         }
         
         const canonicalIdentifier = foundItem.url || foundItem.lrl;
-        const alreadyVisited = (instance.visitedUrls || []).includes(canonicalIdentifier);
-
-        if (alreadyVisited) {
+        if ((instance.visitedUrls || []).includes(canonicalIdentifier)) {
             return { success: true, alreadyVisited: true, instance: instance };
         }
         
         instance.visitedUrls = [...(instance.visitedUrls || []), canonicalIdentifier];
-        
         this._updateCheckpointsOnVisit(instance);
-        
         const justCompleted = !wasCompletedBefore && await this.isPacketInstanceCompleted(instance);
         
         return { success: true, modified: true, instance, justCompleted };
     },
 
-  getDefaultGeneratedPageUrl(instance) {
-    if (!instance?.contents) return null;
-    const page = instance.contents.find(item => item.format === 'html' && item.origin === 'internal');
-    return page ? page.url : null;
-  },
-  getGeneratedPages(instance) {
-      if (!instance?.contents) return [];
-      return instance.contents.filter(item => item.format === 'html' && item.origin === 'internal');
-  }
+    getColorForTopic(title) {
+        const colors = ['grey', 'blue', 'red', 'yellow', 'green', 'pink', 'purple', 'cyan', 'orange'];
+        if (!title) return colors[0];
+        let hash = 0;
+        for (let i = 0; i < title.length; i++) {
+            hash = ((hash << 5) - hash) + title.charCodeAt(i);
+            hash |= 0;
+        }
+        return colors[Math.abs(hash) % colors.length];
+    },
+
+    getDefaultGeneratedPageUrl(instance) {
+        if (!instance?.contents) return null;
+        const page = instance.contents.find(item => item.format === 'html' && item.origin === 'internal');
+        return page ? this.renderPacketUrl(page.url, instance.variables) : null;
+    },
+    getGeneratedPages(instance) {
+        if (!instance?.contents) return [];
+        return instance.contents.filter(item => item.format === 'html' && item.origin === 'internal');
+    }
 };
 
 function getPacketContextKey(tabId) { return `${CONFIG.STORAGE_KEYS.PACKET_CONTEXT_PREFIX}${tabId}`; }
@@ -813,7 +827,6 @@ function arrayBufferToBase64(buffer) {
     return btoa(binary);
 }
 
-// Replace the old base64Decode function with this new async one.
 async function base64Decode(base64) {
     const dataUrl = `data:application/octet-stream;base64,${base64}`;
     try {

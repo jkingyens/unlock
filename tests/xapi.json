@@ -1,0 +1,32 @@
+{
+  "created": "2025-10-13T05:33:52.827Z",
+  "id": "img_1760333612457_ha6o82q",
+  "sourceContent": [
+    {
+      "context": "Sign in with your X (formerly Twitter) account. If you don't have one, you'll need to create one first.",
+      "format": "html",
+      "origin": "external",
+      "title": "Step 1: Navigate to the Grok Console",
+      "url": "https://console.x.ai/home"
+    },
+    {
+      "context": "Once signed in, this link will take you directly to the API keys management page.",
+      "format": "html",
+      "origin": "external",
+      "title": "Step 2: Go to the API Keys Page",
+      "url": "https://console.x.ai/team/*/api-keys"
+    },
+    {
+      "context": "Click the 'Create new key' button. Give it a name, then click to activate capture and select the generated key on the page or paste it from your clipboard.",
+      "format": "interactive-input",
+      "lrl": "/inputs/capture-grok-api-key",
+      "origin": "internal",
+      "output": {
+        "contentType": "text/plain",
+        "description": "The user's Grok API Key"
+      },
+      "title": "Step 3: Create and Save Your API Key"
+    }
+  ],
+  "title": "How to Get a Grok API Key"
+}

@@ -61,8 +61,12 @@ async function handleOpenContent(data, sender, sendResponse) {
         return sendResponse({ success: false, error: 'Missing instance data or target URL' });
     }
     try {
+        // --- START OF FIX ---
+        // Render the URL with any stored variables before passing it to the runtime.
+        const urlToOpen = packetUtils.renderPacketUrl(clickedUrl, instance.variables);
         const runtime = new PacketRuntime(instance);
-        const result = await runtime.openOrFocusContent(clickedUrl);
+        const result = await runtime.openOrFocusContent(urlToOpen);
+        // --- END OF FIX ---
         sendResponse(result);
     } catch (error) {
         logger.error('MessageHandler:handleOpenContent', 'Error creating runtime or opening content', error);
@@ -427,14 +431,10 @@ Based on the policy and analysis steps, please propose any new additions to the 
 
         const result = await llmService.callLLM('propose_settings_changes', { system: systemPrompt, user: userPrompt });
         
-        // --- START OF DEBUG LOG ---
         console.log('[DEBUG] Raw LLM response for settings proposal:', result);
-        // --- END OF DEBUG LOG ---
 
         if (result.success) {
             try {
-                // The response from the LLM might be a string that needs parsing,
-                // or the service might have already parsed it.
                 const proposedChanges = typeof result.data === 'string' ? JSON.parse(result.data) : result.data;
                 
                 if (Array.isArray(proposedChanges) && proposedChanges.length > 0) {
@@ -502,8 +502,6 @@ async function handleCreateFromCodebase(data, sender, sendResponse) {
                 throw new Error("LLM returned invalid packet structure.");
             }
 
-            // --- START OF FIX ---
-            // Process and save any inline 'content' to IndexedDB
             for (const item of packetImage.sourceContent) {
                 if (item.origin === 'internal' && item.content) {
                     const contentBuffer = new TextEncoder().encode(item.content);
@@ -513,10 +511,9 @@ async function handleCreateFromCodebase(data, sender, sendResponse) {
                         content: contentBuffer,
                         contentType: item.contentType || 'text/html'
                     }]);
-                    delete item.content; // Remove inline content before saving the image
+                    delete item.content;
                 }
             }
-            // --- END OF FIX ---
 
             await storage.savePacketImage(packetImage);
             sendProgressNotification('packet_image_created', { image: packetImage });
@@ -535,12 +532,10 @@ async function getCodebase() {
     const manifest = await chrome.runtime.getManifest();
     let codebase = '';
     const filePaths = new Set([
-        // Core files
         'background.js', 'manifest.json', 'sidebar.html', 'popup.html', 'offscreen.html', 'preview.html',
         'cli.js', 'cloud-storage.js', 'llm_service.js', 'tts_service.js', 'utils.js', 'page_interceptor.js',
         'popup.js', 'popup_actions.js', 'sidebar.js', 'offscreen.js', 'preview.js', 'selector.js', 'overlay.js',
 
-        // Modules
         'background-modules/create-utils.js', 'background-modules/message-handlers.js', 'background-modules/navigation-handler.js',
         'background-modules/packet-processor.js', 'background-modules/packet-runtime.js', 'background-modules/rule-manager.js',
         'background-modules/sidebar-handler.js', 'background-modules/tab-group-handler.js',
@@ -548,14 +543,11 @@ async function getCodebase() {
         'sidebar-modules/create-view.js', 'sidebar-modules/detail-view.js', 'sidebar-modules/dialog-handler.js',
         'sidebar-modules/dom-references.js', 'sidebar-modules/root-view.js', 'sidebar-modules/settings-view.js',
         
-        // CSS
         'sidebar.css', 'popup.css', 'overlay.css', 'selector.css', 'generated_page_style.css', 'help_style.css',
         
-        // Other assets
         'readme.md', 'LICENSE', 'package.json'
     ]);
 
-    // Add files from web_accessible_resources just in case
     if (manifest.web_accessible_resources) {
         manifest.web_accessible_resources.forEach(resource => {
             resource.resources.forEach(path => filePaths.add(path));
@@ -564,10 +556,8 @@ async function getCodebase() {
 
     for (const filePath of filePaths) {
         try {
-            // Skip non-code files
             if (filePath.endsWith('.png') || filePath.endsWith('.svg') || filePath.endsWith('.json')) {
                  if (filePath.endsWith('package.json') || filePath.endsWith('manifest.json')) {
-                    // continue
                  } else {
                     continue;
                  }
@@ -579,8 +569,6 @@ async function getCodebase() {
                 codebase += `// File: ${filePath}\n\n${content}\n\n---\n\n`;
             }
         } catch (error) {
-            // This might fail for directories listed in manifest, which is fine.
-            // console.warn(`Could not fetch ${filePath}:`, error);
         }
     }
     return codebase;
