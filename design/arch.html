@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Mermaid Diagram</title>
+  </head>
+  <body>
+    <pre class="mermaid">
+      graph TD
+        subgraph "User Interface (Sidebar)"
+            UI[Packet UI]
+        end
+
+        subgraph "Core Engine (background.js)"
+            A[Packet Runner]
+            DR[Dependency Resolver]
+            A -- Manages --> DR
+        end
+
+        subgraph "Data Stores (storage.js)"
+            B(Packet Library<br/><i>'PacketImages'</i>)
+            C(Active Packets<br/><i>'PacketInstances'</i>)
+            D(The Archive<br/><i>'Completed Instances'</i>)
+        end
+
+        subgraph "Background Services"
+            S[Services Layer]
+            S1[LLM Token Collection]
+            S -- Manages --> S1
+        end
+
+        B -- 1. User Instantiates --> A
+        A -- Creates/Runs --> C
+        C -- 5. On Completion --> D
+
+        D -- Feeds Data --> S1
+
+        A -- 2. Checks Dependencies --> DR
+        DR -- 3. Queries --> S1
+        S1 -- 4a. Key Found --> DR
+        DR -- "Success" --> A
+        
+        S1 -- 4b. Key NOT Found --> DR
+        DR -- "Failure" --> A
+
+        A -- "Launches Helper" --> B
+        subgraph "Helper Packet Lifecycle"
+            direction LR
+            Helper_Instantiated(Active Helper Packet)
+            Helper_Archived(Archived Helper Packet)
+            Helper_Instantiated -- "Completes with API Key" --> Helper_Archived
+        end
+        B -- "Finds 'get-api-key' Packet" --> Helper_Instantiated
+        Helper_Archived -- "Updates Archive" --> D
+        
+        UI <--> A
+    </pre>
+
+    <script type="module">
+      import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+      mermaid.initialize({ startOnLoad: true });
+    </script>
+  </body>
+</html>
