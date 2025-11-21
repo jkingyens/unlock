@@ -41,6 +41,9 @@ class PacketRuntime {
     }
 
    async reconcileTab(tabId, url, details) {
+
+    this.instance = await storage.getPacketInstance(this.instance.instanceId) || this.instance;
+    
         const newItemInPacket = packetUtils.isUrlInPacket(url, this.instance, { returnItem: true });
         
         if (newItemInPacket) {

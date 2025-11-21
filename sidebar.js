@@ -144,12 +144,21 @@ export async function navigateTo(viewName, instanceId = null, data = null) {
 
     try {
         switch(viewName) {
-            case 'packet-detail':
+case 'packet-detail':
                 const instanceData = await storage.getPacketInstance(instanceId);
-
                 if (!instanceData) throw new Error(`Packet instance ${instanceId} not found.`);
 
                 const browserState = await storage.getPacketBrowserState(instanceId);
+
+                // --- START OF FIX ---
+                // If we are entering the detail view and don't have a specific
+                // packet URL in context, restore the last active one from the
+                // browser state. This prevents the toggling issue by ensuring
+                // the view always has the correct context.
+                if (!currentPacketUrl && browserState?.lastActiveUrl) {
+                    currentPacketUrl = browserState.lastActiveUrl;
+                }
+                // --- END OF FIX ---
 
                 currentView = 'packet-detail';
                 currentInstanceId = instanceData.instanceId;
@@ -159,13 +168,10 @@ export async function navigateTo(viewName, instanceId = null, data = null) {
 
                 await detailView.displayPacketContent(instanceData, browserState, currentPacketUrl);
                 
-                // --- START OF FIX: Gracefully handle messaging errors for tab groups ---
-                // If we are navigating to a detail view, tell the background to expand the group.
                 sendMessageToBackground({
                     action: 'expand_tab_group_for_instance',
                     data: { instanceId: currentInstanceId }
                 }).catch(e => logger.warn('Sidebar', 'Failed to send expand message (service worker may be waking up).', e.message));
-                // --- END OF FIX ---
                 break;
             case 'create':
                 currentView = 'create';
@@ -210,11 +216,6 @@ async function updateSidebarContext(contextData) {
     const newPacketUrl = contextData?.packetUrl ?? null;
     let newInstanceData = contextData?.instance ?? null;
 
-    if (newInstanceId === null && currentView === 'packet-detail' && currentInstanceId === activeMediaInstanceId) {
-        logger.log('Sidebar:updateSidebarContext', 'Ignoring context change to null because active media packet is being viewed.');
-        return;
-    }
-
     if (isOpeningPacketItem && newInstanceId === null) {
         logger.log('Sidebar:updateSidebarContext', 'Ignoring transient null context due to navigation lock.');
         return;
@@ -224,11 +225,16 @@ async function updateSidebarContext(contextData) {
         currentInstanceId = newInstanceId;
         currentInstanceData = newInstanceData;
         currentPacketUrl = newPacketUrl;
+        
+        // --- START OF FIX ---
+        // The problematic "else if" block that was here has been removed.
+        // We now only navigate to a detail view if we receive a valid new instanceId.
+        // We no longer force a navigation to 'root' just because the context became null.
         if (currentInstanceId) {
             navigateTo('packet-detail', currentInstanceId);
-        } else if (currentView !== 'root') {
-            navigateTo('root');
         }
+        // --- END OF FIX ---
+
     } else if (currentView === 'packet-detail' && newInstanceId !== null) {
         if (!newInstanceData) {
             logger.warn('Sidebar:updateSidebarContext', `Received null instance data for current instance ID ${newInstanceId}. Navigating to root.`);

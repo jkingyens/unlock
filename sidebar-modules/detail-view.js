@@ -2,6 +2,7 @@
 // Manages the packet detail view, including rendering content cards and progress.
 // REVISED: The card click handler now immediately adds an 'opening' class to prevent
 // rapid clicks from creating duplicate tabs, fixing a critical race condition.
+// DEBUG: Added extensive logging to track visited status rendering.
 
 import { domRefs } from './dom-references.js';
 import { logger, storage, packetUtils, indexedDbStorage, sanitizeForFileName } from '../utils.js';
@@ -310,6 +311,18 @@ export function updateSingleCardToCached(lrl) {
 
 // --- Main Rendering Function ---
 export async function displayPacketContent(instance, browserState, canonicalPacketUrl) {
+    // ========================================================================
+    // --- START DEBUG LOGGING ---
+    const callId = `render_${Date.now()}`;
+    console.log(`[DEBUG] ----------------------------------------------------`);
+    console.log(`[DEBUG] Firing displayPacketContent (Call ID: ${callId})`);
+    console.log(`[DEBUG] > Instance ID: ${instance?.instanceId}`);
+    console.log(`[DEBUG] > Visited URLs received:`, JSON.stringify(instance?.visitedUrls || []));
+    console.log(`[DEBUG] > Active Canonical URL: ${canonicalPacketUrl}`);
+    console.log(`[DEBUG] ----------------------------------------------------`);
+    // --- END DEBUG LOGGING ---
+    // ========================================================================
+
     const uniqueCallId = Date.now();
     if (isDisplayingPacketContent) {
         queuedDisplayRequest = { instance, browserState, canonicalPacketUrl };
@@ -333,7 +346,7 @@ export async function displayPacketContent(instance, browserState, canonicalPack
         const { progressPercentage, visitedCount, totalCount } = packetUtils.calculateInstanceProgress(instance);
 
         if (isAlreadyRendered) {
-            await updateCardVisibility(instance, browserState);
+            await updateCardVisibility(instance, browserState, callId); // Pass callId for logging
             updateActiveCardHighlight(canonicalPacketUrl);
             
             const progressBar = domRefs.detailProgressContainer?.querySelector('.progress-bar');
@@ -417,8 +430,16 @@ export async function displayPacketContent(instance, browserState, canonicalPack
     }
 }
 
-export async function updateCardVisibility(instance, browserState) {
+export async function updateCardVisibility(instance, browserState, callId) { // Receive callId for logging
     if (!domRefs.detailCardsContainer || !instance) return;
+
+    // ========================================================================
+    // --- START DEBUG LOGGING ---
+    console.log(`[DEBUG] Firing updateCardVisibility (Render Call ID: ${callId})`);
+    const visitedUrlsSetForLogging = new Set(instance.visitedUrls || []);
+    console.log(`[DEBUG] > Visited URLs Set used for update:`, JSON.stringify(Array.from(visitedUrlsSetForLogging)));
+    // --- END DEBUG LOGGING ---
+    // ========================================================================
     
     let openTabUrls = new Set();
     if (browserState?.tabGroupId && chrome?.tabs) {
@@ -434,7 +455,18 @@ export async function updateCardVisibility(instance, browserState) {
 
     domRefs.detailCardsContainer.querySelectorAll('.card').forEach(card => {
         const cardUrl = card.dataset.url;
-        const isVisited = (cardUrl && visitedUrlsSet.has(cardUrl)) || (card.dataset.lrl && visitedUrlsSet.has(card.dataset.lrl));
+        const cardLrl = card.dataset.lrl;
+        const isVisited = (cardUrl && visitedUrlsSet.has(cardUrl)) || (cardLrl && visitedUrlsSet.has(cardLrl));
+        
+        // ========================================================================
+        // --- START DEBUG LOGGING ---
+        console.log(`[DEBUG] >> Checking card: ${card.querySelector('.card-title')?.textContent.trim()}`);
+        console.log(`[DEBUG]    - URL: ${cardUrl}`);
+        console.log(`[DEBUG]    - LRL: ${cardLrl}`);
+        console.log(`[DEBUG]    - Is Marked Visited: ${isVisited}`);
+        // --- END DEBUG LOGGING ---
+        // ========================================================================
+
         card.classList.toggle('visited', isVisited);
 
         const momentIndices = card.dataset.momentIndices ? JSON.parse(card.dataset.momentIndices) : [];
