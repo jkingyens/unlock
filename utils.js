@@ -714,7 +714,7 @@ const packetUtils = {
         return progressPercentage >= 100;
     },
 
-    async markUrlAsVisited(instance, url) {
+async markUrlAsVisited(instance, url) {
         if (!instance) {
             logger.warn('markUrlAsVisited', 'Packet instance not found');
             return { success: false, error: 'Packet instance not found' };
@@ -727,7 +727,13 @@ const packetUtils = {
             return { success: true, notTrackable: true, instance: instance };
         }
         
-        const canonicalIdentifier = foundItem.url || foundItem.lrl;
+        // --- START OF FIX ---
+        // Prioritize LRL as the canonical identifier for visit tracking if it exists.
+        // This creates a single, consistent ID for each item, fixing the root cause
+        // of the toggling bug where the system was confused between URL and LRL.
+        const canonicalIdentifier = foundItem.lrl || foundItem.url;
+        // --- END OF FIX ---
+
         if ((instance.visitedUrls || []).includes(canonicalIdentifier)) {
             return { success: true, alreadyVisited: true, instance: instance };
         }
