@@ -1,9 +1,5 @@
 // ext/sidebar.js (Global Side Panel - Orchestrator)
-// REVISED: The packet_instance_deleted message handler is now more robust,
-// ensuring it correctly clears internal state and navigates to the root view
-// if the currently active packet is the one being deleted.
-// REVISED: The sidebar will now remain on the packet detail view if that packet's
-// media is playing, even when the user navigates to a tab outside the packet.
+// REVISED: Replaced chrome.runtime.onMessage with persistent port connection logic.
 
 import { logger, storage, packetUtils, applyThemeMode, CONFIG } from './utils.js';
 import { domRefs, cacheDomReferences } from './sidebar-modules/dom-references.js';
@@ -23,6 +19,7 @@ let nextNavigationRequest = null;
 const PENDING_VIEW_KEY = 'pendingSidebarView';
 let isOpeningPacketItem = false;
 let activeMediaInstanceId = null; // NEW: Tracks the ID of the packet with active media
+let backgroundPort = null; // NEW: Persistent port
 
 function resetSidebarState() {
     currentView = 'root';
@@ -85,7 +82,9 @@ async function initialize() {
 }
 
 function setupGlobalListeners() {
-    chrome.runtime.onMessage.addListener(handleBackgroundMessage);
+    // Replaced single message listener with port connection
+    connectToBackground();
+
     domRefs.backBtn?.addEventListener('click', () => {
         if (currentView === 'create') {
             createView.handleDiscardDraftPacket();
@@ -105,11 +104,26 @@ function setupGlobalListeners() {
     });
 }
 
+// --- NEW: Persistent Connection Logic ---
+function connectToBackground() {
+    try {
+        backgroundPort = chrome.runtime.connect({ name: 'sidebar' });
+        backgroundPort.onMessage.addListener(handleBackgroundMessage);
+        backgroundPort.onDisconnect.addListener(() => {
+            logger.log('Sidebar', 'Disconnected from background. Attempting reconnect in 1s...');
+            backgroundPort = null;
+            // Simple retry strategy. If background process died, it might restart soon.
+            setTimeout(connectToBackground, 1000);
+        });
+    } catch (e) {
+        logger.error('Sidebar', 'Connection failed', e);
+    }
+}
+
 
 // --- Navigation & View Management ---
 
 export async function navigateTo(viewName, instanceId = null, data = null) {
-    // --- START OF FIX: Gracefully handle messaging errors for tab groups ---
     // If we are navigating away from a detail view, tell the background to collapse the group.
     if (currentView === 'packet-detail' && currentInstanceId && (viewName !== 'packet-detail' || currentInstanceId !== instanceId)) {
         sendMessageToBackground({
@@ -117,7 +131,6 @@ export async function navigateTo(viewName, instanceId = null, data = null) {
             data: { instanceId: currentInstanceId }
         }).catch(e => logger.warn('Sidebar', 'Failed to send collapse message (service worker may be waking up).', e.message));
     }
-    // --- END OF FIX ---
 
     if (viewName === 'root') {
         resetSidebarState();
@@ -150,15 +163,9 @@ case 'packet-detail':
 
                 const browserState = await storage.getPacketBrowserState(instanceId);
 
-                // --- START OF FIX ---
-                // If we are entering the detail view and don't have a specific
-                // packet URL in context, restore the last active one from the
-                // browser state. This prevents the toggling issue by ensuring
-                // the view always has the correct context.
                 if (!currentPacketUrl && browserState?.lastActiveUrl) {
                     currentPacketUrl = browserState.lastActiveUrl;
                 }
-                // --- END OF FIX ---
 
                 currentView = 'packet-detail';
                 currentInstanceId = instanceData.instanceId;
@@ -226,14 +233,9 @@ async function updateSidebarContext(contextData) {
         currentInstanceData = newInstanceData;
         currentPacketUrl = newPacketUrl;
         
-        // --- START OF FIX ---
-        // The problematic "else if" block that was here has been removed.
-        // We now only navigate to a detail view if we receive a valid new instanceId.
-        // We no longer force a navigation to 'root' just because the context became null.
         if (currentInstanceId) {
             navigateTo('packet-detail', currentInstanceId);
         }
-        // --- END OF FIX ---
 
     } else if (currentView === 'packet-detail' && newInstanceId !== null) {
         if (!newInstanceData) {
@@ -276,6 +278,8 @@ async function openUrl(url, instanceId) {
 export function sendMessageToBackground(message) {
     return new Promise((resolve, reject) => {
         if (!chrome?.runtime?.sendMessage) return reject(new Error('Chrome runtime unavailable.'));
+        // Outbound messages from sidebar to background still use standard sendMessage
+        // as they are typically user-initiated requests.
         chrome.runtime.sendMessage(message, response => {
             const err = chrome.runtime.lastError;
             if (err) {

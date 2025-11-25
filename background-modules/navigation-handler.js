@@ -3,6 +3,8 @@
 // It has been refactored to delegate all complex reconciliation logic to the
 // PacketRuntime API, cleaning up its responsibilities.
 // REVISED: The grace period for navigation has been lowered from 250ms to 50ms.
+// FINAL FIX: Removed aggressive "nav_intent" logic that caused auto-adoption of
+// tabs based purely on URL matching. Now strictly relies on trusted intent or existing context.
 
 import {
     logger,
@@ -53,23 +55,12 @@ export async function onBeforeNavigate(details) {
         return;
     }
 
+    // --- REMOVED AGGRESSIVE AUTO-ADOPTION LOGIC HERE ---
+    // We no longer iterate instances to set 'nav_intent' based on URL matching.
+    // This prevents the extension from capturing tabs just because they match a packet URL.
+
+    // Check for cached content (Previews)
     const instances = await storage.getPacketInstances();
-
-    for (const instanceId in instances) {
-        const instance = instances[instanceId];
-        const targetItem = packetUtils.isUrlInPacket(details.url, instance, { returnItem: true });
-
-        if (targetItem) {
-            const navIntent = {
-                instanceId: instance.instanceId,
-                canonicalPacketUrl: targetItem.url || targetItem.lrl
-            };
-            await storage.setSession({ [`nav_intent_${details.tabId}`]: navIntent });
-            setTimeout(() => storage.removeSession(`nav_intent_${details.tabId}`), 5000);
-            break;
-        }
-    }
-
     for (const instanceId in instances) {
         const instance = instances[instanceId];
         const targetItem = packetUtils.isUrlInPacket(details.url, instance, { returnItem: true });
@@ -139,21 +130,16 @@ async function doProcessNavigationEvent(tabId, url, details) {
     await injectOverlayScripts(tabId);
 
     const trustedIntentKey = `trusted_intent_${tabId}`;
-    const navIntentKey = `nav_intent_${tabId}`;
-    const sessionData = await storage.getSession([trustedIntentKey, navIntentKey]);
+    // Remove navIntentKey lookup
+    const sessionData = await storage.getSession([trustedIntentKey]);
     const trustedContext = sessionData[trustedIntentKey];
-    const navIntent = sessionData[navIntentKey];
-
 
     if (trustedContext) {
         logger.log(logPrefix, 'Found trusted intent token. Stamping tab context.');
         await setPacketContext(tabId, trustedContext.instanceId, trustedContext.canonicalPacketUrl, url);
         await storage.removeSession(trustedIntentKey);
-    } else if (navIntent) {
-        logger.log(logPrefix, 'Found navigation intent for redirect. Stamping tab context.');
-        await setPacketContext(tabId, navIntent.instanceId, navIntent.canonicalPacketUrl, url);
-        await storage.removeSession(navIntentKey);
     }
+    // Removed 'else if (navIntent)' block
 
     const currentContext = await getPacketContext(tabId);
     let instance = null;
@@ -161,6 +147,10 @@ async function doProcessNavigationEvent(tabId, url, details) {
     if (currentContext?.instanceId) {
         instance = await storage.getPacketInstance(currentContext.instanceId);
     } else {
+        // Fallback: Check if URL belongs to any packet, BUT DO NOT ADOPT yet.
+        // PacketRuntime.reconcileTab will decide whether to adopt or ignore.
+        // Since we removed auto-adoption in PacketRuntime, this is mostly for
+        // resolving the instance object to pass to reconcileTab.
         const allInstances = await storage.getPacketInstances();
         for (const inst of Object.values(allInstances)) {
             if (packetUtils.isUrlInPacket(url, inst)) {

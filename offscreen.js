@@ -4,7 +4,8 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
     window.unlockOffscreenInitialized = true;
 
     let audio = null;
-    let timeUpdateInterval = null;
+    let timeUpdateTimer = null; // Changed from interval to timer ID
+    let isSidebarOpen = false; // NEW: Track sidebar state
 
     function base64ToAb(base64) {
         const binary_string = window.atob(base64);
@@ -16,31 +17,44 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
         return bytes.buffer;
     }
 
+    // --- NEW: Dynamic Update Loop ---
+    function scheduleTimeUpdate() {
+        if (timeUpdateTimer) clearTimeout(timeUpdateTimer);
+        
+        // Determine delay based on visibility: 250ms if active, 1000ms if background
+        const delay = isSidebarOpen ? 250 : 1000;
+        
+        timeUpdateTimer = setTimeout(() => {
+            if (!audio || audio.paused) return; // Stop if paused
+
+            if (chrome.runtime?.id) { 
+                chrome.runtime.sendMessage({
+                    action: 'audio_time_update',
+                    data: {
+                        currentTime: audio.currentTime,
+                        duration: audio.duration,
+                        url: audio.dataset.url
+                    }
+                });
+            }
+            // Schedule next tick
+            scheduleTimeUpdate();
+        }, delay);
+    }
+
     function setupAudioElement() {
         if (audio) return;
         audio = new Audio();
         audio.onplay = () => {
-            if (timeUpdateInterval) clearInterval(timeUpdateInterval);
-            timeUpdateInterval = setInterval(() => {
-                if (!audio.paused && chrome.runtime?.id) { 
-                    chrome.runtime.sendMessage({
-                        action: 'audio_time_update',
-                        data: {
-                            currentTime: audio.currentTime,
-                            duration: audio.duration,
-                            url: audio.dataset.url
-                        }
-                    });
-                }
-            }, 250);
+            scheduleTimeUpdate(); // Start the loop
         };
         audio.onpause = () => {
-            if (timeUpdateInterval) clearInterval(timeUpdateInterval);
-            timeUpdateInterval = null;
+            if (timeUpdateTimer) clearTimeout(timeUpdateTimer);
+            timeUpdateTimer = null;
         };
         audio.onended = () => {
-            if (timeUpdateInterval) clearInterval(timeUpdateInterval);
-            timeUpdateInterval = null;
+            if (timeUpdateTimer) clearTimeout(timeUpdateTimer);
+            timeUpdateTimer = null;
             if (chrome.runtime?.id) { 
                 chrome.runtime.sendMessage({
                     action: 'media_playback_complete',
@@ -78,10 +92,10 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
                     if (data.startTime) audio.currentTime = data.startTime;
                     audio.play().catch(e => console.error("Audio play failed:", e));
                 }
-                break;
+                return { success: true, isPlaying: !audio.paused, currentTime: audio.currentTime };
             case 'pause':
                 audio.pause();
-                break;
+                return { success: true, isPlaying: false, currentTime: audio.currentTime };
             case 'stop':
                 audio.pause();
                 audio.currentTime = 0;
@@ -92,22 +106,24 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
                 audio.removeAttribute('src');
                 audio.dataset.url = '';
                 audio.dataset.instanceId = '';
-                break;
+                return { success: true, isPlaying: false, currentTime: 0 };
             case 'toggle':
-                if (audio.paused) audio.play();
+                if (audio.paused) audio.play().catch(e => console.error(e));
                 else audio.pause();
-                break;
+                return { success: true, isPlaying: !audio.paused, currentTime: audio.currentTime };
             case 'get_current_time':
-                return { success: true, currentTime: audio.currentTime };
+                return { success: true, currentTime: audio.currentTime, isPlaying: !audio.paused };
         }
         return { success: true };
     }
 
+    // ... (normalizeAudioAndGetDuration, encodeWAV, interleave, readability preserved below) ...
+    
     async function normalizeAudioAndGetDuration(audioBuffer) {
         try {
             const audioContext = new (window.AudioContext || window.webkitAudioContext)();
             const originalAudioBuffer = await audioContext.decodeAudioData(audioBuffer);
-            const duration = originalAudioBuffer.duration; // Get duration here
+            const duration = originalAudioBuffer.duration; 
 
             const offlineContext = new OfflineAudioContext(originalAudioBuffer.numberOfChannels, originalAudioBuffer.length, originalAudioBuffer.sampleRate);
             const compressor = offlineContext.createDynamicsCompressor();
@@ -129,7 +145,6 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
             throw error;
         }
     }
-
 
     function encodeWAV(audioBuffer) {
         const numChannels = audioBuffer.numberOfChannels, sampleRate = audioBuffer.sampleRate, format = 1, bitDepth = 16;
@@ -179,14 +194,15 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
     };
 
     function handleMessages(request, sender, sendResponse) {
-        if (!chrome.runtime?.id) {
-            console.warn("Offscreen document context invalidated. Ignoring message.", request.type);
-            return false;
-        }
-
+        if (!chrome.runtime?.id) return false;
         if (request.target !== 'offscreen') return false;
 
         switch (request.type) {
+            case 'set_sidebar_state': // NEW: Handle state update
+                isSidebarOpen = request.data.isOpen;
+                // If audio is playing, the next tick of scheduleTimeUpdate will automatically pick up the new delay.
+                sendResponse({ success: true });
+                return false;
             case 'create-blob-url':
                 try {
                     const blob = new Blob([request.data.html], { type: 'text/html' });
@@ -199,16 +215,6 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
             case 'create-blob-url-from-buffer':
                 try {
                     const buffer = base64ToAb(request.data.bufferB64);
-                    // --- DEBUG LOGGING START ---
-                    const firstBytes = new Uint8Array(buffer.slice(0, 8));
-                    const magicNumber = Array.from(firstBytes).map(byte => String.fromCharCode(byte)).join('');
-                    console.log(`[DEBUG_LOG 3/3] Offscreen:handleMessages - Received buffer to create blob`, {
-                        bufferSize: buffer.byteLength,
-                        magicNumber: magicNumber,
-                        isValidPDF: magicNumber.startsWith('%PDF')
-                    });
-                    // --- DEBUG LOGGING END ---
-
                     const blob = new Blob([buffer], { type: request.data.type });
                     const blobUrl = URL.createObjectURL(blob);
                     sendResponse({ success: true, blobUrl: blobUrl });
@@ -220,11 +226,7 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
                 try {
                     const parser = new DOMParser();
                     const doc = parser.parseFromString(request.data.html, 'text/html');
-                    
-                    const context = {
-                        plainText: '',
-                        linkMappings: []
-                    };
+                    const context = { plainText: '', linkMappings: [] };
                     function processNode(node) {
                         if (node.nodeType === Node.TEXT_NODE) {
                             context.plainText += node.textContent.replace(/\s+/g, ' ').trim() + ' ';
@@ -241,9 +243,7 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
                             }
                             node.childNodes.forEach(processNode);
                             const blockElements = ['P', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'DIV', 'LI'];
-                            if (blockElements.includes(node.tagName)) {
-                                context.plainText += '\n';
-                            }
+                            if (blockElements.includes(node.tagName)) context.plainText += '\n';
                         }
                     }
                     processNode(doc.body);
@@ -294,21 +294,11 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
                     try {
                         const audioContext = new (window.AudioContext || window.webkitAudioContext)();
                         const audioBuffer = base64ToAb(request.data.base64);
-                        
                         audioContext.decodeAudioData(audioBuffer)
-                            .then(decodedData => {
-                                sendResponse({ success: true, duration: decodedData.duration });
-                            })
-                            .catch(e => {
-                                console.error('[Offscreen] Audio decoding failed:', e);
-                                sendResponse({ success: false, error: 'Audio decoding failed.' });
-                            });
-                    } catch (e) {
-                        sendResponse({ success: false, error: e.message });
-                    }
-                } else {
-                    sendResponse({ success: false, error: 'No audio data provided.' });
-                }
+                            .then(decodedData => { sendResponse({ success: true, duration: decodedData.duration }); })
+                            .catch(e => { console.error('[Offscreen] Audio decoding failed:', e); sendResponse({ success: false, error: 'Audio decoding failed.' }); });
+                    } catch (e) { sendResponse({ success: false, error: e.message }); }
+                } else { sendResponse({ success: false, error: 'No audio data provided.' }); }
                 return true;
         }
         return false;

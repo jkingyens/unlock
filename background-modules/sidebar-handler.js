@@ -1,10 +1,12 @@
 // ext/background-modules/sidebar-handler.js
-// FINAL FIX: Corrected a TypeError caused by not awaiting the result of chrome.tabs.query,
-// which prevented tab reordering and syncing from working correctly.
+// REVISED: Implemented long-lived Port connection for reliable sidebar messaging.
+// This replaces the flaky sendMessage calls with a persistent connection that
+// automatically handles the sidebar's lifecycle.
 
 import { logger, storage, isSidePanelAvailable, getPacketContext } from '../utils.js';
 
 let activeInstanceId = null; // Tracks the InstanceID the background thinks the sidebar should be focused on
+let sidebarPort = null; // NEW: Track the persistent connection
 
 export async function updateActionForTab(tabId) {
     if (typeof tabId !== 'number') return;
@@ -52,39 +54,41 @@ export function getActivePacketId() {
     return activeInstanceId;
 }
 
-// --- START OF FIX: More resilient notification system ---
-export async function notifySidebar(action, data) {
-    if (!isSidePanelAvailable()) {
-        return;
-    }
+// --- NEW: Handle Long-Lived Connection ---
+export function handleSidebarConnection(port) {
+    logger.log('SidebarHandler', 'Sidebar connected via port.');
+    sidebarPort = port;
     
-    // Proactively check if the sidebar is open before attempting to send a message.
-    const { isSidebarOpen } = await storage.getSession({ isSidebarOpen: false });
-    if (!isSidebarOpen) {
-        return; // Don't even try to send if we know it's closed.
-    }
-    
-    const messageData = { ...data };
-    if ('instanceId' in messageData && !('packetId' in messageData)) {
-         messageData.packetId = messageData.instanceId;
-    }
+    // Update session state immediately
+    storage.setSession({ isSidebarOpen: true });
 
-    chrome.runtime.sendMessage({ action: action, data: messageData }, (response) => {
-        const lastError = chrome.runtime.lastError;
-        if (lastError) {
-             const errorMsg = lastError.message || '';
-             const isExpectedError = errorMsg.includes("Could not establish connection") || 
-                                     errorMsg.includes("Receiving end does not exist") ||
-                                     errorMsg.includes("The message port closed before a response was received");
-
-             if (!isExpectedError) {
-                  logger.warn('SidebarHandler:notify', 'Send failed with an unexpected error', { action, error: errorMsg });
-             }
-        }
+    port.onDisconnect.addListener(() => {
+        logger.log('SidebarHandler', 'Sidebar disconnected.');
+        sidebarPort = null;
+        storage.setSession({ isSidebarOpen: false });
     });
 }
-// --- END OF FIX ---
 
+// --- REVISED: Notify via Port ---
+export async function notifySidebar(action, data) {
+    // Only attempt to send if we have an active connection.
+    // This inherently solves the "Receiving end does not exist" error.
+    if (sidebarPort) {
+        try {
+            const messageData = { ...data };
+            if ('instanceId' in messageData && !('packetId' in messageData)) {
+                 messageData.packetId = messageData.instanceId;
+            }
+            sidebarPort.postMessage({ action: action, data: messageData });
+        } catch (e) {
+            logger.warn('SidebarHandler:notify', 'Failed to post message to sidebar port', e);
+            sidebarPort = null;
+        }
+    } else {
+        // Optional: Log debug info if needed, but generally we just suppress the message
+        // since the sidebar isn't there to care about it.
+    }
+}
 
 /**
  * Handles the 'sidebar_ready' message from the sidebar UI script.

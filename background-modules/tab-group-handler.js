@@ -1,6 +1,5 @@
 // ext/background-modules/tab-group-handler.js
-// FINAL FIX: Corrected a TypeError caused by not awaiting the result of chrome.tabs.query,
-// which prevented tab reordering and syncing from working correctly.
+// REVISED: Added setGroupCollapsedState to handle expand/collapse requests.
 
 import {
     logger,
@@ -56,6 +55,11 @@ export async function ensureTabInGroup(tabId, instance) {
         
         const tab = await chrome.tabs.get(tabId);
         let browserState = await storage.getPacketBrowserState(instanceId) || { instanceId, tabGroupId: null, activeTabIds: [], lastActiveUrl: null };
+        
+        if (browserState.manualDisconnect) {
+            return null;
+        }
+
         let targetGroupId = null;
 
         if (tab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE) {
@@ -447,5 +451,60 @@ export async function cleanupDraftGroup() {
         }
     } catch (error) {
         logger.error('TabGroupHandler:cleanupDraftGroup', 'Error cleaning up draft group', error);
+    }
+}
+
+export async function handleTabGroupRemoved(groupId) {
+    if (!groupId) return;
+    try {
+        const allStates = await storage.getAllPacketBrowserStates();
+        for (const instanceId in allStates) {
+            const state = allStates[instanceId];
+            if (state.tabGroupId === groupId) {
+                state.tabGroupId = null;
+                state.manualDisconnect = true; // Flag as user-closed
+                await storage.savePacketBrowserState(state);
+                logger.log('TabGroupHandler', `Group ${groupId} removed. Marked instance ${instanceId} as manually disconnected.`);
+            }
+        }
+    } catch (error) {
+        logger.error('TabGroupHandler', 'Error handling group removal', error);
+    }
+}
+
+export async function reactivateGroup(instanceId) {
+    try {
+        const state = await storage.getPacketBrowserState(instanceId);
+        if (state && state.manualDisconnect) {
+            state.manualDisconnect = false;
+            await storage.savePacketBrowserState(state);
+            logger.log('TabGroupHandler', `Reactivated grouping for instance ${instanceId}`);
+        }
+    } catch (error) { 
+        logger.warn('TabGroupHandler', 'Failed to reactivate group', error);
+    }
+}
+
+// --- NEW: Set group collapse state ---
+export async function setGroupCollapsedState(instanceId, collapsed) {
+    if (!(await shouldUseTabGroups())) return { success: true, message: "Tab groups disabled" };
+    
+    try {
+        const state = await storage.getPacketBrowserState(instanceId);
+        if (state && state.tabGroupId) {
+            // Check if group still exists
+            try {
+                await chrome.tabGroups.get(state.tabGroupId);
+                await chrome.tabGroups.update(state.tabGroupId, { collapsed: collapsed });
+                return { success: true };
+            } catch (e) {
+                // Group likely closed by user
+                return { success: true, message: "Group not found, possibly closed" };
+            }
+        }
+        return { success: true, message: "No group associated with instance" };
+    } catch (error) {
+        logger.warn('TabGroupHandler:setGroupCollapsedState', 'Failed to update group state', error);
+        return { success: false, error: error.message };
     }
 }
