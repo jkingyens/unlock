@@ -1,252 +1,132 @@
 /* ext/popup.css */
 
-/* --- Color Variables --- */
 :root {
-  /* Light Mode Defaults */
   --bg-primary: #ffffff;
   --bg-secondary: #f8f8f8;
-  --bg-tertiary: #f0f0f0;
-  --bg-accent: #e8f0fe;
-  --bg-overlay: rgba(0, 0, 0, 0.5);
-
+  --bg-hover: #f1f3f4;
   --text-primary: #202124;
   --text-secondary: #5f6368;
-  --text-accent: #1a73e8;
-  --text-on-primary-button: #ffffff;
-  --text-on-secondary-button: #333333; /* Text for light secondary buttons */
-  --text-placeholder: #757575;
-  --text-italic: #5f6368;
-
-  --border-primary: #dadce0;
-  --border-secondary: #e0e0e0;
-  --border-focus: #1a73e8;
-
-  --button-primary-bg: #1a73e8;
-  --button-primary-hover-bg: #185abc;
-  --button-primary-disabled-opacity: 0.6;
-  --button-secondary-bg: #f5f5f5; /* Background for secondary buttons */
-  --button-secondary-hover-bg: #e8eaed; /* Hover for secondary buttons */
-
-  --spinner-bg: #f3f3f3;
-  --spinner-accent: #3498db;
-
-  --toast-bg: #323232;
-  --toast-text: #ffffff;
-  --toast-success-bg: #1e8e3e;
-  --toast-error-bg: #d93025;
-  --toast-info-bg: #1a73e8;
-
-  --progress-bar-bg: transparent; /* Make container background transparent */
-  --progress-bar-border: var(--border-secondary); /* Border color for the container */
-  --progress-bar-fill-idle: transparent; /* Idle state */
-  --progress-bar-fill-inprogress: var(--button-primary-bg); /* Use primary button blue for progress */
-  --progress-bar-fill-success: #1e8e3e; /* Google Green for success */
-  --progress-bar-fill-error: var(--toast-error-bg); /* Existing error color */
-
-  --popup-border-color: var(--border-secondary); /* Light grey border */
+  --border-color: #dadce0;
+  --accent-color: #1a73e8;
+  --button-text: #ffffff;
 }
 
-/* Base Styles */
+body.dark-mode {
+  --bg-primary: #202124;
+  --bg-secondary: #2d2e31;
+  --bg-hover: #3c4043;
+  --text-primary: #e8eaed;
+  --text-secondary: #9aa0a6;
+  --border-color: #5f6368;
+  --accent-color: #8ab4f8;
+  --button-text: #202124;
+}
+
 body {
-  font-family: Arial, sans-serif;
-  width: 280px; /* Set a fixed, smaller width */
-  padding: 15px;
+  width: 250px; /* Narrower width for a simple action popup */
   margin: 0;
-  color: var(--text-primary);
+  padding: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   background-color: var(--bg-primary);
-  overflow-x: hidden;
-  box-sizing: border-box;
-  border: 1px solid var(--popup-border-color);
-  display: flex;
-  flex-direction: column;
+  color: var(--text-primary);
 }
 
-
-/* --- Input and Button Centering Container --- */
-#create-packet-container {
+/* Header */
+.header {
   display: flex;
-  flex-direction: column;
+  justify-content: space-between;
   align-items: center;
-  width: 100%;
+  padding: 10px 15px;
+  border-bottom: 1px solid var(--border-color);
+  background-color: var(--bg-secondary);
 }
 
-/* Input field */
-#topic-input {
-  width: 100%; 
-  box-sizing: border-box;
-  margin-top: 10px;
-  margin-bottom: 10px;
-  padding: 8px;
-  border: 1px solid var(--border-primary);
-  border-radius: 4px;
-  background-color: var(--bg-primary);
+.header .logo {
+  font-weight: 600;
+  font-size: 16px;
+}
+
+.header-controls button {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 16px;
+  color: var(--text-secondary);
+  padding: 4px;
+}
+
+.header-controls button:hover {
   color: var(--text-primary);
 }
 
-#topic-input:focus {
-    border-color: var(--border-focus);
-    outline: none;
-}
-#topic-input::placeholder {
-    color: var(--text-placeholder);
+/* Create Section */
+.create-packet-container {
+  padding: 20px 15px;
+  text-align: center;
 }
 
-/* Create Packet Button */
 #create-btn {
   width: 100%;
-  box-sizing: border-box;
-  padding: 10px;
-  background-color: var(--button-primary-bg);
-  color: var(--text-on-primary-button);
+  padding: 12px;
+  background-color: var(--accent-color);
+  color: #fff;
   border: none;
   border-radius: 4px;
   cursor: pointer;
-  transition: background-color 0.2s;
-  white-space: nowrap;
-  margin: 0;
-  margin-bottom: 10px; /* Add margin to separate from progress bar */
-}
-#create-btn:hover:not(:disabled) {
-  background-color: var(--button-primary-hover-bg);
-}
-#create-btn:disabled {
-  opacity: var(--button-primary-disabled-opacity);
-  cursor: not-allowed;
+  font-weight: 500;
+  font-size: 14px;
 }
 
-/* --- Progress Bar Styles --- */
-#creation-progress-container {
-  width: 100%;
-  height: 8px;
-  background-color: var(--progress-bar-bg);
-  border: 1px solid var(--progress-bar-border);
-  border-radius: 4px;
-  overflow: hidden;
-  box-sizing: border-box;
-  position: relative;
+#create-btn:hover {
+  opacity: 0.9;
 }
 
-#creation-progress-bar {
-  position: absolute;
-  left: 0;
-  top: 0;
-  height: 100%;
-  width: 0%;
-  background-color: var(--progress-bar-fill-inprogress);
-  border-radius: 3px;
-  transition: width 0.4s ease-in-out, background-color 0.3s ease;
-}
-
-#creation-progress-bar.success { background-color: var(--progress-bar-fill-success); }
-#creation-progress-bar.error { background-color: var(--progress-bar-fill-error); }
-#creation-progress-bar.inprogress { background-color: var(--progress-bar-fill-inprogress); }
-#creation-progress-bar.idle { background-color: var(--progress-bar-fill-idle); width: 0%; }
-
-.hidden {
-  display: none !important;
-}
-
-/* Toast Notifications */
-.toast {
-  position: fixed;
-  bottom: 20px;
-  left: 50%;
-  transform: translateX(-50%);
-  background-color: var(--toast-bg);
-  color: var(--toast-text);
-  padding: 10px 20px;
-  border-radius: 4px;
-  z-index: 1000;
-  animation: slideUp 0.3s, fadeOut 0.5s 2.5s forwards;
-  max-width: 80%;
-  text-align: center;
-  box-shadow: 0 3px 5px rgba(0,0,0,0.2);
-}
-.toast-success { background-color: var(--toast-success-bg); }
-.toast-error { background-color: var(--toast-error-bg); }
-.toast-info { background-color: var(--toast-info-bg); }
-
-@keyframes slideUp {
-  from { transform: translate(-50%, 20px); opacity: 0; }
-  to { transform: translate(-50%, 0); opacity: 1; }
-}
-@keyframes fadeOut {
-  from { opacity: 1; }
-  to { opacity: 0; }
-}
-
-
-/* --- DARK MODE OVERRIDES --- */
-@media (prefers-color-scheme: dark) {
-  body:not(.light-mode) {
-    --bg-primary: #202124; --bg-secondary: #2d2e31; --bg-tertiary: #3c3d40; --bg-accent: #28313b; --bg-overlay: rgba(0, 0, 0, 0.7);
-    --text-primary: #e8eaed; --text-secondary: #bdc1c6; --text-accent: #8ab4f8; --text-on-primary-button: #202124; --text-placeholder: #9aa0a6; --text-italic: #bdc1c6; --text-on-secondary-button: #e8eaed;
-    --border-primary: #5f6368; --border-secondary: #3c4043; --border-focus: #8ab4f8;
-    --button-primary-bg: #8ab4f8; --button-primary-hover-bg: #aecbfa; --button-secondary-bg: #3c4043; --button-secondary-hover-bg: #5f6368;
-    --spinner-bg: #5f6368; --spinner-accent: #8ab4f8;
-    --toast-bg: #e8eaed; --toast-text: #202124; --toast-success-bg: #81c995; --toast-error-bg: #f28b82; --toast-info-bg: #8ab4f8;
-    --progress-bar-bg: transparent; --progress-bar-border: var(--border-primary); --progress-bar-fill-success: #81c995; --progress-bar-fill-error: #f28b82; --progress-bar-fill-inprogress: var(--button-primary-bg); --progress-bar-fill-idle: transparent;
-    --popup-border-color: var(--border-primary);
-  }
-}
-body.dark-mode {
-  --bg-primary: #202124; --bg-secondary: #2d2e31; --bg-tertiary: #3c3d40; --bg-accent: #28313b; --bg-overlay: rgba(0, 0, 0, 0.7);
-  --text-primary: #e8eaed; --text-secondary: #bdc1c6; --text-accent: #8ab4f8; --text-on-primary-button: #202124; --text-placeholder: #9aa0a6; --text-italic: #bdc1c6; --text-on-secondary-button: #e8eaed;
-  --border-primary: #5f6368; --border-secondary: #3c4043; --border-focus: #8ab4f8;
-  --button-primary-bg: #8ab4f8; --button-primary-hover-bg: #aecbfa; --button-secondary-bg: #3c4043; --button-secondary-hover-bg: #5f6368;
-  --spinner-bg: #5f6368; --spinner-accent: #8ab4f8;
-  --toast-bg: #e8eaed; --toast-text: #202124; --toast-success-bg: #81c995; --toast-error-bg: #f28b82; --toast-info-bg: #8ab4f8;
-  --progress-bar-bg: transparent; --progress-bar-border: var(--border-primary); --progress-bar-fill-success: #81c995; --progress-bar-fill-error: #f28b82; --progress-bar-fill-inprogress: var(--button-primary-bg); --progress-bar-fill-idle: transparent;
-  --popup-border-color: var(--border-primary);
-}
-
-/* --- Onboarding Section --- */
-.onboarding-container {
+/* Footer */
+.footer {
+  padding: 10px 15px;
+  border-top: 1px solid var(--border-color);
   display: flex;
-  flex-direction: column;
-  align-items: center;
-  text-align: center;
-  padding: 10px;
-  margin-top: 15px;
+  justify-content: center; /* Center the single button */
+  background-color: var(--bg-secondary);
 }
 
-.onboarding-container p {
+.button-secondary {
+  background-color: transparent;
+  border: 1px solid var(--border-color);
   color: var(--text-secondary);
-  margin-bottom: 15px;
-  font-size: 0.95em;
-  line-height: 1.4;
-}
-
-#open-sidebar-btn-popup.button-secondary {
-  width: 100%;
-  box-sizing: border-box;
-  padding: 10px;
-  background-color: var(--button-secondary-bg);
-  color: var(--text-on-secondary-button);
-  border: 1px solid var(--border-primary);
+  padding: 8px 16px;
   border-radius: 4px;
   cursor: pointer;
-  transition: background-color 0.2s, border-color 0.2s;
-  white-space: nowrap;
-  margin: 0;
+  font-size: 12px;
+  width: 100%;
 }
 
-#open-sidebar-btn-popup.button-secondary:hover:not(:disabled) {
-  background-color: var(--button-secondary-hover-bg);
-  border-color: var(--border-secondary);
+.button-secondary:hover {
+  background-color: var(--bg-hover);
+  color: var(--text-primary);
 }
 
-#open-sidebar-btn-popup.button-secondary:disabled {
-  opacity: var(--button-primary-disabled-opacity);
-  cursor: not-allowed;
+/* Status & Spinner */
+.status-message {
+  padding: 0 15px 10px;
+  font-size: 12px;
+  text-align: center;
+  color: var(--text-secondary);
 }
 
-body.dark-mode #open-sidebar-btn-popup.button-secondary {
-    background-color: var(--button-secondary-bg);
-    color: var(--text-on-secondary-button);
-    border-color: var(--border-primary);
+.spinner {
+  border: 3px solid var(--bg-hover);
+  border-top: 3px solid var(--accent-color);
+  border-radius: 50%;
+  width: 20px;
+  height: 20px;
+  animation: spin 1s linear infinite;
+  margin: 0 auto 15px;
 }
-body.dark-mode #open-sidebar-btn-popup.button-secondary:hover:not(:disabled) {
-    background-color: var(--button-secondary-hover-bg);
-    border-color: var(--border-secondary);
+
+.hidden { display: none; }
+
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
 }
