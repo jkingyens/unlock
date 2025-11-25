@@ -1,9 +1,6 @@
 // ext/utils.js
 // Shared utility functions for the Unlock extension
-// REVISED: This file establishes the core components for the new context management system.
-// The PacketContext is now more explicit, tracking both the canonical packet URL and the
-// current browser URL. The isUrlInPacket function is the sole authority for determining
-// if a browser URL corresponds to a defined packet item, correctly handling pre-signed URLs.
+// REVISED: Implemented in-memory "Hot Cache" for PacketContext to resolve race conditions.
 
 // --- Centralized Configuration ---
 const CONFIG = {
@@ -727,12 +724,9 @@ async markUrlAsVisited(instance, url) {
             return { success: true, notTrackable: true, instance: instance };
         }
         
-        // --- START OF FIX ---
         // Prioritize LRL as the canonical identifier for visit tracking if it exists.
-        // This creates a single, consistent ID for each item, fixing the root cause
-        // of the toggling bug where the system was confused between URL and LRL.
+        // This creates a single, consistent ID for each item.
         const canonicalIdentifier = foundItem.lrl || foundItem.url;
-        // --- END OF FIX ---
 
         if ((instance.visitedUrls || []).includes(canonicalIdentifier)) {
             return { success: true, alreadyVisited: true, instance: instance };
@@ -767,12 +761,30 @@ async markUrlAsVisited(instance, url) {
     }
 };
 
+// --- Hot Cache for Packet Context ---
+// This cache prevents race conditions where the UI might flicker or navigation logic
+// might fail because `storage.local.get` returns stale data during rapid redirects.
+const packetContextCache = new Map();
+
 function getPacketContextKey(tabId) { return `${CONFIG.STORAGE_KEYS.PACKET_CONTEXT_PREFIX}${tabId}`; }
+
 async function getPacketContext(tabId) {
+    // 1. Try Cache
+    if (packetContextCache.has(tabId)) {
+        return packetContextCache.get(tabId);
+    }
+
+    // 2. Fallback to Storage (and hydrate cache)
     const key = getPacketContextKey(tabId);
     const data = await storage.getLocal(key);
-    return data[key] || null;
+    const context = data[key] || null;
+
+    if (context) {
+        packetContextCache.set(tabId, context);
+    }
+    return context;
 }
+
 async function setPacketContext(tabId, instanceId, canonicalPacketUrl, currentBrowserUrl) {
     const context = {
         instanceId,
@@ -780,11 +792,22 @@ async function setPacketContext(tabId, instanceId, canonicalPacketUrl, currentBr
         currentBrowserUrl
     };
     logger.log('Utils:setPacketContext', `Setting context for tabId: ${tabId}`, context);
+
+    // 1. Update Cache Immediately
+    packetContextCache.set(tabId, context);
+
+    // 2. Write to Storage
     await storage.setLocal({ [getPacketContextKey(tabId)]: context });
     return true;
 }
+
 async function clearPacketContext(tabId) {
     logger.log('Utils:clearPacketContext', `Clearing context for tabId: ${tabId}`);
+
+    // 1. Clear Cache Immediately
+    packetContextCache.delete(tabId);
+
+    // 2. Clear Storage
     await storage.removeLocal(getPacketContextKey(tabId));
 }
 

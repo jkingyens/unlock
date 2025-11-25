@@ -1,8 +1,6 @@
 // ext/sidebar-modules/detail-view.js
 // Manages the packet detail view, including rendering content cards and progress.
-// REVISED: The card click handler now immediately adds an 'opening' class to prevent
-// rapid clicks from creating duplicate tabs, fixing a critical race condition.
-// DEBUG: Added extensive logging to track visited status rendering.
+// REVISED: Disable interactive input cards when the packet is completed.
 
 import { domRefs } from './dom-references.js';
 import { logger, storage, packetUtils, indexedDbStorage, sanitizeForFileName } from '../utils.js';
@@ -311,18 +309,6 @@ export function updateSingleCardToCached(lrl) {
 
 // --- Main Rendering Function ---
 export async function displayPacketContent(instance, browserState, canonicalPacketUrl) {
-    // ========================================================================
-    // --- START DEBUG LOGGING ---
-    const callId = `render_${Date.now()}`;
-    console.log(`[DEBUG] ----------------------------------------------------`);
-    console.log(`[DEBUG] Firing displayPacketContent (Call ID: ${callId})`);
-    console.log(`[DEBUG] > Instance ID: ${instance?.instanceId}`);
-    console.log(`[DEBUG] > Visited URLs received:`, JSON.stringify(instance?.visitedUrls || []));
-    console.log(`[DEBUG] > Active Canonical URL: ${canonicalPacketUrl}`);
-    console.log(`[DEBUG] ----------------------------------------------------`);
-    // --- END DEBUG LOGGING ---
-    // ========================================================================
-
     const uniqueCallId = Date.now();
     if (isDisplayingPacketContent) {
         queuedDisplayRequest = { instance, browserState, canonicalPacketUrl };
@@ -346,7 +332,7 @@ export async function displayPacketContent(instance, browserState, canonicalPack
         const { progressPercentage, visitedCount, totalCount } = packetUtils.calculateInstanceProgress(instance);
 
         if (isAlreadyRendered) {
-            await updateCardVisibility(instance, browserState, callId); // Pass callId for logging
+            await updateCardVisibility(instance, browserState);
             updateActiveCardHighlight(canonicalPacketUrl);
             
             const progressBar = domRefs.detailProgressContainer?.querySelector('.progress-bar');
@@ -430,17 +416,12 @@ export async function displayPacketContent(instance, browserState, canonicalPack
     }
 }
 
-export async function updateCardVisibility(instance, browserState, callId) { // Receive callId for logging
+export async function updateCardVisibility(instance, browserState) {
     if (!domRefs.detailCardsContainer || !instance) return;
-
-    // ========================================================================
-    // --- START DEBUG LOGGING ---
-    console.log(`[DEBUG] Firing updateCardVisibility (Render Call ID: ${callId})`);
-    const visitedUrlsSetForLogging = new Set(instance.visitedUrls || []);
-    console.log(`[DEBUG] > Visited URLs Set used for update:`, JSON.stringify(Array.from(visitedUrlsSetForLogging)));
-    // --- END DEBUG LOGGING ---
-    // ========================================================================
     
+    // --- NEW: Check Packet Completion ---
+    const isCompleted = await packetUtils.isPacketInstanceCompleted(instance);
+
     let openTabUrls = new Set();
     if (browserState?.tabGroupId && chrome?.tabs) {
         try {
@@ -458,16 +439,14 @@ export async function updateCardVisibility(instance, browserState, callId) { // 
         const cardLrl = card.dataset.lrl;
         const isVisited = (cardUrl && visitedUrlsSet.has(cardUrl)) || (cardLrl && visitedUrlsSet.has(cardLrl));
         
-        // ========================================================================
-        // --- START DEBUG LOGGING ---
-        console.log(`[DEBUG] >> Checking card: ${card.querySelector('.card-title')?.textContent.trim()}`);
-        console.log(`[DEBUG]    - URL: ${cardUrl}`);
-        console.log(`[DEBUG]    - LRL: ${cardLrl}`);
-        console.log(`[DEBUG]    - Is Marked Visited: ${isVisited}`);
-        // --- END DEBUG LOGGING ---
-        // ========================================================================
-
         card.classList.toggle('visited', isVisited);
+        
+        // --- NEW: Store completion status on card for handlers ---
+        if (isCompleted) {
+            card.dataset.completed = 'true';
+        } else {
+            delete card.dataset.completed;
+        }
 
         const momentIndices = card.dataset.momentIndices ? JSON.parse(card.dataset.momentIndices) : [];
         if (momentIndices.length > 0) {
@@ -480,12 +459,26 @@ export async function updateCardVisibility(instance, browserState, callId) { // 
             card.classList.toggle('hidden-by-rule', !isRevealed);
 
             if (card.dataset.format === 'interactive-input') {
-                if (isRevealed) {
+                if (isCompleted) {
+                    // --- NEW: Visually disable card when completed ---
+                    card.classList.remove('drop-zone-active', 'clickable', 'listening-for-input');
+                    card.style.opacity = '0.6';
+                    const cardUrlEl = card.querySelector('.card-url');
+                    if(cardUrlEl) cardUrlEl.textContent = "Input disabled (Packet Completed)";
+                } else if (isRevealed) {
                     card.style.opacity = '1.0';
                     card.classList.add('drop-zone-active', 'clickable'); 
+                    
+                    // Restore text instructions if re-enabled (e.g. via debug reset)
+                    const contentItem = instance.contents.find(item => item.lrl === cardLrl);
+                    if (contentItem && contentItem.output) {
+                        const toolType = contentItem.output.contentType.startsWith('image') ? 'image' : 'text';
+                        const cardUrlEl = card.querySelector('.card-url');
+                        if(cardUrlEl) cardUrlEl.textContent = `Click to activate, then select ${toolType} on the page.`;
+                    }
+
                     if (wasHidden) {
-                        const lrl = card.dataset.lrl;
-                        const contentItem = instance.contents.find(item => item.lrl === lrl);
+                        const contentItem = instance.contents.find(item => item.lrl === cardLrl);
                         if (contentItem) {
                             attachInteractiveCardHandlers(card, contentItem, instance);
                         }
@@ -495,6 +488,12 @@ export async function updateCardVisibility(instance, browserState, callId) { // 
                     card.classList.remove('drop-zone-active', 'listening-for-input');
                 }
             }
+        } else if (card.dataset.format === 'interactive-input' && isCompleted) {
+             // Handle non-moment interactive cards
+             card.classList.remove('drop-zone-active', 'clickable', 'listening-for-input');
+             card.style.opacity = '0.6';
+             const cardUrlEl = card.querySelector('.card-url');
+             if(cardUrlEl) cardUrlEl.textContent = "Input disabled (Packet Completed)";
         }
     });
 }
@@ -863,6 +862,12 @@ function attachInteractiveCardHandlers(card, contentItem, instance) {
     const pasteButton = card.querySelector('.paste-from-clipboard-btn');
 
     const saveData = async (capturedData) => {
+        // --- NEW: Check completion before saving ---
+        if (card.dataset.completed === 'true') {
+            logger.warn('DetailView', 'Blocked input save because packet is completed.');
+            return;
+        }
+
         card.classList.remove('listening-for-input', 'drag-over');
         card.classList.add('visited');
         
@@ -883,6 +888,9 @@ function attachInteractiveCardHandlers(card, contentItem, instance) {
     if (pasteButton) {
         pasteButton.addEventListener('click', async (event) => {
             event.stopPropagation();
+            // --- NEW: Check completion ---
+            if (card.dataset.completed === 'true') return;
+
             try {
                 const clipboardItems = await navigator.clipboard.read();
                 let found = false;
@@ -919,6 +927,9 @@ function attachInteractiveCardHandlers(card, contentItem, instance) {
     }
 
     card.addEventListener('click', () => {
+        // --- NEW: Check completion ---
+        if (card.dataset.completed === 'true') return;
+
         const isActive = card.classList.contains('listening-for-input');
         
         document.querySelectorAll('.card.listening-for-input').forEach(otherCard => {
@@ -944,6 +955,20 @@ function attachInteractiveCardHandlers(card, contentItem, instance) {
     card.addEventListener('dragleave', () => { card.classList.remove('drag-over'); });
     card.addEventListener('drop', async (e) => {
         e.preventDefault();
+        // --- NEW: Check completion ---
+        if (card.dataset.completed === 'true') return;
+
+        // Check for file drops first (e.g. images dragged from desktop)
+        if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+            const file = e.dataTransfer.files[0];
+            if (file.type.startsWith('image/')) {
+                 const reader = new FileReader();
+                 reader.onloadend = () => saveData(reader.result); // Saves as DataURL
+                 reader.readAsDataURL(file);
+                 return;
+            }
+        }
+        // Fallback to checking for text/uri-list (e.g. images dragged from web pages)
         const droppedData = e.dataTransfer.getData('text/uri-list') || e.dataTransfer.getData('text/plain');
         if (droppedData) {
             saveData(droppedData);

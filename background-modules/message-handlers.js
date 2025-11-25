@@ -1,9 +1,5 @@
 // ext/background-modules/message-handlers.js
-// REVISED: The handlePlaybackActionRequest function now gracefully handles
-// 'toggle' and 'pause' intents when no media is active, preventing errors.
-// REVISED: The handleOpenContent function now delegates to the PacketRuntime to prevent race conditions.
-// FIX: Added a new 'prepare_in_packet_navigation' handler to establish a grace
-// period for navigations initiated from within preview pages.
+// REVISED: Added missing handlers for expand_tab_group_for_instance and collapse_tab_group_for_instance.
 
 import {
     logger,
@@ -25,7 +21,7 @@ import * as sidebarHandler from './sidebar-handler.js';
 import cloudStorage from '../cloud-storage.js';
 import llmService from '../llm_service.js';
 import * as ruleManager from './rule-manager.js';
-import PacketRuntime from './packet-runtime.js'; // Import the new runtime API
+import PacketRuntime from './packet-runtime.js';
 
 import {
     instantiatePacket,
@@ -49,7 +45,8 @@ import {
     notifyUIsOfStateChange,
     saveCurrentTime,
     setupOffscreenDocument,
-    stopAndClearActiveAudio
+    stopAndClearActiveAudio,
+    notifyOffscreenSidebarState
 } from '../background.js';
 import { checkAndPromptForCompletion, startVisitTimer } from './navigation-handler.js';
 
@@ -61,12 +58,9 @@ async function handleOpenContent(data, sender, sendResponse) {
         return sendResponse({ success: false, error: 'Missing instance data or target URL' });
     }
     try {
-        // --- START OF FIX ---
-        // Render the URL with any stored variables before passing it to the runtime.
         const urlToOpen = packetUtils.renderPacketUrl(clickedUrl, instance.variables);
         const runtime = new PacketRuntime(instance);
         const result = await runtime.openOrFocusContent(urlToOpen);
-        // --- END OF FIX ---
         sendResponse(result);
     } catch (error) {
         logger.error('MessageHandler:handleOpenContent', 'Error creating runtime or opening content', error);
@@ -275,10 +269,13 @@ async function handlePlaybackActionRequest(data, sender, sendResponse) {
                 const cacheResult = await ensureMediaIsCached(instanceId, url, lrl);
                 const audioB64 = arrayBufferToBase64(cacheResult.content);
                 const startTime = mediaItem.currentTime || 0;
-                await controlAudioInOffscreen('play', { audioB64, mimeType: mediaItem.mimeType, url: url, instanceId, startTime });
+                
+                const playResult = await controlAudioInOffscreen('play', { audioB64, mimeType: mediaItem.mimeType, url: url, instanceId, startTime });
+                
                 const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
                 await setMediaPlaybackState({
-                    isPlaying: true, url, lrl, instanceId, title: instance.title, tabId: activeTab?.id,
+                    isPlaying: playResult.isPlaying,
+                    url, lrl, instanceId, title: instance.title, tabId: activeTab?.id,
                     currentTime: startTime, duration: mediaItem.duration || 0, instance: instance, lastTrippedMoment: null,
                 });
                 break;
@@ -286,12 +283,12 @@ async function handlePlaybackActionRequest(data, sender, sendResponse) {
                 if (!activeMediaPlayback.url || !activeMediaPlayback.instance) {
                     return sendResponse({ success: true, message: "No active media." });
                 }
-                await controlAudioInOffscreen(intent, {});
-                const isNowPlaying = intent === 'toggle' ? !activeMediaPlayback.isPlaying : false;
-                if (!isNowPlaying) {
-                    await saveCurrentTime(activeMediaPlayback.instanceId, activeMediaPlayback.url, activeMediaPlayback.currentTime);
+                
+                const toggleResult = await controlAudioInOffscreen(intent, {});
+                if (!toggleResult.isPlaying) {
+                    await saveCurrentTime(activeMediaPlayback.instanceId, activeMediaPlayback.url, toggleResult.currentTime);
                 }
-                await setMediaPlaybackState({ isPlaying: isNowPlaying });
+                await setMediaPlaybackState({ isPlaying: toggleResult.isPlaying });
                 break;
             case 'stop':
                 if (activeMediaPlayback.url) await resetActiveMediaPlayback();
@@ -654,11 +651,13 @@ const actionHandlers = {
     },
     'sidebar_opened': async (data, sender, sendResponse) => {
         await storage.setSession({ isSidebarOpen: true });
+        notifyOffscreenSidebarState(true); // NEW: Notify offscreen
         await notifyUIsOfStateChange({ isSidebarOpen: true });
         sendResponse({ success: true });
     },
     'sidebar_closed': async (data, sender, sendResponse) => {
         await storage.setSession({ isSidebarOpen: false });
+        notifyOffscreenSidebarState(false); // NEW: Notify offscreen
         await notifyUIsOfStateChange({ isSidebarOpen: false, animate: true });
         sendResponse({ success: true });
     },
@@ -898,6 +897,9 @@ const actionHandlers = {
     'request_rule_refresh': async (d, s, r) => { await ruleManager.refreshAllRules(); r({ success: true }); },
     'propose_settings_update_from_packet': (data, s, r) => handleProposeSettingsUpdate(data, s, r),
     'apply_proposed_settings': (data, s, r) => handleApplyProposedSettings(data, s, r),
+    // --- NEW HANDLERS ---
+    'expand_tab_group_for_instance': (data, s, r) => tabGroupHandler.setGroupCollapsedState(data.instanceId, false).then(r),
+    'collapse_tab_group_for_instance': (data, s, r) => tabGroupHandler.setGroupCollapsedState(data.instanceId, true).then(r),
 };
 
 export function handleMessage(message, sender, sendResponse) {
