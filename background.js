@@ -1,5 +1,10 @@
 // ext/background.js - Main service worker entry point (Global Side Panel Mode)
-// REVISED: ensure offscreen document gets initial sidebar state to prevent UI lag.
+// This file is now refactored to delegate lifecycle and state management
+// to the new PacketRuntime API. Its role is simplified to initialization,
+// event listening, and dispatching tasks to the appropriate runtime instance.
+// REVISED: Fixed sticky media logic. Sidebar now correctly switches to the
+// packet associated with the focused tab, only falling back to the playing
+// packet if the current tab has no context.
 
 import {
     logger,
@@ -85,8 +90,6 @@ export async function setupOffscreenDocument() {
         await creatingOffscreenDocument;
         creatingOffscreenDocument = null;
         
-        // --- FIX: Immediately sync sidebar state to offscreen ---
-        // This prevents the 1-second lag/throttle when audio first starts
         const session = await storage.getSession({ isSidebarOpen: false });
         if (session.isSidebarOpen) {
             notifyOffscreenSidebarState(true);
@@ -163,8 +166,6 @@ export async function saveCurrentTime(instanceId, url, providedCurrentTime, isSt
 // --- State Synchronization ---
 
 export async function notifyUIsOfStateChange(options = {}) {
-    // Note: We no longer rely solely on storage session for sidebar open state in notifySidebar,
-    // but we still use it here for overlay visibility logic.
     const isSidebarOpen = (await storage.getSession({
         isSidebarOpen: false
     })).isSidebarOpen;
@@ -245,7 +246,6 @@ chrome.runtime.onMessage.addListener(msgHandler.handleMessage);
 chrome.runtime.onConnect.addListener((port) => {
     if (port.name === 'sidebar') {
         sidebarHandler.handleSidebarConnection(port);
-        // Also notify offscreen that sidebar is open
         notifyOffscreenSidebarState(true);
     }
 });
@@ -258,7 +258,8 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
     let instance = context ? await storage.getPacketInstance(context.instanceId) : null;
     let packetUrl = context ? context.canonicalPacketUrl : null;
 
-    if (activeMediaPlayback.instance && (!instance || instance.instanceId !== activeMediaPlayback.instanceId)) {
+    // --- FIX: Only fallback to active media if the CURRENT tab has no context ---
+    if (!instance && activeMediaPlayback.instance) {
         instance = activeMediaPlayback.instance;
         packetUrl = null;
     }
