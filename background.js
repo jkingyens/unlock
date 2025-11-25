@@ -1,5 +1,5 @@
 // ext/background.js - Main service worker entry point (Global Side Panel Mode)
-// REVISED: Added onConnect listener to support long-lived sidebar connections.
+// REVISED: ensure offscreen document gets initial sidebar state to prevent UI lag.
 
 import {
     logger,
@@ -72,6 +72,7 @@ async function hasOffscreenDocument() {
 
 export async function setupOffscreenDocument() {
     if (await hasOffscreenDocument()) return;
+    
     if (creatingOffscreenDocument) {
         await creatingOffscreenDocument;
     } else {
@@ -80,8 +81,16 @@ export async function setupOffscreenDocument() {
             reasons: ['AUDIO_PLAYBACK', 'DOM_PARSER'],
             justification: 'Play audio persistently and parse HTML content.',
         });
+        
         await creatingOffscreenDocument;
         creatingOffscreenDocument = null;
+        
+        // --- FIX: Immediately sync sidebar state to offscreen ---
+        // This prevents the 1-second lag/throttle when audio first starts
+        const session = await storage.getSession({ isSidebarOpen: false });
+        if (session.isSidebarOpen) {
+            notifyOffscreenSidebarState(true);
+        }
     }
 }
 
@@ -232,10 +241,12 @@ chrome.runtime.onInstalled.addListener(initializeExtension);
 chrome.runtime.onStartup.addListener(initializeExtension);
 chrome.runtime.onMessage.addListener(msgHandler.handleMessage);
 
-// --- NEW: Connection Listener for Sidebar ---
+// --- Connection Listener for Sidebar ---
 chrome.runtime.onConnect.addListener((port) => {
     if (port.name === 'sidebar') {
         sidebarHandler.handleSidebarConnection(port);
+        // Also notify offscreen that sidebar is open
+        notifyOffscreenSidebarState(true);
     }
 });
 

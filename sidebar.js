@@ -1,5 +1,5 @@
 // ext/sidebar.js (Global Side Panel - Orchestrator)
-// REVISED: Replaced chrome.runtime.onMessage with persistent port connection logic.
+// REVISED: Optimized playback updates to prevent UI flickering by caching state.
 
 import { logger, storage, packetUtils, applyThemeMode, CONFIG } from './utils.js';
 import { domRefs, cacheDomReferences } from './sidebar-modules/dom-references.js';
@@ -13,13 +13,16 @@ import * as settingsView from './sidebar-modules/settings-view.js';
 let currentView = 'root';
 let currentInstanceId = null;
 let currentInstanceData = null;
-let currentPacketUrl = null; // The canonical packet URL from the packet definition
+let currentPacketUrl = null; 
 let isNavigating = false;
 let nextNavigationRequest = null;
 const PENDING_VIEW_KEY = 'pendingSidebarView';
 let isOpeningPacketItem = false;
-let activeMediaInstanceId = null; // NEW: Tracks the ID of the packet with active media
-let backgroundPort = null; // NEW: Persistent port
+let activeMediaInstanceId = null;
+let backgroundPort = null; 
+
+// --- NEW: State Cache for Optimization ---
+let lastMomentsTrippedJson = '';
 
 function resetSidebarState() {
     currentView = 'root';
@@ -29,7 +32,7 @@ function resetSidebarState() {
     isNavigating = false;
     nextNavigationRequest = null;
     isOpeningPacketItem = false;
-    // Note: activeMediaInstanceId is NOT reset here intentionally
+    lastMomentsTrippedJson = ''; // Reset cache
     logger.log('Sidebar', 'Internal state has been reset.');
 }
 
@@ -82,14 +85,13 @@ async function initialize() {
 }
 
 function setupGlobalListeners() {
-    // Replaced single message listener with port connection
     connectToBackground();
 
     domRefs.backBtn?.addEventListener('click', () => {
         if (currentView === 'create') {
             createView.handleDiscardDraftPacket();
         } else {
-            resetSidebarState(); // Explicitly reset state before navigating
+            resetSidebarState(); 
             navigateTo('root');
         }
     });
@@ -104,7 +106,6 @@ function setupGlobalListeners() {
     });
 }
 
-// --- NEW: Persistent Connection Logic ---
 function connectToBackground() {
     try {
         backgroundPort = chrome.runtime.connect({ name: 'sidebar' });
@@ -112,7 +113,6 @@ function connectToBackground() {
         backgroundPort.onDisconnect.addListener(() => {
             logger.log('Sidebar', 'Disconnected from background. Attempting reconnect in 1s...');
             backgroundPort = null;
-            // Simple retry strategy. If background process died, it might restart soon.
             setTimeout(connectToBackground, 1000);
         });
     } catch (e) {
@@ -120,11 +120,7 @@ function connectToBackground() {
     }
 }
 
-
-// --- Navigation & View Management ---
-
 export async function navigateTo(viewName, instanceId = null, data = null) {
-    // If we are navigating away from a detail view, tell the background to collapse the group.
     if (currentView === 'packet-detail' && currentInstanceId && (viewName !== 'packet-detail' || currentInstanceId !== instanceId)) {
         sendMessageToBackground({
             action: 'collapse_tab_group_for_instance',
@@ -157,7 +153,7 @@ export async function navigateTo(viewName, instanceId = null, data = null) {
 
     try {
         switch(viewName) {
-case 'packet-detail':
+            case 'packet-detail':
                 const instanceData = await storage.getPacketInstance(instanceId);
                 if (!instanceData) throw new Error(`Packet instance ${instanceId} not found.`);
 
@@ -194,7 +190,7 @@ case 'packet-detail':
                 await settingsView.prepareSettingsView();
                 break;
             default: // root
-                currentView = 'root'; // State is already reset, just update the view name
+                currentView = 'root'; 
                 domRefs.rootView.classList.remove('hidden');
                 await rootView.displayRootNavigation();
                 break;
@@ -203,7 +199,7 @@ case 'packet-detail':
     } catch (error) {
         logger.error('Sidebar:navigateTo', `Error navigating to ${viewName}:`, error);
         showRootViewStatus(`Error loading view: ${error.message}`, 'error');
-        navigateTo('root'); // Fallback to root
+        navigateTo('root');
     } finally {
         isNavigating = false;
         if (nextNavigationRequest) {
@@ -213,8 +209,6 @@ case 'packet-detail':
         }
     }
 }
-
-// --- State & Context Updates ---
 
 async function updateSidebarContext(contextData) {
     if (currentView === 'create' || isNavigating) return;
@@ -273,13 +267,9 @@ async function openUrl(url, instanceId) {
     });
 }
 
-// --- Communication ---
-
 export function sendMessageToBackground(message) {
     return new Promise((resolve, reject) => {
         if (!chrome?.runtime?.sendMessage) return reject(new Error('Chrome runtime unavailable.'));
-        // Outbound messages from sidebar to background still use standard sendMessage
-        // as they are typically user-initiated requests.
         chrome.runtime.sendMessage(message, response => {
             const err = chrome.runtime.lastError;
             if (err) {
@@ -336,8 +326,17 @@ async function handleBackgroundMessage(message) {
 
             if (currentView === 'packet-detail' && currentInstanceId === data.instanceId) {
                 currentInstanceData = data.instance;
+                
+                // 1. Always update waveform/UI progress
                 detailView.updatePlaybackUI(data, currentInstanceData);
-                detailView.updateCardVisibility(currentInstanceData);
+                
+                // 2. FIX: Only update card visibility (heavy DOM op) if moments tripped actually changed
+                const newMomentsJson = JSON.stringify(currentInstanceData.momentsTripped || []);
+                if (newMomentsJson !== lastMomentsTrippedJson) {
+                    lastMomentsTrippedJson = newMomentsJson;
+                    detailView.updateCardVisibility(currentInstanceData);
+                }
+
                 if (data.lastTrippedMoment?.url) {
                     const cardToAnimate = domRefs.packetDetailView.querySelector(`.card[data-url="${data.lastTrippedMoment.url}"]`);
                     if (cardToAnimate && !cardToAnimate.classList.contains('link-mentioned')) {
@@ -403,11 +402,8 @@ async function handleBackgroundMessage(message) {
             break;
         case 'packet_deletion_complete':
             showRootViewStatus(data.message || 'Deletion complete.', data.errors?.length > 0 ? 'error' : 'success');
-            // FIX: Force a full re-render of the list to ensure it matches storage
-            if (currentView === 'root') {
-                 await rootView.displayRootNavigation();
-            }
-            break;        
+            if (currentView === 'root') await rootView.displayRootNavigation();
+            break;
         case 'prompt_close_tab_group':
             dialogHandler.showCloseGroupDialog(data);
             break;
@@ -504,4 +500,4 @@ async function showConfetti(title) {
 
 
 // --- Entry Point ---
-document.addEventListener('DOMContentLoaded', initialize);  
+document.addEventListener('DOMContentLoaded', initialize);
