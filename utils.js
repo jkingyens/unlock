@@ -1,9 +1,6 @@
 // ext/utils.js
 // Shared utility functions for the Unlock extension
-// REVISED: Implemented in-memory "Hot Cache" for PacketContext to resolve race conditions.
-// REVISED: Upgraded IndexedDB to Version 2. Implemented Content-Addressable Storage (CAS)
-// for binary blobs to prevent storage bloat and enable deduplication.
-// REVISED: Updated sanitizeForFileName to prevent key collisions.
+// REVISED: Includes "Hot Cache" for context, CAS for IndexedDB, and updated Gemini 2.5 Pro model.
 
 // --- Centralized Configuration ---
 const CONFIG = {
@@ -32,11 +29,12 @@ const CONFIG = {
         apiEndpoint: 'https://api.openai.com/v1/chat/completions'
       },
       {
-        id: 'default_gemini_1_5_pro',
-        name: 'Google Gemini 1.5 Pro (Default)',
+        // CHANGED: Updated to Gemini 2.5 Pro to fix API 404 errors
+        id: 'default_gemini_2_5_pro',
+        name: 'Google Gemini 2.5 Pro (Default)',
         providerType: 'gemini',
         apiKey: '',
-        modelName: 'gemini-pro',
+        modelName: 'gemini-2.5-pro',
         apiEndpoint: 'https://generativelanguage.googleapis.com/v1beta/models/'
       },
       {
@@ -348,14 +346,13 @@ const indexedDbStorage = {
             blobStore.clear();
 
             await new Promise((resolve, reject) => {
-                request.onerror = () => reject(request.error); // Fix: request is undefined here, should rely on tx events
                 tx.oncomplete = () => resolve();
                 tx.onerror = () => reject(tx.error);
             });
             logger.log('IndexedDB', 'All cached content has been cleared.');
             return true;
         } catch (error) {
-            // logger.error...
+            logger.error('IndexedDB', 'Error clearing cached content', { error });
             return false;
         }
     },
@@ -473,17 +470,21 @@ const indexedDbStorage = {
         if (!CONFIG.DEBUG) return;
         try {
             const db = await getDb();
-            // Dump keys from main store
             const tx = db.transaction(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT, 'readonly');
             const store = tx.objectStore(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT);
+            const request = store.getAllKeys();
+
             const keys = await new Promise((resolve, reject) => {
-                const req = store.getAllKeys();
-                req.onsuccess = () => resolve(req.result);
-                req.onerror = () => reject(req.error);
+                request.onerror = (event) => reject(event.target.error);
+                request.onsuccess = (event) => resolve(event.target.result);
             });
 
             console.log("--- IndexedDB Content Keys ---");
-            console.log(keys);
+            if (keys && keys.length > 0) {
+                console.log(keys);
+            } else {
+                console.log("Database is empty.");
+            }
             console.log("------------------------------");
 
         } catch (error) {
@@ -829,6 +830,7 @@ async markUrlAsVisited(instance, url) {
         }
         
         // Prioritize LRL as the canonical identifier for visit tracking if it exists.
+        // This creates a single, consistent ID for each item.
         const canonicalIdentifier = foundItem.lrl || foundItem.url;
 
         if ((instance.visitedUrls || []).includes(canonicalIdentifier)) {
