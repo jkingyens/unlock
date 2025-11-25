@@ -4,6 +4,8 @@
 // event listening, and dispatching tasks to the appropriate runtime instance.
 // FIX: Added a chrome.tabGroups.onUpdated listener to robustly enforce the
 // canonical tab order when tabs are manually reordered.
+// FIX: Added chrome.sidePanel.setPanelBehavior to ensure sidebar opens on icon click.
+// FIX: Added chrome.tabGroups.onRemoved to handle manual group deletion by user.
 
 import {
     logger,
@@ -19,15 +21,27 @@ import {
 } from './utils.js';
 import * as msgHandler from './background-modules/message-handlers.js';
 import * as ruleManager from './background-modules/rule-manager.js';
-import { onCommitted, onHistoryStateUpdated, onBeforeNavigate, startVisitTimer } from './background-modules/navigation-handler.js';
+import {
+    onCommitted,
+    onHistoryStateUpdated,
+    onBeforeNavigate,
+    startVisitTimer
+} from './background-modules/navigation-handler.js';
 import * as tabGroupHandler from './background-modules/tab-group-handler.js';
 import * as sidebarHandler from './background-modules/sidebar-handler.js';
 import PacketRuntime from './background-modules/packet-runtime.js';
 
 // --- Global State ---
 export let activeMediaPlayback = {
-    instanceId: null, url: null, lrl: null, isPlaying: false, title: '',
-    currentTime: 0, duration: 0, instance: null, lastTrippedMoment: null,
+    instanceId: null,
+    url: null,
+    lrl: null,
+    isPlaying: false,
+    title: '',
+    currentTime: 0,
+    duration: 0,
+    instance: null,
+    lastTrippedMoment: null,
 };
 let creatingOffscreenDocument;
 const reorderDebounceTimers = new Map();
@@ -36,7 +50,9 @@ const reorderDebounceTimers = new Map();
 
 async function hasOffscreenDocument() {
     if (chrome.runtime && typeof chrome.runtime.getContexts === 'function') {
-        const contexts = await chrome.runtime.getContexts({ contextTypes: ['OFFSCREEN_DOCUMENT'] });
+        const contexts = await chrome.runtime.getContexts({
+            contextTypes: ['OFFSCREEN_DOCUMENT']
+        });
         return contexts.length > 0;
     }
     return false;
@@ -60,15 +76,27 @@ export async function setupOffscreenDocument() {
 export async function controlAudioInOffscreen(command, data) {
     await setupOffscreenDocument();
     return await chrome.runtime.sendMessage({
-        target: 'offscreen', type: 'control-audio', data: { command, data }
+        target: 'offscreen',
+        type: 'control-audio',
+        data: {
+            command,
+            data
+        }
     });
 }
 
 export async function stopAndClearActiveAudio() {
     await controlAudioInOffscreen('stop', {});
     activeMediaPlayback = {
-        instanceId: null, url: null, lrl: null, isPlaying: false, title: '',
-        currentTime: 0, duration: 0, instance: null, lastTrippedMoment: null,
+        instanceId: null,
+        url: null,
+        lrl: null,
+        isPlaying: false,
+        title: '',
+        currentTime: 0,
+        duration: 0,
+        instance: null,
+        lastTrippedMoment: null,
     };
     await storage.removeSession(CONFIG.STORAGE_KEYS.ACTIVE_MEDIA_KEY);
 }
@@ -86,7 +114,9 @@ export async function saveCurrentTime(instanceId, url, providedCurrentTime, isSt
         if (!mediaItem) return;
         let timeToSave = providedCurrentTime;
         if (typeof timeToSave === 'undefined') {
-            const response = await controlAudioInOffscreen('get_current_time', { url });
+            const response = await controlAudioInOffscreen('get_current_time', {
+                url
+            });
             if (response.success) timeToSave = response.currentTime;
         }
         if (typeof timeToSave === 'number') {
@@ -102,13 +132,21 @@ export async function saveCurrentTime(instanceId, url, providedCurrentTime, isSt
 // --- State Synchronization ---
 
 export async function notifyUIsOfStateChange(options = {}) {
-    const isSidebarOpen = (await storage.getSession({ isSidebarOpen: false })).isSidebarOpen;
-    const fullStateForSidebar = { ...activeMediaPlayback, instance: activeMediaPlayback.instance, ...options };
-    
+    const isSidebarOpen = (await storage.getSession({
+        isSidebarOpen: false
+    })).isSidebarOpen;
+    const fullStateForSidebar = { ...activeMediaPlayback,
+        instance: activeMediaPlayback.instance,
+        ...options
+    };
+
     sidebarHandler.notifySidebar('playback_state_updated', fullStateForSidebar);
-    
+
     try {
-        const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        const [activeTab] = await chrome.tabs.query({
+            active: true,
+            currentWindow: true
+        });
         if (!activeTab || !activeTab.id) return;
 
         const lightweightStateForOverlay = {
@@ -128,11 +166,15 @@ export async function notifyUIsOfStateChange(options = {}) {
 }
 
 export async function setMediaPlaybackState(newState, options = {}) {
-    activeMediaPlayback = { ...activeMediaPlayback, ...newState };
+    activeMediaPlayback = { ...activeMediaPlayback,
+        ...newState
+    };
     if (activeMediaPlayback.instanceId && !activeMediaPlayback.instance) {
         activeMediaPlayback.instance = await storage.getPacketInstance(activeMediaPlayback.instanceId);
     }
-    await storage.setSession({ [CONFIG.STORAGE_KEYS.ACTIVE_MEDIA_KEY]: activeMediaPlayback });
+    await storage.setSession({
+        [CONFIG.STORAGE_KEYS.ACTIVE_MEDIA_KEY]: activeMediaPlayback
+    });
     await notifyUIsOfStateChange(options);
 }
 
@@ -140,17 +182,26 @@ export async function setMediaPlaybackState(newState, options = {}) {
 // --- Initialization and Event Listeners ---
 
 async function initializeExtension() {
+    // --- START OF FIX: Enable Side Panel on Action Click ---
+    if (chrome.sidePanel && typeof chrome.sidePanel.setPanelBehavior === 'function') {
+        await chrome.sidePanel.setPanelBehavior({
+                openPanelOnActionClick: true
+            })
+            .catch((error) => logger.warn('Background:init', 'Failed to set panel behavior', error));
+    }
+    // --- END OF FIX ---
+
     await storage.getSettings();
     await restoreMediaStateOnStartup();
     await ruleManager.refreshAllRules();
     await tabGroupHandler.cleanupDraftGroup();
-    
+
     const allInstances = await storage.getPacketInstances();
     for (const instanceId in allInstances) {
         const runtime = new PacketRuntime(allInstances[instanceId]);
         await runtime.start();
     }
-    
+
     await restoreContextOnStartup();
 }
 
@@ -165,7 +216,7 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
     const context = await getPacketContext(activeInfo.tabId);
     let instance = context ? await storage.getPacketInstance(context.instanceId) : null;
     let packetUrl = context ? context.canonicalPacketUrl : null;
-    
+
     if (activeMediaPlayback.instance && (!instance || instance.instanceId !== activeMediaPlayback.instanceId)) {
         instance = activeMediaPlayback.instance;
         packetUrl = null;
@@ -187,7 +238,9 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
         packetUrl: packetUrl
     });
 
-    await notifyUIsOfStateChange({ animate: false });
+    await notifyUIsOfStateChange({
+        animate: false
+    });
 });
 
 chrome.tabs.onRemoved.addListener((tabId, removeInfo) => {
@@ -213,11 +266,18 @@ chrome.tabs.onMoved.addListener(async (tabId, moveInfo) => {
 });
 
 // --- START OF FIX: Add robust listener for all group changes ---
-chrome.tabGroups.onUpdated.addListener(async (group) => {
-    if (group.title && group.title.startsWith(GROUP_TITLE_PREFIX)) {
-        await scheduleReorder(group.id);
-    }
-});
+if (chrome.tabGroups) {
+    chrome.tabGroups.onUpdated.addListener(async (group) => {
+        if (group.title && group.title.startsWith(GROUP_TITLE_PREFIX)) {
+            await scheduleReorder(group.id);
+        }
+    });
+
+    // --- NEW: Handle manual group removal ---
+    chrome.tabGroups.onRemoved.addListener((group) => {
+        tabGroupHandler.handleTabGroupRemoved(group.id);
+    });
+}
 // --- END OF FIX ---
 
 chrome.webNavigation.onBeforeNavigate.addListener(onBeforeNavigate);
@@ -273,13 +333,17 @@ async function restoreContextOnStartup() {
         for (const group of allGroups) {
             const instanceId = getInstanceIdFromGroupTitle(group.title);
             if (!instanceId) continue;
-            
+
             const instance = await storage.getPacketInstance(instanceId);
             if (!instance) continue;
 
-            const tabsInGroup = await chrome.tabs.query({ groupId: group.id });
+            const tabsInGroup = await chrome.tabs.query({
+                groupId: group.id
+            });
             for (const tab of tabsInGroup) {
-                const contentItem = packetUtils.isUrlInPacket(tab.url, instance, { returnItem: true });
+                const contentItem = packetUtils.isUrlInPacket(tab.url, instance, {
+                    returnItem: true
+                });
                 if (contentItem) {
                     await setPacketContext(tab.id, instance.instanceId, contentItem.url, tab.url);
                     await sidebarHandler.updateActionForTab(tab.id);
