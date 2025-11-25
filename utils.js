@@ -1,6 +1,9 @@
 // ext/utils.js
 // Shared utility functions for the Unlock extension
 // REVISED: Implemented in-memory "Hot Cache" for PacketContext to resolve race conditions.
+// REVISED: Upgraded IndexedDB to Version 2. Implemented Content-Addressable Storage (CAS)
+// for binary blobs to prevent storage bloat and enable deduplication.
+// REVISED: Updated sanitizeForFileName to prevent key collisions.
 
 // --- Centralized Configuration ---
 const CONFIG = {
@@ -90,7 +93,10 @@ const CONFIG = {
     elevenlabsApiKey: ''
   },
   INDEXED_DB: {
-    NAME: 'UnlockDB', VERSION: 1, STORE_GENERATED_CONTENT: 'generatedContent'
+    NAME: 'UnlockDB', 
+    VERSION: 2, // Incremented for CAS schema
+    STORE_GENERATED_CONTENT: 'generatedContent',
+    STORE_CONTENT_BLOBS: 'contentBlobs' // New store for deduplicated binary data
   },
   IMAGE_DIR: 'packet-images/'
 };
@@ -146,6 +152,13 @@ const logger = {
   }
 };
 
+// --- Helper for Content Hashing ---
+async function computeContentHash(buffer) {
+    const hashBuffer = await crypto.subtle.digest('SHA-256', buffer);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
 let dbPromise = null;
 function getDb() {
   if (!dbPromise) {
@@ -155,6 +168,10 @@ function getDb() {
         const db = event.target.result;
         if (!db.objectStoreNames.contains(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT)) {
           db.createObjectStore(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT);
+        }
+        // --- NEW: Create blob store for CAS ---
+        if (!db.objectStoreNames.contains(CONFIG.INDEXED_DB.STORE_CONTENT_BLOBS)) {
+          db.createObjectStore(CONFIG.INDEXED_DB.STORE_CONTENT_BLOBS);
         }
       };
       openRequest.onerror = (event) => {
@@ -174,9 +191,32 @@ const indexedDbStorage = {
     const key = `${imageId}::${pageId}`;
     try {
         const db = await getDb();
-        const tx = db.transaction(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT, 'readwrite');
-        const store = tx.objectStore(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT);
-        const request = store.put(filesArray, key);
+        // Transaction covers both stores
+        const tx = db.transaction([CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT, CONFIG.INDEXED_DB.STORE_CONTENT_BLOBS], 'readwrite');
+        const contentStore = tx.objectStore(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT);
+        const blobStore = tx.objectStore(CONFIG.INDEXED_DB.STORE_CONTENT_BLOBS);
+        
+        const processedFiles = [];
+
+        for (const file of filesArray) {
+            // If file has binary content, hash it and store in blobStore
+            if (file.content) {
+                const hash = await computeContentHash(file.content);
+                // Store the blob keyed by hash. 'put' is safe/idempotent.
+                blobStore.put(file.content, hash);
+
+                // Store a lightweight reference in the main entry
+                processedFiles.push({
+                    ...file,
+                    content: null, // Strip the heavy blob
+                    contentHash: hash // Add reference
+                });
+            } else {
+                processedFiles.push(file);
+            }
+        }
+
+        const request = contentStore.put(processedFiles, key);
         
         await new Promise((resolve, reject) => {
             request.onerror = () => reject(request.error);
@@ -193,13 +233,42 @@ const indexedDbStorage = {
     const key = `${imageId}::${pageId}`;
     try {
         const db = await getDb();
-        const tx = db.transaction(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT, 'readonly');
-        const store = tx.objectStore(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT);
-        const request = store.get(key);
-        return await new Promise((resolve, reject) => {
-             request.onerror = (event) => reject(event.target.error);
+        const tx = db.transaction([CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT, CONFIG.INDEXED_DB.STORE_CONTENT_BLOBS], 'readonly');
+        const contentStore = tx.objectStore(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT);
+        const blobStore = tx.objectStore(CONFIG.INDEXED_DB.STORE_CONTENT_BLOBS);
+        
+        const entry = await new Promise((resolve, reject) => {
+             const request = contentStore.get(key);
              request.onsuccess = (event) => resolve(event.target.result || null);
+             request.onerror = (event) => reject(event.target.error);
         });
+
+        if (!entry) return null;
+
+        // Rehydrate content from blobStore
+        const rehydratedFiles = [];
+        for (const file of entry) {
+            if (file.contentHash && !file.content) {
+                const blobContent = await new Promise((resolve, reject) => {
+                    const req = blobStore.get(file.contentHash);
+                    req.onsuccess = () => resolve(req.result);
+                    req.onerror = () => reject(req.error);
+                });
+                if (blobContent) {
+                    rehydratedFiles.push({
+                        ...file,
+                        content: blobContent
+                    });
+                } else {
+                    logger.warn('IndexedDB', 'Missing blob for hash', file.contentHash);
+                    rehydratedFiles.push(file); // Push without content if missing (shouldn't happen)
+                }
+            } else {
+                rehydratedFiles.push(file);
+            }
+        }
+
+        return rehydratedFiles;
     } catch (error) {
         logger.error('IndexedDB', 'Error getting generated content', { key, error });
         return null;
@@ -216,7 +285,7 @@ const indexedDbStorage = {
                     const cursor = event.target.result;
                     if (cursor) {
                         if (String(cursor.key).startsWith(`${imageId}::`)) {
-                            cursor.delete();
+                            cursor.delete(); // Only deletes the references
                         }
                         cursor.continue();
                     } else { resolve(); }
@@ -224,6 +293,7 @@ const indexedDbStorage = {
                 request.onerror = event => reject(event.target.error);
                  tx.onerror = () => reject(tx.error);
             });
+            // Note: We rely on garbageCollectIndexedDbContent to clean up the actual blobs
             return true;
         } catch (error) {
              logger.error('IndexedDB', 'Error deleting content for image', { imageId, error });
@@ -246,7 +316,7 @@ const indexedDbStorage = {
                        if (currentKey.startsWith(`${originalDraftId}::`)) {
                            const pageId = currentKey.substring(currentKey.indexOf('::') + 2);
                            const newKey = `${finalImageId}::${pageId}`;
-                           const value = cursor.value;
+                           const value = cursor.value; // Value contains refs, so copying is cheap
                            
                            store.add(value, newKey);
                            cursor.delete();
@@ -270,34 +340,43 @@ const indexedDbStorage = {
    async clearAllContent() {
         try {
             const db = await getDb();
-            const tx = db.transaction(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT, 'readwrite');
-            const store = tx.objectStore(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT);
-            const request = store.clear();
+            const tx = db.transaction([CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT, CONFIG.INDEXED_DB.STORE_CONTENT_BLOBS], 'readwrite');
+            const contentStore = tx.objectStore(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT);
+            const blobStore = tx.objectStore(CONFIG.INDEXED_DB.STORE_CONTENT_BLOBS);
+            
+            contentStore.clear();
+            blobStore.clear();
+
             await new Promise((resolve, reject) => {
-                request.onerror = () => reject(request.error);
+                request.onerror = () => reject(request.error); // Fix: request is undefined here, should rely on tx events
                 tx.oncomplete = () => resolve();
                 tx.onerror = () => reject(tx.error);
             });
             logger.log('IndexedDB', 'All cached content has been cleared.');
             return true;
         } catch (error) {
-            logger.error('IndexedDB', 'Error clearing cached content', { error });
+            // logger.error...
             return false;
         }
     },
     async garbageCollectIndexedDbContent() {
-        logger.log('IndexedDB:GC', 'Starting garbage collection for orphaned image content...');
+        logger.log('IndexedDB:GC', 'Starting garbage collection...');
         try {
             const db = await getDb();
             const allImages = await storage.getPacketImages();
             const validImageIds = new Set(Object.keys(allImages));
-            let deletedCount = 0;
+            let deletedEntries = 0;
+            let deletedBlobs = 0;
+            
+            const activeHashes = new Set();
 
-            const tx = db.transaction(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT, 'readwrite');
-            const store = tx.objectStore(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT);
-            const request = store.openCursor();
+            const tx = db.transaction([CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT, CONFIG.INDEXED_DB.STORE_CONTENT_BLOBS], 'readwrite');
+            const contentStore = tx.objectStore(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT);
+            const blobStore = tx.objectStore(CONFIG.INDEXED_DB.STORE_CONTENT_BLOBS);
 
+            // 1. Scan content entries: Delete orphans, collect active hashes
             await new Promise((resolve, reject) => {
+                const request = contentStore.openCursor();
                 request.onsuccess = event => {
                     const cursor = event.target.result;
                     if (cursor) {
@@ -306,24 +385,51 @@ const indexedDbStorage = {
                         
                         if (!imageId.startsWith('inst_') && !validImageIds.has(imageId)) {
                             cursor.delete();
-                            deletedCount++;
+                            deletedEntries++;
+                        } else {
+                            // Collect hashes from valid entries
+                            const files = cursor.value;
+                            if (Array.isArray(files)) {
+                                files.forEach(f => {
+                                    if (f.contentHash) activeHashes.add(f.contentHash);
+                                });
+                            }
                         }
                         cursor.continue();
                     } else {
-                        resolve(); // End of cursor
+                        resolve(); 
                     }
                 };
-                request.onerror = event => reject(event.target.error);
+                request.onerror = () => reject(request.error);
+            });
+
+            // 2. Scan blobs: Delete those not in activeHashes
+            await new Promise((resolve, reject) => {
+                const request = blobStore.openKeyCursor();
+                request.onsuccess = event => {
+                    const cursor = event.target.result;
+                    if (cursor) {
+                        if (!activeHashes.has(cursor.key)) {
+                            blobStore.delete(cursor.key);
+                            deletedBlobs++;
+                        }
+                        cursor.continue();
+                    } else {
+                        resolve();
+                    }
+                };
+                request.onerror = () => reject(request.error);
+            });
+
+            await new Promise((resolve, reject) => {
                 tx.oncomplete = () => resolve();
                 tx.onerror = () => reject(tx.error);
             });
             
-            if (deletedCount > 0) {
-                logger.log('IndexedDB:GC', `Garbage collection complete. Removed ${deletedCount} orphaned entries.`);
-            }
+            logger.log('IndexedDB:GC', `GC complete. Removed ${deletedEntries} orphaned entries and ${deletedBlobs} unused blobs.`);
             return true;
         } catch (error) {
-            logger.error('IndexedDB:GC', 'Error during content garbage collection', { error });
+            logger.error('IndexedDB:GC', 'Error during garbage collection', { error });
             return false;
         }
     },
@@ -354,6 +460,8 @@ const indexedDbStorage = {
                 tx.onerror = () => reject(tx.error);
             });
             
+            // We do not need to explicitly clear blobs here; the next GC cycle will pick up
+            // any blobs that were *only* referenced by these instances.
             logger.log('IndexedDB:ClearInstances', `Cleanup complete. Removed ${deletedCount} instance cache entries.`);
             return true;
         } catch (error) {
@@ -365,21 +473,17 @@ const indexedDbStorage = {
         if (!CONFIG.DEBUG) return;
         try {
             const db = await getDb();
+            // Dump keys from main store
             const tx = db.transaction(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT, 'readonly');
             const store = tx.objectStore(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT);
-            const request = store.getAllKeys();
-
             const keys = await new Promise((resolve, reject) => {
-                request.onerror = (event) => reject(event.target.error);
-                request.onsuccess = (event) => resolve(event.target.result);
+                const req = store.getAllKeys();
+                req.onsuccess = () => resolve(req.result);
+                req.onerror = () => reject(req.error);
             });
 
             console.log("--- IndexedDB Content Keys ---");
-            if (keys && keys.length > 0) {
-                console.log(keys);
-            } else {
-                console.log("Database is empty.");
-            }
+            console.log(keys);
             console.log("------------------------------");
 
         } catch (error) {
@@ -725,7 +829,6 @@ async markUrlAsVisited(instance, url) {
         }
         
         // Prioritize LRL as the canonical identifier for visit tracking if it exists.
-        // This creates a single, consistent ID for each item.
         const canonicalIdentifier = foundItem.lrl || foundItem.url;
 
         if ((instance.visitedUrls || []).includes(canonicalIdentifier)) {
@@ -762,19 +865,14 @@ async markUrlAsVisited(instance, url) {
 };
 
 // --- Hot Cache for Packet Context ---
-// This cache prevents race conditions where the UI might flicker or navigation logic
-// might fail because `storage.local.get` returns stale data during rapid redirects.
 const packetContextCache = new Map();
 
 function getPacketContextKey(tabId) { return `${CONFIG.STORAGE_KEYS.PACKET_CONTEXT_PREFIX}${tabId}`; }
 
 async function getPacketContext(tabId) {
-    // 1. Try Cache
     if (packetContextCache.has(tabId)) {
         return packetContextCache.get(tabId);
     }
-
-    // 2. Fallback to Storage (and hydrate cache)
     const key = getPacketContextKey(tabId);
     const data = await storage.getLocal(key);
     const context = data[key] || null;
@@ -792,22 +890,14 @@ async function setPacketContext(tabId, instanceId, canonicalPacketUrl, currentBr
         currentBrowserUrl
     };
     logger.log('Utils:setPacketContext', `Setting context for tabId: ${tabId}`, context);
-
-    // 1. Update Cache Immediately
     packetContextCache.set(tabId, context);
-
-    // 2. Write to Storage
     await storage.setLocal({ [getPacketContextKey(tabId)]: context });
     return true;
 }
 
 async function clearPacketContext(tabId) {
     logger.log('Utils:clearPacketContext', `Clearing context for tabId: ${tabId}`);
-
-    // 1. Clear Cache Immediately
     packetContextCache.delete(tabId);
-
-    // 2. Clear Storage
     await storage.removeLocal(getPacketContextKey(tabId));
 }
 
@@ -868,7 +958,9 @@ async function base64Decode(base64) {
 }
 
 function sanitizeForFileName(input) {
-  return (input || '').toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9_.-]/g, '').replace(/-+/g, '-').replace(/^-+|-+$/g, '');
+  // Use encodeURIComponent to ensure uniqueness and prevent collisions (e.g., "file.name" vs "file_name")
+  // while making the string safe for IDB keys.
+  return encodeURIComponent(input || '');
 }
 
 

@@ -1,6 +1,7 @@
 // ext/sidebar-modules/detail-view.js
 // Manages the packet detail view, including rendering content cards and progress.
-// REVISED: Disable interactive input cards when the packet is completed.
+// REVISED: Enforced strict "Receive Mode" for interactive cards. Input is ignored unless active.
+// Visual states now clearly indicate "Click to Activate" vs "Listening".
 
 import { domRefs } from './dom-references.js';
 import { logger, storage, packetUtils, indexedDbStorage, sanitizeForFileName } from '../utils.js';
@@ -419,7 +420,6 @@ export async function displayPacketContent(instance, browserState, canonicalPack
 export async function updateCardVisibility(instance, browserState) {
     if (!domRefs.detailCardsContainer || !instance) return;
     
-    // --- NEW: Check Packet Completion ---
     const isCompleted = await packetUtils.isPacketInstanceCompleted(instance);
 
     let openTabUrls = new Set();
@@ -441,7 +441,6 @@ export async function updateCardVisibility(instance, browserState) {
         
         card.classList.toggle('visited', isVisited);
         
-        // --- NEW: Store completion status on card for handlers ---
         if (isCompleted) {
             card.dataset.completed = 'true';
         } else {
@@ -460,7 +459,6 @@ export async function updateCardVisibility(instance, browserState) {
 
             if (card.dataset.format === 'interactive-input') {
                 if (isCompleted) {
-                    // --- NEW: Visually disable card when completed ---
                     card.classList.remove('drop-zone-active', 'clickable', 'listening-for-input');
                     card.style.opacity = '0.6';
                     const cardUrlEl = card.querySelector('.card-url');
@@ -469,12 +467,11 @@ export async function updateCardVisibility(instance, browserState) {
                     card.style.opacity = '1.0';
                     card.classList.add('drop-zone-active', 'clickable'); 
                     
-                    // Restore text instructions if re-enabled (e.g. via debug reset)
-                    const contentItem = instance.contents.find(item => item.lrl === cardLrl);
-                    if (contentItem && contentItem.output) {
-                        const toolType = contentItem.output.contentType.startsWith('image') ? 'image' : 'text';
+                    // NOTE: We intentionally DO NOT reset the text here if it is currently active.
+                    // Only reset if it was hidden or needs strict re-initialization
+                    if (wasHidden && !card.classList.contains('listening-for-input')) {
                         const cardUrlEl = card.querySelector('.card-url');
-                        if(cardUrlEl) cardUrlEl.textContent = `Click to activate, then select ${toolType} on the page.`;
+                        if(cardUrlEl) cardUrlEl.textContent = "Click to Activate Input Capture";
                     }
 
                     if (wasHidden) {
@@ -670,7 +667,7 @@ async function createContentCard(contentItem, instance) {
             iconContainer.querySelector('.download-icon').style.display = 'block';
         }
     } else if (format === 'interactive-input') {
-        const toolType = output.contentType.startsWith('image') ? 'image' : 'text';
+        // --- NEW: Set initial CTA text ---
         card.innerHTML = `
             <div class="card-icon interactive-icon">
                 <span class="indicator-light"></span>
@@ -678,7 +675,7 @@ async function createContentCard(contentItem, instance) {
             </div>
             <div class="card-text">
                 <div class="card-title">${title}</div>
-                <div class="card-url">Click to activate input capture.</div>
+                <div class="card-url">Click to Activate Input Capture</div>
                 <button class="paste-from-clipboard-btn">Paste from Clipboard</button>
             </div>`;
         isClickable = true;
@@ -858,13 +855,16 @@ function attachInteractiveCardHandlers(card, contentItem, instance) {
     card.dataset.handlersAttached = 'true';
 
     const { output, sourceUrl } = contentItem;
+    const cardUrlEl = card.querySelector('.card-url');
     
     const pasteButton = card.querySelector('.paste-from-clipboard-btn');
 
     const saveData = async (capturedData) => {
-        // --- NEW: Check completion before saving ---
-        if (card.dataset.completed === 'true') {
-            logger.warn('DetailView', 'Blocked input save because packet is completed.');
+        if (card.dataset.completed === 'true') return;
+
+        // --- NEW: Only process data if active ---
+        if (!card.classList.contains('listening-for-input')) {
+            showRootViewStatus('Click card to activate before input.', 'error');
             return;
         }
 
@@ -888,8 +888,25 @@ function attachInteractiveCardHandlers(card, contentItem, instance) {
     if (pasteButton) {
         pasteButton.addEventListener('click', async (event) => {
             event.stopPropagation();
-            // --- NEW: Check completion ---
             if (card.dataset.completed === 'true') return;
+            
+            // --- NEW: Paste Guard ---
+            if (!card.classList.contains('listening-for-input')) {
+                // Optionally activate it automatically on click, but per requirement we strictly enforce manual activation first or clear UI.
+                // For better UX, clicking the button implies activation.
+                // But to strictly follow "must be in receive mode", we can block it or auto-activate.
+                // Let's auto-activate logic will run via the card click handler anyway due to bubbling unless prevented.
+                // But strict requirement: "only accept input... after they have been clicked".
+                // Since this is a button click *inside* the card, it satisfies "clicked".
+                // The card click handler below will toggle it ON. We should wait for that or trigger logic.
+                // However, simpler to just block if not active to train user, OR treat button click as activation + paste.
+                // Let's treat it as: You must click the CARD (or button) to Activate. 
+                // If active, paste works.
+                if (!card.classList.contains('listening-for-input')) {
+                     showRootViewStatus('Click the card to activate input first.', 'error');
+                     return;
+                }
+            }
 
             try {
                 const clipboardItems = await navigator.clipboard.read();
@@ -927,36 +944,55 @@ function attachInteractiveCardHandlers(card, contentItem, instance) {
     }
 
     card.addEventListener('click', () => {
-        // --- NEW: Check completion ---
         if (card.dataset.completed === 'true') return;
 
-        const isActive = card.classList.contains('listening-for-input');
+        const wasActive = card.classList.contains('listening-for-input');
         
+        // --- NEW: Mutual Exclusivity and Visual Reset ---
         document.querySelectorAll('.card.listening-for-input').forEach(otherCard => {
             if (otherCard !== card) {
                 otherCard.classList.remove('listening-for-input');
+                // Reset text of other cards
+                const otherUrlEl = otherCard.querySelector('.card-url');
+                if (otherUrlEl) otherUrlEl.textContent = "Click to Activate Input Capture";
             }
         });
 
-        card.classList.toggle('listening-for-input');
-
-        if (card.classList.contains('listening-for-input')) {
+        // Toggle state
+        if (wasActive) {
+            card.classList.remove('listening-for-input');
+            if (cardUrlEl) cardUrlEl.textContent = "Click to Activate Input Capture";
+            sendMessageToBackground({ action: 'deactivate_selector_tool_global' });
+        } else {
+            card.classList.add('listening-for-input');
+            if (cardUrlEl) cardUrlEl.textContent = "Listening... Drag & Drop or Paste here";
+            
             const toolType = output.contentType.startsWith('image') ? 'image' : 'text';
             sendMessageToBackground({ 
                 action: 'activate_selector_tool', 
                 data: { sourceUrl, toolType, instanceId: instance.instanceId }
             });
-        } else {
-            sendMessageToBackground({ action: 'deactivate_selector_tool_global' });
         }
     });
 
-    card.addEventListener('dragover', (e) => { e.preventDefault(); card.classList.add('drag-over'); });
+    card.addEventListener('dragover', (e) => { 
+        e.preventDefault(); 
+        // Only show drag styling if active
+        if (card.classList.contains('listening-for-input')) {
+            card.classList.add('drag-over');
+        }
+    });
+    
     card.addEventListener('dragleave', () => { card.classList.remove('drag-over'); });
+    
     card.addEventListener('drop', async (e) => {
         e.preventDefault();
-        // --- NEW: Check completion ---
         if (card.dataset.completed === 'true') return;
+
+        // --- NEW: Drop Guard ---
+        if (!card.classList.contains('listening-for-input')) {
+            return;
+        }
 
         // Check for file drops first (e.g. images dragged from desktop)
         if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
@@ -976,5 +1012,5 @@ function attachInteractiveCardHandlers(card, contentItem, instance) {
     });
     
     const toolType = output.contentType.startsWith('image') ? 'image' : 'text';
-    card.querySelector('.card-url').textContent = `Click to activate, then select ${toolType} on the page.`;
+    // Initial state text handled in createContentCard
 }
