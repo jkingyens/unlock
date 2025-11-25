@@ -403,8 +403,11 @@ async function handleBackgroundMessage(message) {
             break;
         case 'packet_deletion_complete':
             showRootViewStatus(data.message || 'Deletion complete.', data.errors?.length > 0 ? 'error' : 'success');
-            if (currentView === 'root') await rootView.displayRootNavigation();
-            break;
+            // FIX: Force a full re-render of the list to ensure it matches storage
+            if (currentView === 'root') {
+                 await rootView.displayRootNavigation();
+            }
+            break;        
         case 'prompt_close_tab_group':
             dialogHandler.showCloseGroupDialog(data);
             break;
@@ -501,4 +504,4 @@ async function showConfetti(title) {
 
 
 // --- Entry Point ---
-document.addEventListener('DOMContentLoaded', initialize);
+document.addEventListener('DOMContentLoaded', initialize);  

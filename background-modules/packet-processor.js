@@ -2,6 +2,7 @@
 // Manages the data lifecycle of packet instances. This module is now refactored
 // to delegate all browser-state management (rules, tabs) to the new
 // PacketRuntime API, focusing solely on data creation, cloud interaction, and deletion from storage.
+// REVISED: Updated to use sidebarHandler.notifySidebar for reliable progress updates via Port.
 
 import {
     logger,
@@ -12,16 +13,13 @@ import {
     sanitizeForFileName,
 } from '../utils.js';
 import cloudStorage from '../cloud-storage.js';
-import PacketRuntime from './packet-runtime.js'; // Import the new runtime API
+import PacketRuntime from './packet-runtime.js'; 
+import * as sidebarHandler from './sidebar-handler.js'; // NEW: Import sidebar handler
 
 // --- Helper to send progress notifications ---
 function sendProgressNotification(action, data) {
-    chrome.runtime.sendMessage({ action: action, data: data })
-      .catch(err => {
-           if (err && err.message && !err.message.includes("Receiving end does not exist") && !err.message.includes("Could not establish connection")) {
-               logger.warn('PacketProcessor:sendProgress', `Could not send ${action} message`, err);
-           }
-      });
+    // FIX: Use the persistent port connection instead of generic broadcast
+    sidebarHandler.notifySidebar(action, data);
 }
 
 function sendInstantiationProgress(instanceId, progress, text, title) {
@@ -80,12 +78,9 @@ export async function instantiatePacket(imageId, preGeneratedInstanceId, initiat
         
         for (const item of packetInstanceContents) {
             if (item.origin === 'internal') {
-                // --- START OF FIX ---
-                // Interactive inputs are placeholders for user data; they have no content to upload.
                 if (item.format === 'interactive-input') {
                     continue;
                 }
-                // --- END OF FIX ---
 
                 const lrl = item.lrl;
                 if (!lrl) continue;
@@ -256,6 +251,7 @@ export async function importImageFromUrl(url) {
         }
 
         await storage.savePacketImage(importedPacketImage);
+        // This is the critical notification that closes the dialog
         sendProgressNotification('packet_image_created', { image: importedPacketImage });
         return { success: true, imageId: newImageId };
 

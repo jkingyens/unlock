@@ -1,6 +1,7 @@
 // ext/sidebar-modules/root-view.js
 // Manages the root view of the sidebar, including the "Library", "Started",
 // and "Completed" packet lists and their associated actions.
+// REVISED: Implemented optimistic UI updates for packet INSTANCE deletion to prevent UI freeze.
 
 import { domRefs } from './dom-references.js';
 import { logger, storage, packetUtils, isTabGroupsAvailable, shouldUseTabGroups } from '../utils.js';
@@ -11,7 +12,7 @@ let activeListTab = 'library';
 let currentContextMenuCloseHandler = null;
 let currentActionImageId = null; // To hold the ID for the dialog
 let inProgressImageStencils = new Map(); // For image creation
-let inProgressInstanceStencils = new Map(); // **FIX**: Single source of truth for instance stencils
+let inProgressInstanceStencils = new Map();
 
 // Functions to be imported from the new, lean sidebar.js
 let navigateTo;
@@ -99,7 +100,7 @@ async function handleCreateButtonClick() {
         }
     } catch (error) {
         logger.error("RootView", "Error in create button logic", error);
-        if (error) { // Only show error if it's not a simple dialog cancellation
+        if (error) { 
             showRootViewStatus(`Error: ${error.message}`, 'error');
         }
     }
@@ -359,8 +360,18 @@ async function handleDeletePacketImage(imageId) {
     );
 
     if (confirmed) {
-        await sendMessageToBackground({ action: 'delete_packet_image', data: { imageId } });
-        showRootViewStatus(`Packet "${title}" deleted.`, 'success');
+        // --- OPTIMISTIC UPDATE: Remove immediately from UI ---
+        removeImageRow(imageId);
+
+        const response = await sendMessageToBackground({ action: 'delete_packet_image', data: { imageId } });
+        
+        if (response && response.success) {
+            showRootViewStatus(`Packet "${title}" deleted.`, 'success');
+        } else {
+            // If deletion fails, revert the optimistic update by reloading the list
+            showRootViewStatus(`Error deleting packet: ${response?.error || 'Unknown error'}`, 'error');
+            displayRootNavigation();
+        }
     }
 }
 
@@ -398,20 +409,16 @@ async function handleDeleteSelectedInstances(instanceIdsFromContextMenu = null) 
     const selectedIds = instanceIdsFromContextMenu || getSelectedInstanceIds();
     if (selectedIds.length === 0) return;
 
-    console.log('[DEBUG] handleDeleteSelectedInstances called with IDs:', selectedIds);
-
     let completedPacketToAnalyze = null;
     for (const id of selectedIds) {
         const instance = await storage.getPacketInstance(id);
         if (instance && (await packetUtils.isPacketInstanceCompleted(instance)) && instance.packetOutputs && instance.packetOutputs.length > 0) {
             completedPacketToAnalyze = instance;
-            console.log(`[DEBUG] Found completed packet with outputs to analyze: ${id}`);
             break;
         }
     }
 
     if (completedPacketToAnalyze) {
-        console.log('[DEBUG] Triggering settings proposal flow.');
         try {
             const response = await sendMessageToBackground({
                 action: 'propose_settings_update_from_packet',
@@ -419,11 +426,9 @@ async function handleDeleteSelectedInstances(instanceIdsFromContextMenu = null) 
             });
 
             if (response && response.success && response.proposedChanges) {
-                console.log('[DEBUG] LLM proposed changes, showing confirmation dialog.');
                 const userConfirmed = await showConfirmSettingsDialog({
                     proposedChanges: response.proposedChanges
                 });
-                console.log(`[DEBUG] User confirmation result: ${userConfirmed}`);
 
                 if (userConfirmed) {
                     await sendMessageToBackground({
@@ -432,28 +437,40 @@ async function handleDeleteSelectedInstances(instanceIdsFromContextMenu = null) 
                     });
                     showRootViewStatus('Settings updated!', 'success');
                 }
-            } else {
-                 console.log('[DEBUG] LLM proposed no changes or call failed.');
             }
         } catch (error) {
             logger.error('RootView', 'Error during settings proposal flow', error);
         }
-    } else {
-        console.log('[DEBUG] No completed packets with outputs found among selected IDs.');
     }
 
     const confirmed = await showConfirmDialog(`Delete ${selectedIds.length} packet(s)? This cannot be undone.`, 'Delete', 'Cancel', true);
     if (!confirmed) {
-        console.log('[DEBUG] User cancelled deletion.');
         return;
     }
 
-    console.log('[DEBUG] User confirmed deletion, sending request to background.');
+    // --- OPTIMISTIC UPDATE: Remove immediately from UI ---
+    // 1. Show "Deleting..." status immediately
     showRootViewStatus(`Deleting ${selectedIds.length}...`, 'info', false);
+
+    // 2. Remove the rows immediately
+    selectedIds.forEach(id => removeInstanceRow(id));
+
+    // 3. Ensure the "Delete" button disappears immediately since selection is gone
+    updateActionButtonsVisibility();
+
     try {
-        await sendMessageToBackground({ action: 'delete_packets', data: { packetIds: selectedIds } });
+        // 4. Send message to background
+        const response = await sendMessageToBackground({ action: 'delete_packets', data: { packetIds: selectedIds } });
+        
+        if (response && !response.success) {
+             throw new Error(response.error || 'Unknown error');
+        }
+        // Success message is handled by the 'packet_deletion_complete' listener in sidebar.js
+        
     } catch (error) {
+        // 5. Revert on failure: Reload list to show items again
         showRootViewStatus(`Delete Error: ${error.message}`, 'error');
+        displayRootNavigation();
     }
 }
 
