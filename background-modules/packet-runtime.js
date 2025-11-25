@@ -1,9 +1,7 @@
 // ext/background-modules/packet-runtime.js
-// FINAL FIX: The reconcileTab method has been corrected to intelligently update
-// the canonicalPacketUrl even during a grace period. This ensures that navigations
-// originating from within a packet (like a summary page) that lead to another
-// packet item correctly transition the context, allowing the duplicate-squashing
-// logic to function as intended.
+// REVISED: Removed auto-adoption logic. This runtime now strictly manages
+// tabs that already have a valid packet context. It will no longer capture
+// unrelated tabs simply because their URL matches a packet item.
 
 import {
     logger,
@@ -41,33 +39,21 @@ class PacketRuntime {
     }
 
    async reconcileTab(tabId, url, details) {
-        // --- START DEBUG LOGGING ---
-        console.log(`[DEBUG_LOG 1/3] reconcileTab START for url: ${url}`, {
-            tabId: tabId,
-            transitionType: details.transitionType,
-            transitionQualifiers: details.transitionQualifiers
-        });
-        // --- END DEBUG LOGGING ---
-
         logger.log(this.logPrefix, `Reconciling navigation for tab ${tabId} to url: ${url}`);
-        let currentContext = await getPacketContext(tabId);
-        const newItemInPacket = packetUtils.isUrlInPacket(url, this.instance, { returnItem: true });
-
-        if (!currentContext || currentContext.instanceId !== this.instance.instanceId) {
-            const isUserInitiated = ['link', 'typed', 'form_submit', 'reload'].includes(details.transitionType);
-            if (newItemInPacket && isUserInitiated) {
-                logger.log(this.logPrefix, `Adopting tab ${tabId} into packet.`);
-                await setPacketContext(tabId, this.instance.instanceId, newItemInPacket.url, url);
-                currentContext = await getPacketContext(tabId);
-            } else {
-                // --- START DEBUG LOGGING ---
-                console.log(`[DEBUG_LOG 2/3] reconcileTab DECISION: No current context and not a user-initiated navigation into the packet. Bailing out.`);
-                // --- END DEBUG LOGGING ---
-                return;
-            }
-        }
         
-        // --- START OF FIX: Revert to setTimeout ---
+        const currentContext = await getPacketContext(tabId);
+
+        // --- STRICT CONTEXT CHECK ---
+        // If the tab is not already associated with this packet instance, ignore it.
+        // We do not auto-adopt tabs based on URL matches. Context must be established
+        // explicitly (e.g., via sidebar opening or trusted intent).
+        if (!currentContext || currentContext.instanceId !== this.instance.instanceId) {
+            return;
+        }
+
+        // Check if the new URL is a defined item in this packet
+        const newItemInPacket = packetUtils.isUrlInPacket(url, this.instance, { returnItem: true });
+        
         const gracePeriodKey = `grace_period_${tabId}`;
         const graceData = await storage.getSession(gracePeriodKey);
         const gracePeriodStart = graceData ? graceData[gracePeriodKey] : null;
@@ -81,76 +67,59 @@ class PacketRuntime {
                 await storage.removeSession(gracePeriodKey);
             }
         }
-        // --- END OF FIX ---
         
         const isRedirect = details.transitionQualifiers?.includes('server_redirect') || details.transitionQualifiers?.includes('client_redirect');
 
-        // --- START DEBUG LOGGING ---
-        console.log(`[DEBUG_LOG 2/3] reconcileTab STATE`, {
-            currentContext: currentContext,
-            newItemInPacket: newItemInPacket ? newItemInPacket.url : null,
-            inGracePeriod: inGracePeriod,
-            isRedirect: isRedirect,
-        });
-        // --- END DEBUG LOGGING ---
-
         if (newItemInPacket) {
+            // Case 1: User navigated to another valid item within the packet.
+            // Update the canonical URL in the context.
             if (newItemInPacket.url !== currentContext.canonicalPacketUrl) {
+                // Optional: Check for duplicates in other tabs and squash them if necessary
                 const allTabs = await chrome.tabs.query({});
                 for (const tab of allTabs) {
                     if (tab.id !== tabId) {
                         const otherContext = await getPacketContext(tab.id);
                         if (otherContext?.instanceId === this.instance.instanceId && otherContext?.canonicalPacketUrl === newItemInPacket.url) {
-                            logger.log(this.logPrefix, `Found duplicate tab ${tab.id} for "${newItemInPacket.title}". Squashing it.`);
                             try { await chrome.tabs.remove(tab.id); } catch (e) {}
                             break; 
                         }
                     }
                 }
             }
-            // --- START DEBUG LOGGING ---
-            console.log(`[DEBUG_LOG 3/3] reconcileTab DECISION: Stamping context because newItemInPacket is TRUE.`);
-            // --- END DEBUG LOGGING ---
             await setPacketContext(tabId, this.instance.instanceId, newItemInPacket.url, url);
             if (inGracePeriod) { await storage.removeSession(gracePeriodKey); } 
 
         } else if (isRedirect) {
-            logger.log(this.logPrefix, `Redirect detected for tab ${tabId}. Preserving context and updating browser URL.`);
-            if (currentContext) {
-                // --- START DEBUG LOGGING ---
-                console.log(`[DEBUG_LOG 3/3] reconcileTab DECISION: Preserving context because isRedirect is TRUE.`);
-                // --- END DEBUG LOGGING ---
-                await setPacketContext(tabId, currentContext.instanceId, currentContext.canonicalPacketUrl, url);
-            }
+            // Case 2: The page redirected (e.g., SSO login, shortlink). 
+            // Keep the context alive but update the browser URL tracking.
+            logger.log(this.logPrefix, `Redirect detected for tab ${tabId}. Preserving context.`);
+            await setPacketContext(tabId, currentContext.instanceId, currentContext.canonicalPacketUrl, url);
+
         } else if (!inGracePeriod) {
+            // Case 3: The user navigated to a URL that is NOT in the packet, and it wasn't a redirect.
+            // They have "left" the packet experience. Clear the context.
             logger.log(this.logPrefix, `Tab ${tabId} navigated outside the packet. Clearing context.`);
-            // --- START DEBUG LOGGING ---
-            console.log(`[DEBUG_LOG 3/3] reconcileTab DECISION: Clearing context because newItemInPacket is FALSE and not in grace period.`);
-            // --- END DEBUG LOGGING ---
             await clearPacketContext(tabId);
             if (await shouldUseTabGroups()) {
                 await tabGroupHandler.ejectTabFromGroup(tabId, this.instance.instanceId);
             }
-        } else {
-             // --- START DEBUG LOGGING ---
-             console.log(`[DEBUG_LOG 3/3] reconcileTab DECISION: No action taken. In grace period but not a redirect or a new packet item.`);
-             // --- END DEBUG LOGGING ---
         }
 
+        // If we still have a valid context after the checks above, ensure state is consistent
         const finalContext = await getPacketContext(tabId);
         if (finalContext) {
-            // --- START OF FIX ---
-            // Always set a new grace period after successfully confirming a tab is in a packet.
-            const gracePeriodKey = `grace_period_${tabId}`;
+            // Refresh grace period for subsequent fast navigations (like immediate redirects)
             await storage.setSession({ [gracePeriodKey]: Date.now() });
             setTimeout(() => storage.removeSession(gracePeriodKey), 1500);
-            // --- END OF FIX ---
 
             await this._updateBrowserState(tabId, url);
+            
             const itemForVisitTimer = this.orderedContent.find(i => i.url === finalContext.canonicalPacketUrl);
             if (itemForVisitTimer && !itemForVisitTimer.interactionBasedCompletion) {
                 startVisitTimer(tabId, this.instance.instanceId, itemForVisitTimer.url, this.logPrefix);
             }
+            
+            // Handle "Moments" (triggers based on visiting specific pages)
             if (itemForVisitTimer) {
                 let momentTripped = false;
                 (this.instance.moments || []).forEach((moment, index) => {
@@ -174,9 +143,13 @@ class PacketRuntime {
     }
     
     async openOrFocusContent(targetUrl) {
+        // Ensure grouping is active since the user explicitly requested this content
+        await tabGroupHandler.reactivateGroup(this.instance.instanceId);
+
         if (openingContent.has(targetUrl)) { return { success: true, message: 'Open already in progress.' }; }
         openingContent.add(targetUrl);
         try {
+            // 1. Try to find an existing tab with this context
             const allTabs = await chrome.tabs.query({});
             for (const tab of allTabs) {
                 const context = await getPacketContext(tab.id);
@@ -186,12 +159,16 @@ class PacketRuntime {
                     return { success: true, message: 'Focused existing tab.' };
                 }
             }
+
+            // 2. If not found, prepare to open a new one
             const contentItem = this.orderedContent.find(item => item.url === targetUrl);
             if (!contentItem) throw new Error(`Content item not found for URL: ${targetUrl}`);
+            
             let finalUrlToOpen;
             if (contentItem.format === 'pdf' && contentItem.origin === 'internal' && contentItem.lrl) {
                 const cachedContent = await indexedDbStorage.getGeneratedContent(this.instance.instanceId, sanitizeForFileName(contentItem.lrl));
                 if (!cachedContent || !cachedContent[0]?.content) throw new Error(`PDF content for ${contentItem.lrl} is not cached.`);
+                
                 const contentB64 = arrayBufferToBase64(cachedContent[0].content);
                 await setupOffscreenDocument();
                 const offscreenResponse = await chrome.runtime.sendMessage({
@@ -205,12 +182,17 @@ class PacketRuntime {
             } else {
                 finalUrlToOpen = targetUrl;
             }
+
+            // 3. Create the tab and set the "Trusted Intent"
+            // This is the crucial step that allows the new tab to acquire context
+            // even though we disabled auto-adoption in reconcileTab.
             const newTab = await chrome.tabs.create({ url: finalUrlToOpen, active: true });
             const trustedIntent = {
                 instanceId: this.instance.instanceId,
                 canonicalPacketUrl: targetUrl
             };
             await storage.setSession({ [`trusted_intent_${newTab.id}`]: trustedIntent });
+            
             return { success: true, tabId: newTab.id };
         } catch (error) {
             return { success: false, error: error.message };
