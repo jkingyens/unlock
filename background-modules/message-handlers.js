@@ -1,6 +1,5 @@
 // ext/background-modules/message-handlers.js
-// REVISED: Replaced chrome.runtime.sendMessage with sidebarHandler.notifySidebar
-// to ensure events reach the Sidebar over the persistent port connection.
+// DEBUG VERSION: Tracing Mark as Visited
 
 import {
     logger,
@@ -18,7 +17,7 @@ import {
     sanitizeForFileName
 } from '../utils.js';
 import * as tabGroupHandler from './tab-group-handler.js';
-import * as sidebarHandler from './sidebar-handler.js'; // Import for notifySidebar
+import * as sidebarHandler from './sidebar-handler.js'; 
 import cloudStorage from '../cloud-storage.js';
 import llmService from '../llm_service.js';
 import * as ruleManager from './rule-manager.js';
@@ -53,7 +52,12 @@ import { checkAndPromptForCompletion, startVisitTimer } from './navigation-handl
 
 const PENDING_VIEW_KEY = 'pendingSidebarView';
 
-// ... (handleOpenContent, processDeletePacketsRequest, sendProgressNotification preserved) ...
+// --- Helper to Sync Global Media State ---
+function syncGlobalMediaState(instance) {
+    if (activeMediaPlayback && activeMediaPlayback.instanceId === instance.instanceId) {
+        activeMediaPlayback.instance = instance;
+    }
+}
 
 async function handleOpenContent(data, sender, sendResponse) {
     const { instance, url: clickedUrl } = data;
@@ -95,7 +99,6 @@ async function processDeletePacketsRequest(data) {
             
             await storage.deletePacketInstance(instanceId);
 
-            // FIX: Use notifySidebar instead of sendMessage
             sidebarHandler.notifySidebar('packet_instance_deleted', { packetId: instanceId, source: 'user_action' });
             deletedCount++;
         } catch (error) {
@@ -109,13 +112,11 @@ async function processDeletePacketsRequest(data) {
         message: errors.length > 0 ? `${deletedCount} deleted, ${errors.length} failed.` : `${deletedCount} packet(s) deleted successfully.`
     };
     
-    // FIX: Use notifySidebar
     sidebarHandler.notifySidebar('packet_deletion_complete', result);
     return result;
 }
 
 function sendProgressNotification(action, data) {
-    // FIX: Use notifySidebar for progress updates too
     sidebarHandler.notifySidebar(action, data);
 }
 
@@ -129,8 +130,6 @@ function injectInterceptorScript(htmlContent) {
     }
     return htmlContent + scriptTag;
 }
-
-// ... (handleGetContextForTab, handleGetCurrentTabContext, handleGetPageDetailsFromDOM, handleMarkUrlVisited preserved) ...
 
 async function handleGetContextForTab(data, sender, sendResponse) {
     const { tabId } = data;
@@ -206,10 +205,18 @@ async function handleMarkUrlVisited(data, sendResponse) {
      try {
           const instance = await storage.getPacketInstance(instanceId);
           if (!instance) return sendResponse({ success: false, error: 'Instance not found.' });
+          
           const result = await packetUtils.markUrlAsVisited(instance, url);
+          
           if (result.success && !result.alreadyVisited && !result.notTrackable) {
+               // DEBUG: Log BEFORE Save
+               console.log('[MessageHandler] Saving Visited URL:', url, 'Total Visited:', result.instance.visitedUrls?.length);
+               
                await storage.savePacketInstance(result.instance);
-               // FIX: Use notifySidebar
+               
+               // FIX: Update Global Media State
+               syncGlobalMediaState(result.instance);
+
                sidebarHandler.notifySidebar('url_visited', { packetId: instanceId, url });
           }
           sendResponse({ success: result.success, error: result.error });
@@ -240,8 +247,6 @@ async function handleSidebarReady(data, sender, sendResponse) {
           sendResponse({ success: true, message: "Readiness acknowledged." });
      }
 }
-
-// ... (findMediaItemInInstance, ensureMediaIsCached, handlePlaybackActionRequest, ensureHtmlIsCached, ensurePdfIsCached preserved) ...
 
 function findMediaItemInInstance(instance, url) {
     return instance?.contents?.find(item => item.url === url && item.format === 'audio');
@@ -378,6 +383,8 @@ async function handleSavePacketOutput(data, sender, sendResponse) {
         }
 
         await storage.savePacketInstance(instance);
+        
+        syncGlobalMediaState(instance);
 
         sidebarHandler.notifySidebar('packet_instance_updated', { instance });
         sendResponse({ success: true });
@@ -402,8 +409,8 @@ async function handleProposeSettingsUpdate(data, sender, sendResponse) {
             contentType: o.outputContentType
         }));
 
-        const systemPrompt = `...`; // Preserved
-        const userPrompt = `...`; // Preserved
+        const systemPrompt = `...`; 
+        const userPrompt = `...`; 
 
         const result = await llmService.callLLM('propose_settings_changes', { system: systemPrompt, user: userPrompt });
         
@@ -675,7 +682,10 @@ const actionHandlers = {
         if (!activeMediaPlayback.instance || activeMediaPlayback.url !== data.url || !activeMediaPlayback.isPlaying) return;
         activeMediaPlayback.currentTime = data.currentTime;
         activeMediaPlayback.duration = data.duration;
+        
+        // Use instance from activeMediaPlayback, which is now guaranteed to be fresh
         const instance = activeMediaPlayback.instance;
+        
         let momentTripped = false;
         (instance.moments || []).forEach((moment, index) => {
             if (moment.type === 'mediaTimestamp' && moment.sourceUrl === activeMediaPlayback.lrl &&
@@ -696,12 +706,18 @@ const actionHandlers = {
                 }
             }
         });
-        if (momentTripped) await storage.savePacketInstance(instance);
+        
+        if (momentTripped) {
+            await storage.savePacketInstance(instance);
+            // No need to sync here because we modified the reference object directly
+        }
+        
         const mediaItem = findMediaItemInInstance(instance, data.url);
         if (mediaItem) {
             mediaItem.currentTime = data.currentTime;
             mediaItem.duration = data.duration;
         }
+        
         sidebarHandler.notifySidebar('playback_state_updated', { ...activeMediaPlayback });
     },
     'overlay_setting_updated': (d, s, r) => { notifyUIsOfStateChange().then(() => r({success: true})); },
@@ -754,7 +770,6 @@ const actionHandlers = {
     'delete_packet_image': (data, s, r) => processDeletePacketImageRequest(data).then(r),
     'save_packet_image': async (data, sender, sendResponse) => {
         await storage.savePacketImage(data.image);
-        // FIX: Replaced chrome.runtime.sendMessage with notifySidebar
         sidebarHandler.notifySidebar('packet_image_created', { image: data.image });
         sendResponse({ success: true, imageId: data.image.id });
     },
@@ -830,7 +845,14 @@ const actionHandlers = {
             const instance = await storage.getPacketInstance(context.instanceId);
             const visitResult = await packetUtils.markUrlAsVisited(instance, context.canonicalPacketUrl);
             if (visitResult.success && visitResult.modified) {
+                // DEBUG: Log BEFORE Save
+                console.log('[MessageHandler] Interaction Complete:', context.canonicalPacketUrl);
+               
                 await storage.savePacketInstance(visitResult.instance);
+                
+                // --- FIX: Update Global Media State ---
+                syncGlobalMediaState(visitResult.instance);
+
                 sidebarHandler.notifySidebar('packet_instance_updated', { instance: visitResult.instance });
                 await checkAndPromptForCompletion('MessageHandler', visitResult, context.instanceId);
             }
@@ -839,7 +861,6 @@ const actionHandlers = {
     },
     'remove_tab_groups': (data, s, r) => tabGroupHandler.handleRemoveTabGroups(data, r),
     'reorder_packet_tabs': handleReorderPacketTabs,
-    // FIX: Use notifySidebar
     'theme_preference_updated': () => sidebarHandler.notifySidebar('theme_preference_updated'),
     'sidebar_ready': handleSidebarReady,
     'prepare_sidebar_navigation': (data, s, r) => { storage.setSession({ [PENDING_VIEW_KEY]: data }).then(success => r({ success })); },

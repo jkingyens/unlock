@@ -1,10 +1,5 @@
 // ext/background-modules/navigation-handler.js
-// This module now acts as a pure event listener for webNavigation events.
-// It has been refactored to delegate all complex reconciliation logic to the
-// PacketRuntime API, cleaning up its responsibilities.
-// REVISED: The grace period for navigation has been lowered from 250ms to 50ms.
-// FINAL FIX: Removed aggressive "nav_intent" logic that caused auto-adoption of
-// tabs based purely on URL matching. Now strictly relies on trusted intent or existing context.
+// REVISED: Fixed data corruption bug where startVisitTimer failed to update global media state.
 
 import {
     logger,
@@ -16,17 +11,14 @@ import {
     sanitizeForFileName,
     shouldUseTabGroups
 } from '../utils.js';
-import { activeMediaPlayback, setupOffscreenDocument } from '../background.js';
+import { activeMediaPlayback, setupOffscreenDocument } from '../background.js'; // Import activeMediaPlayback
 import * as sidebarHandler from './sidebar-handler.js';
 import PacketRuntime from './packet-runtime.js';
 import cloudStorage from '../cloud-storage.js';
 
 const pendingVisits = {};
-
-// --- START OF FIX: Add a queuing system to prevent race conditions ---
 const navigationQueues = new Map();
 const processingNavigation = new Set();
-// --- END OF FIX ---
 
 export function clearPendingVisitTimer(tabId) {
     if (pendingVisits[tabId]?.timerId) {
@@ -55,10 +47,6 @@ export async function onBeforeNavigate(details) {
         return;
     }
 
-    // --- REMOVED AGGRESSIVE AUTO-ADOPTION LOGIC HERE ---
-    // We no longer iterate instances to set 'nav_intent' based on URL matching.
-    // This prevents the extension from capturing tabs just because they match a packet URL.
-
     // Check for cached content (Previews)
     const instances = await storage.getPacketInstances();
     for (const instanceId in instances) {
@@ -83,7 +71,6 @@ export async function onBeforeNavigate(details) {
     }
 }
 
-// --- START OF FIX: Route events through the queuing system ---
 export async function onCommitted(details) {
     if (details.frameId !== 0) return;
     await processNavigationEvent(details.tabId, details.url, details);
@@ -101,7 +88,7 @@ async function processNavigationEvent(tabId, url, details) {
     navigationQueues.get(tabId).push({ url, details });
 
     if (processingNavigation.has(tabId)) {
-        return; // Already processing, event is queued.
+        return; 
     }
 
     processingNavigation.add(tabId);
@@ -120,7 +107,6 @@ async function processNavigationEvent(tabId, url, details) {
     processingNavigation.delete(tabId);
     navigationQueues.delete(tabId);
 }
-// --- END OF FIX ---
 
 async function doProcessNavigationEvent(tabId, url, details) {
     const logPrefix = `[NavigationHandler Tab ${tabId}]`;
@@ -130,7 +116,6 @@ async function doProcessNavigationEvent(tabId, url, details) {
     await injectOverlayScripts(tabId);
 
     const trustedIntentKey = `trusted_intent_${tabId}`;
-    // Remove navIntentKey lookup
     const sessionData = await storage.getSession([trustedIntentKey]);
     const trustedContext = sessionData[trustedIntentKey];
 
@@ -139,7 +124,6 @@ async function doProcessNavigationEvent(tabId, url, details) {
         await setPacketContext(tabId, trustedContext.instanceId, trustedContext.canonicalPacketUrl, url);
         await storage.removeSession(trustedIntentKey);
     }
-    // Removed 'else if (navIntent)' block
 
     const currentContext = await getPacketContext(tabId);
     let instance = null;
@@ -147,10 +131,6 @@ async function doProcessNavigationEvent(tabId, url, details) {
     if (currentContext?.instanceId) {
         instance = await storage.getPacketInstance(currentContext.instanceId);
     } else {
-        // Fallback: Check if URL belongs to any packet, BUT DO NOT ADOPT yet.
-        // PacketRuntime.reconcileTab will decide whether to adopt or ignore.
-        // Since we removed auto-adoption in PacketRuntime, this is mostly for
-        // resolving the instance object to pass to reconcileTab.
         const allInstances = await storage.getPacketInstances();
         for (const inst of Object.values(allInstances)) {
             if (packetUtils.isUrlInPacket(url, inst)) {
@@ -167,13 +147,11 @@ async function doProcessNavigationEvent(tabId, url, details) {
 
     let finalContext = await getPacketContext(tabId);
     let finalInstance = finalContext ? await storage.getPacketInstance(finalContext.instanceId) : null;
-    let isContextOverriddenForMedia = false;
     
     if (activeMediaPlayback.instanceId) {
         if (!finalInstance || finalInstance.instanceId !== activeMediaPlayback.instanceId) {
             finalInstance = activeMediaPlayback.instance;
             finalContext = null; 
-            isContextOverriddenForMedia = true;
         }
     }
 
@@ -206,9 +184,13 @@ export async function startVisitTimer(tabId, instanceId, canonicalPacketUrl, log
 
                 if (visitResult.success && visitResult.modified) {
                     await storage.savePacketInstance(visitResult.instance);
+                    
+                    // --- CRITICAL FIX: Sync global media state to prevent data loss ---
                     if (activeMediaPlayback.instanceId === instanceId) {
+                        logger.log(logPrefix, 'Syncing Global Media State after visit:', canonicalPacketUrl);
                         activeMediaPlayback.instance = visitResult.instance;
                     }
+
                     sidebarHandler.notifySidebar('packet_instance_updated', { instance: visitResult.instance, source: 'dwell_visit' });
                     await checkAndPromptForCompletion(logPrefix, visitResult, instanceId);
                 }

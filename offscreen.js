@@ -67,32 +67,53 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
         };
     }
 
-    function handleAudioControl(request) {
+    async function handleAudioControl(request) {
         setupAudioElement();
         const { command, data } = request;
         switch (command) {
             case 'play':
                 const needsSrcUpdate = audio.dataset.instanceId !== data.instanceId || audio.dataset.url !== data.url;
+                
                 if (needsSrcUpdate) {
                     const audioBuffer = base64ToAb(data.audioB64);
                     const blob = new Blob([audioBuffer], { type: data.mimeType });
                     const audioUrl = URL.createObjectURL(blob);
+                    
                     if (audio.src && audio.src.startsWith('blob:')) {
                         URL.revokeObjectURL(audio.src);
                     }
+                    
                     audio.src = audioUrl;
                     audio.dataset.url = data.url;
                     audio.dataset.instanceId = data.instanceId;
-                    audio.addEventListener('loadedmetadata', () => {
-                        if (data.startTime) audio.currentTime = data.startTime;
-                        audio.play().catch(e => console.error("Audio play failed after metadata load:", e));
-                    }, { once: true });
-                    audio.load();
+
+                    // FIX: Return a promise that waits for playback to actually start
+                    return new Promise((resolve) => {
+                        const onMetadata = async () => {
+                            if (data.startTime) audio.currentTime = data.startTime;
+                            try {
+                                await audio.play();
+                                resolve({ success: true, isPlaying: true, currentTime: audio.currentTime });
+                            } catch (e) {
+                                console.error("Audio play failed after metadata load:", e);
+                                resolve({ success: false, error: e.message });
+                            }
+                        };
+                        audio.addEventListener('loadedmetadata', onMetadata, { once: true });
+                        audio.load();
+                    });
+
                 } else {
                     if (data.startTime) audio.currentTime = data.startTime;
-                    audio.play().catch(e => console.error("Audio play failed:", e));
+                    try {
+                        await audio.play();
+                        return { success: true, isPlaying: true, currentTime: audio.currentTime };
+                    } catch (e) {
+                        console.error("Audio play failed:", e);
+                        return { success: false, error: e.message };
+                    }
                 }
-                return { success: true, isPlaying: !audio.paused, currentTime: audio.currentTime };
+
             case 'pause':
                 audio.pause();
                 return { success: true, isPlaying: false, currentTime: audio.currentTime };
@@ -108,9 +129,18 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
                 audio.dataset.instanceId = '';
                 return { success: true, isPlaying: false, currentTime: 0 };
             case 'toggle':
-                if (audio.paused) audio.play().catch(e => console.error(e));
-                else audio.pause();
-                return { success: true, isPlaying: !audio.paused, currentTime: audio.currentTime };
+                if (audio.paused) {
+                    try {
+                        await audio.play();
+                        return { success: true, isPlaying: true, currentTime: audio.currentTime };
+                    } catch(e) {
+                        console.error(e);
+                        return { success: false, error: e.message };
+                    }
+                } else {
+                    audio.pause();
+                    return { success: true, isPlaying: false, currentTime: audio.currentTime };
+                }
             case 'get_current_time':
                 return { success: true, currentTime: audio.currentTime, isPlaying: !audio.paused };
         }
@@ -254,8 +284,9 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
                 }
                 return false;
             case 'control-audio':
-                sendResponse(handleAudioControl(request.data));
-                return false; 
+                // FIX: Await the async handler before sending response
+                handleAudioControl(request.data).then(sendResponse);
+                return true; // Keep channel open for async response
             case 'parse-html-for-text':
             case 'parse-html-for-text-with-markers':
             case 'parse-html-for-links':

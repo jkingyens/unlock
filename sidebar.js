@@ -1,5 +1,5 @@
 // ext/sidebar.js (Global Side Panel - Orchestrator)
-// REVISED: Optimized playback updates to prevent UI flickering by caching state.
+// REVISED: Implemented "smart merge" in playback_state_updated to prevent stale audio state from overwriting visited URLs.
 
 import { logger, storage, packetUtils, applyThemeMode, CONFIG } from './utils.js';
 import { domRefs, cacheDomReferences } from './sidebar-modules/dom-references.js';
@@ -23,6 +23,7 @@ let backgroundPort = null;
 
 // --- NEW: State Cache for Optimization ---
 let lastMomentsTrippedJson = '';
+let lastVisitedUrlsJson = ''; 
 
 function resetSidebarState() {
     currentView = 'root';
@@ -32,7 +33,8 @@ function resetSidebarState() {
     isNavigating = false;
     nextNavigationRequest = null;
     isOpeningPacketItem = false;
-    lastMomentsTrippedJson = ''; // Reset cache
+    lastMomentsTrippedJson = ''; 
+    lastVisitedUrlsJson = ''; 
     logger.log('Sidebar', 'Internal state has been reset.');
 }
 
@@ -44,7 +46,6 @@ async function initialize() {
     await applyThemeMode();
     cacheDomReferences();
 
-    // Inject dependencies into each module
     const dependencies = { navigateTo, showRootViewStatus, sendMessageToBackground, showSettingsStatus, showConfetti, openUrl };
     dialogHandler.init(dependencies);
     rootView.init(dependencies);
@@ -52,7 +53,6 @@ async function initialize() {
     createView.init(dependencies);
     settingsView.init(dependencies);
 
-    // Setup event listeners from each module
     dialogHandler.setupDialogListeners();
     rootView.setupRootViewListeners();
     createView.setupCreateViewListeners();
@@ -325,15 +325,23 @@ async function handleBackgroundMessage(message) {
             }
 
             if (currentView === 'packet-detail' && currentInstanceId === data.instanceId) {
-                currentInstanceData = data.instance;
+                // --- SMART MERGE: Prefer local state for visited status ---
+                if (!currentInstanceData) {
+                    currentInstanceData = data.instance;
+                } else {
+                    // Only merge moments (which audio player controls)
+                    // Ignore visitedUrls from audio player (which might be stale)
+                    currentInstanceData.momentsTripped = data.instance.momentsTripped;
+                }
                 
-                // 1. Always update waveform/UI progress
                 detailView.updatePlaybackUI(data, currentInstanceData);
                 
-                // 2. FIX: Only update card visibility (heavy DOM op) if moments tripped actually changed
                 const newMomentsJson = JSON.stringify(currentInstanceData.momentsTripped || []);
-                if (newMomentsJson !== lastMomentsTrippedJson) {
+                const newVisitedJson = JSON.stringify(currentInstanceData.visitedUrls || []); 
+
+                if (newMomentsJson !== lastMomentsTrippedJson || newVisitedJson !== lastVisitedUrlsJson) {
                     lastMomentsTrippedJson = newMomentsJson;
+                    lastVisitedUrlsJson = newVisitedJson; 
                     detailView.updateCardVisibility(currentInstanceData);
                 }
 
@@ -384,6 +392,9 @@ async function handleBackgroundMessage(message) {
             if (currentView === 'root') {
                 rootView.updateInstanceRowUI(data.instance);
             } else if (currentView === 'packet-detail' && currentInstanceId === data.instance.instanceId) {
+                // Ensure local state is updated with authoritative source
+                currentInstanceData = data.instance; 
+                
                 storage.getPacketBrowserState(data.instance.instanceId).then(browserState => {
                     detailView.displayPacketContent(data.instance, browserState, currentPacketUrl);
                 });
