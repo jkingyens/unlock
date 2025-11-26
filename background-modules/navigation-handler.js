@@ -1,5 +1,5 @@
 // ext/background-modules/navigation-handler.js
-// REVISED: Fixed data corruption bug where startVisitTimer failed to update global media state.
+// REVISED: Exported injectOverlayScripts for use during startup initialization.
 
 import {
     logger,
@@ -11,7 +11,7 @@ import {
     sanitizeForFileName,
     shouldUseTabGroups
 } from '../utils.js';
-import { activeMediaPlayback, setupOffscreenDocument } from '../background.js'; // Import activeMediaPlayback
+import { activeMediaPlayback, setupOffscreenDocument } from '../background.js';
 import * as sidebarHandler from './sidebar-handler.js';
 import PacketRuntime from './packet-runtime.js';
 import cloudStorage from '../cloud-storage.js';
@@ -27,7 +27,8 @@ export function clearPendingVisitTimer(tabId) {
     }
 }
 
-async function injectOverlayScripts(tabId) {
+// --- EXPORTED for Startup Injection ---
+export async function injectOverlayScripts(tabId) {
     try {
         await chrome.scripting.executeScript({
             target: { tabId: tabId },
@@ -38,7 +39,8 @@ async function injectOverlayScripts(tabId) {
             files: ['overlay.css']
         });
     } catch (e) {
-        // Expected to fail on non-http pages.
+        // Expected to fail on non-http pages or restricted domains
+        // logger.warn('NavigationHandler', `Failed to inject overlay into tab ${tabId}`, e.message);
     }
 }
 
@@ -113,6 +115,8 @@ async function doProcessNavigationEvent(tabId, url, details) {
     if (!url || (!url.startsWith('http') && !url.startsWith('chrome-extension://'))) return;
 
     clearPendingVisitTimer(tabId);
+    
+    // Inject scripts on navigation
     await injectOverlayScripts(tabId);
 
     const trustedIntentKey = `trusted_intent_${tabId}`;
@@ -185,7 +189,6 @@ export async function startVisitTimer(tabId, instanceId, canonicalPacketUrl, log
                 if (visitResult.success && visitResult.modified) {
                     await storage.savePacketInstance(visitResult.instance);
                     
-                    // --- CRITICAL FIX: Sync global media state to prevent data loss ---
                     if (activeMediaPlayback.instanceId === instanceId) {
                         logger.log(logPrefix, 'Syncing Global Media State after visit:', canonicalPacketUrl);
                         activeMediaPlayback.instance = visitResult.instance;
