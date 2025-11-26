@@ -1,5 +1,5 @@
 // ext/background.js
-// DEBUG VERSION: Tracking Active Media State Broadcasts
+// REVISED: Added explicit UI state notifications on sidebar connect/disconnect to ensure overlay hides/shows correctly.
 
 import {
     logger,
@@ -19,7 +19,8 @@ import {
     onCommitted,
     onHistoryStateUpdated,
     onBeforeNavigate,
-    startVisitTimer
+    startVisitTimer,
+    injectOverlayScripts
 } from './background-modules/navigation-handler.js';
 import * as tabGroupHandler from './background-modules/tab-group-handler.js';
 import * as sidebarHandler from './background-modules/sidebar-handler.js';
@@ -161,15 +162,21 @@ export async function saveCurrentTime(instanceId, url, providedCurrentTime, isSt
 // --- State Synchronization ---
 
 export async function notifyUIsOfStateChange(options = {}) {
-    const isSidebarOpen = (await storage.getSession({
-        isSidebarOpen: false
-    })).isSidebarOpen;
+    // FIX: Prefer the passed-in option (which is immediate) over the async storage read (which might be stale)
+    let isSidebarOpen = options.isSidebarOpen;
     
+    if (typeof isSidebarOpen === 'undefined') {
+        isSidebarOpen = (await storage.getSession({
+            isSidebarOpen: false
+        })).isSidebarOpen;
+    }
+
     // --- DEBUG LOG ---
     if (activeMediaPlayback.instance) {
-        console.log('[Background] Broadcasting Media State:', {
-            visitedCount: activeMediaPlayback.instance.visitedUrls?.length
-        });
+        // console.log('[Background] Broadcasting Media State:', {
+        //     visitedCount: activeMediaPlayback.instance.visitedUrls?.length,
+        //     isSidebarOpen: isSidebarOpen
+        // });
     }
 
     const fullStateForSidebar = { ...activeMediaPlayback,
@@ -239,6 +246,20 @@ async function initializeExtension() {
     }
 
     await restoreContextOnStartup();
+    await reinjectScriptsOnStartup(); 
+}
+
+async function reinjectScriptsOnStartup() {
+    logger.log('Background:reinject', 'Scanning ALL open tabs to re-inject overlay scripts...');
+    try {
+        const tabs = await chrome.tabs.query({});
+        for (const tab of tabs) {
+            if (!tab.url || (!tab.url.startsWith('http://') && !tab.url.startsWith('https://'))) continue;
+            await injectOverlayScripts(tab.id);
+        }
+    } catch (error) {
+        logger.error('Background:reinject', 'Error during script re-injection', error);
+    }
 }
 
 chrome.runtime.onInstalled.addListener(initializeExtension);
@@ -250,6 +271,16 @@ chrome.runtime.onConnect.addListener((port) => {
     if (port.name === 'sidebar') {
         sidebarHandler.handleSidebarConnection(port);
         notifyOffscreenSidebarState(true);
+
+        // --- FIX: Immediate UI Notification ---
+        // Forces the overlay to HIDE because the sidebar is now open
+        notifyUIsOfStateChange({ isSidebarOpen: true });
+
+        port.onDisconnect.addListener(() => {
+             // Forces the overlay to SHOW because the sidebar is now closed
+             notifyUIsOfStateChange({ isSidebarOpen: false, animate: true });
+             notifyOffscreenSidebarState(false);
+        });
     }
 });
 
@@ -261,8 +292,6 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
     let instance = context ? await storage.getPacketInstance(context.instanceId) : null;
     let packetUrl = context ? context.canonicalPacketUrl : null;
 
-    // --- FIX: Only fallback to active media if the CURRENT tab has no context ---
-    // And critically, fetch a FRESH instance object to avoid stale state issues.
     if (!instance && activeMediaPlayback.instanceId) {
         instance = await storage.getPacketInstance(activeMediaPlayback.instanceId);
         packetUrl = null;
