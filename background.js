@@ -1,10 +1,5 @@
-// ext/background.js - Main service worker entry point (Global Side Panel Mode)
-// This file is now refactored to delegate lifecycle and state management
-// to the new PacketRuntime API. Its role is simplified to initialization,
-// event listening, and dispatching tasks to the appropriate runtime instance.
-// REVISED: Fixed sticky media logic. Sidebar now correctly switches to the
-// packet associated with the focused tab, only falling back to the playing
-// packet if the current tab has no context.
+// ext/background.js
+// DEBUG VERSION: Tracking Active Media State Broadcasts
 
 import {
     logger,
@@ -51,7 +46,7 @@ const ALARM_NAME = 'keep-alive';
 function setupKeepaliveAlarm() {
   chrome.alarms.get(ALARM_NAME, (alarm) => {
     if (!alarm) {
-      chrome.alarms.create(ALARM_NAME, { periodInMinutes: 0.33 }); // Every 20 seconds
+      chrome.alarms.create(ALARM_NAME, { periodInMinutes: 0.33 }); 
     }
   });
 }
@@ -169,6 +164,14 @@ export async function notifyUIsOfStateChange(options = {}) {
     const isSidebarOpen = (await storage.getSession({
         isSidebarOpen: false
     })).isSidebarOpen;
+    
+    // --- DEBUG LOG ---
+    if (activeMediaPlayback.instance) {
+        console.log('[Background] Broadcasting Media State:', {
+            visitedCount: activeMediaPlayback.instance.visitedUrls?.length
+        });
+    }
+
     const fullStateForSidebar = { ...activeMediaPlayback,
         instance: activeMediaPlayback.instance,
         ...options
@@ -259,8 +262,9 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
     let packetUrl = context ? context.canonicalPacketUrl : null;
 
     // --- FIX: Only fallback to active media if the CURRENT tab has no context ---
-    if (!instance && activeMediaPlayback.instance) {
-        instance = activeMediaPlayback.instance;
+    // And critically, fetch a FRESH instance object to avoid stale state issues.
+    if (!instance && activeMediaPlayback.instanceId) {
+        instance = await storage.getPacketInstance(activeMediaPlayback.instanceId);
         packetUrl = null;
     }
 

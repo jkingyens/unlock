@@ -822,6 +822,11 @@ async markUrlAsVisited(instance, url) {
             return { success: false, error: 'Packet instance not found' };
         }
 
+        // [NEW] Guard against missing URL
+        if (!url) {
+             return { success: true, notTrackable: true, instance: instance };
+        }
+
         const wasCompletedBefore = await this.isPacketInstanceCompleted(instance);
         const foundItem = this.isUrlInPacket(url, instance, { returnItem: true });
 
@@ -830,8 +835,12 @@ async markUrlAsVisited(instance, url) {
         }
         
         // Prioritize LRL as the canonical identifier for visit tracking if it exists.
-        // This creates a single, consistent ID for each item.
         const canonicalIdentifier = foundItem.lrl || foundItem.url;
+
+        // [NEW] Double-check we have a valid identifier
+        if (!canonicalIdentifier) {
+             return { success: true, notTrackable: true, instance: instance };
+        }
 
         if ((instance.visitedUrls || []).includes(canonicalIdentifier)) {
             return { success: true, alreadyVisited: true, instance: instance };

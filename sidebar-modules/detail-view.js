@@ -1,7 +1,6 @@
 // ext/sidebar-modules/detail-view.js
-// Manages the packet detail view, including rendering content cards and progress.
-// REVISED: Enforced strict "Receive Mode" for interactive cards. Input is ignored unless active.
-// Visual states now clearly indicate "Click to Activate" vs "Listening".
+// REVISED: Added URL decoding to updateCardVisibility to ensure robust matching between
+// packet JSON URLs and browser-reported visited URLs.
 
 import { domRefs } from './dom-references.js';
 import { logger, storage, packetUtils, indexedDbStorage, sanitizeForFileName } from '../utils.js';
@@ -10,8 +9,8 @@ import { logger, storage, packetUtils, indexedDbStorage, sanitizeForFileName } f
 let isDisplayingPacketContent = false;
 let queuedDisplayRequest = null;
 const audioDataCache = new Map();
-let saveStateDebounceTimer = null; // Timer for debounced state saving
-let currentPlayingUrl = null; // Track which media item is active in this view
+let saveStateDebounceTimer = null; 
+let currentPlayingUrl = null; 
 let sendMessageToBackground;
 let navigateTo;
 let openUrl;
@@ -432,14 +431,33 @@ export async function updateCardVisibility(instance, browserState) {
         }
     }
     
-    const visitedUrlsSet = new Set(instance.visitedUrls || []);
+    // --- START OF FIX: Normalized URL Matching ---
+    const visitedUrlsSet = new Set();
+    (instance.visitedUrls || []).forEach(url => {
+        visitedUrlsSet.add(url);
+        try { visitedUrlsSet.add(decodeURIComponent(url)); } catch (e) {}
+    });
 
     domRefs.detailCardsContainer.querySelectorAll('.card').forEach(card => {
-        const cardUrl = card.dataset.url;
+        let cardUrl = card.dataset.url;
         const cardLrl = card.dataset.lrl;
-        const isVisited = (cardUrl && visitedUrlsSet.has(cardUrl)) || (cardLrl && visitedUrlsSet.has(cardLrl));
+        
+        let isVisited = false;
+        
+        // Check raw and decoded URL
+        if (cardUrl) {
+            isVisited = visitedUrlsSet.has(cardUrl);
+            if (!isVisited) {
+                try { isVisited = visitedUrlsSet.has(decodeURIComponent(cardUrl)); } catch (e) {}
+            }
+        }
+        
+        if (!isVisited && cardLrl) {
+            isVisited = visitedUrlsSet.has(cardLrl);
+        }
         
         card.classList.toggle('visited', isVisited);
+        // --- END OF FIX ---
         
         if (isCompleted) {
             card.dataset.completed = 'true';
@@ -467,8 +485,6 @@ export async function updateCardVisibility(instance, browserState) {
                     card.style.opacity = '1.0';
                     card.classList.add('drop-zone-active', 'clickable'); 
                     
-                    // NOTE: We intentionally DO NOT reset the text here if it is currently active.
-                    // Only reset if it was hidden or needs strict re-initialization
                     if (wasHidden && !card.classList.contains('listening-for-input')) {
                         const cardUrlEl = card.querySelector('.card-url');
                         if(cardUrlEl) cardUrlEl.textContent = "Click to Activate Input Capture";
@@ -486,7 +502,6 @@ export async function updateCardVisibility(instance, browserState) {
                 }
             }
         } else if (card.dataset.format === 'interactive-input' && isCompleted) {
-             // Handle non-moment interactive cards
              card.classList.remove('drop-zone-active', 'clickable', 'listening-for-input');
              card.style.opacity = '0.6';
              const cardUrlEl = card.querySelector('.card-url');
@@ -892,16 +907,6 @@ function attachInteractiveCardHandlers(card, contentItem, instance) {
             
             // --- NEW: Paste Guard ---
             if (!card.classList.contains('listening-for-input')) {
-                // Optionally activate it automatically on click, but per requirement we strictly enforce manual activation first or clear UI.
-                // For better UX, clicking the button implies activation.
-                // But to strictly follow "must be in receive mode", we can block it or auto-activate.
-                // Let's auto-activate logic will run via the card click handler anyway due to bubbling unless prevented.
-                // But strict requirement: "only accept input... after they have been clicked".
-                // Since this is a button click *inside* the card, it satisfies "clicked".
-                // The card click handler below will toggle it ON. We should wait for that or trigger logic.
-                // However, simpler to just block if not active to train user, OR treat button click as activation + paste.
-                // Let's treat it as: You must click the CARD (or button) to Activate. 
-                // If active, paste works.
                 if (!card.classList.contains('listening-for-input')) {
                      showRootViewStatus('Click the card to activate input first.', 'error');
                      return;
