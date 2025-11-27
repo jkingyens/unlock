@@ -1,6 +1,5 @@
 // ext/background-modules/packet-runtime.js
-// REVISED: Fixed a bug where 'visit' moments wouldn't trip for external pages because
-// the logic strictly checked for 'lrl' instead of falling back to 'url'.
+// REVISED: Updated to await arrayBufferToBase64 for memory safety when opening PDFs.
 
 import {
     logger,
@@ -116,7 +115,6 @@ class PacketRuntime {
             // Handle "Moments" (triggers based on visiting specific pages)
             if (itemForVisitTimer) {
                 let momentTripped = false;
-                // --- START OF FIX ---
                 // Use either LRL or URL to identify the item for moment checking.
                 const itemIdentifier = itemForVisitTimer.lrl || itemForVisitTimer.url;
                 
@@ -126,7 +124,6 @@ class PacketRuntime {
                         momentTripped = true;
                     }
                 });
-                // --- END OF FIX ---
                 
                 if (momentTripped) {
                     await storage.savePacketInstance(this.instance);
@@ -169,7 +166,9 @@ class PacketRuntime {
                 const cachedContent = await indexedDbStorage.getGeneratedContent(this.instance.instanceId, sanitizeForFileName(contentItem.lrl));
                 if (!cachedContent || !cachedContent[0]?.content) throw new Error(`PDF content for ${contentItem.lrl} is not cached.`);
                 
-                const contentB64 = arrayBufferToBase64(cachedContent[0].content);
+                // [FIX] Await the async conversion
+                const contentB64 = await arrayBufferToBase64(cachedContent[0].content);
+                
                 await setupOffscreenDocument();
                 const offscreenResponse = await chrome.runtime.sendMessage({
                     target: 'offscreen', type: 'create-blob-url-from-buffer',

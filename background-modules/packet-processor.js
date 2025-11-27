@@ -2,7 +2,7 @@
 // Manages the data lifecycle of packet instances. This module is now refactored
 // to delegate all browser-state management (rules, tabs) to the new
 // PacketRuntime API, focusing solely on data creation, cloud interaction, and deletion from storage.
-// REVISED: Updated to use sidebarHandler.notifySidebar for reliable progress updates via Port.
+// REVISED: Updated to await arrayBufferToBase64 for memory safety.
 
 import {
     logger,
@@ -14,11 +14,11 @@ import {
 } from '../utils.js';
 import cloudStorage from '../cloud-storage.js';
 import PacketRuntime from './packet-runtime.js'; 
-import * as sidebarHandler from './sidebar-handler.js'; // NEW: Import sidebar handler
+import * as sidebarHandler from './sidebar-handler.js'; 
+import * as ruleManager from './rule-manager.js'; // Ensure ruleManager is imported for delete cleanup
 
 // --- Helper to send progress notifications ---
 function sendProgressNotification(action, data) {
-    // FIX: Use the persistent port connection instead of generic broadcast
     sidebarHandler.notifySidebar(action, data);
 }
 
@@ -251,7 +251,6 @@ export async function importImageFromUrl(url) {
         }
 
         await storage.savePacketImage(importedPacketImage);
-        // This is the critical notification that closes the dialog
         sendProgressNotification('packet_image_created', { image: importedPacketImage });
         return { success: true, imageId: newImageId };
 
@@ -271,15 +270,18 @@ export async function publishImageForSharing(imageId) {
         const packetImage = await storage.getPacketImage(imageId);
         if (!packetImage) return { success: false, error: `Packet image ${imageId} not found.` };
         const imageForExport = JSON.parse(JSON.stringify(packetImage));
+        
         for (const contentItem of imageForExport.sourceContent) {
             if (contentItem.origin === 'internal' && contentItem.lrl) {
                 const indexedDbKey = sanitizeForFileName(contentItem.lrl);
                 const storedContent = await indexedDbStorage.getGeneratedContent(imageId, indexedDbKey);
                 if (storedContent && storedContent[0]?.content) {
-                    contentItem.contentB64 = arrayBufferToBase64(storedContent[0].content);
+                    // [FIX] Await the async conversion to prevent freezing/crashing
+                    contentItem.contentB64 = await arrayBufferToBase64(storedContent[0].content);
                 }
             }
         }
+        
         const jsonString = JSON.stringify(imageForExport);
         const shareFileName = `shared/img_${imageId.replace(/^img_/, '')}_${Date.now()}.json`;
         const uploadResult = await cloudStorage.uploadFile(shareFileName, jsonString, 'application/json', 'public-read');

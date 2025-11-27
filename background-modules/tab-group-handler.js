@@ -1,5 +1,5 @@
 // ext/background-modules/tab-group-handler.js
-// REVISED: Added setGroupCollapsedState to handle expand/collapse requests.
+// REVISED: Added validation to prevent hijacking recycled Tab Group IDs after browser restarts.
 
 import {
     logger,
@@ -56,6 +56,23 @@ export async function ensureTabInGroup(tabId, instance) {
         const tab = await chrome.tabs.get(tabId);
         let browserState = await storage.getPacketBrowserState(instanceId) || { instanceId, tabGroupId: null, activeTabIds: [], lastActiveUrl: null };
         
+        // [FIX] Validate stored group ID to handle browser restarts (ID recycling)
+        if (browserState.tabGroupId) {
+            try {
+                const existingGroup = await chrome.tabGroups.get(browserState.tabGroupId);
+                // If title doesn't match our prefix, it's a recycled ID pointing to a user's group
+                if (!existingGroup.title.startsWith(GROUP_TITLE_PREFIX)) {
+                    logger.warn('TabGroupHandler', 'Detected tab group ID reuse. Clearing stored ID.', { oldId: browserState.tabGroupId });
+                    browserState.tabGroupId = null;
+                    await storage.savePacketBrowserState(browserState);
+                }
+            } catch (e) {
+                // Group doesn't exist anymore, clear it
+                browserState.tabGroupId = null;
+                await storage.savePacketBrowserState(browserState);
+            }
+        }
+
         if (browserState.manualDisconnect) {
             return null;
         }
@@ -72,6 +89,7 @@ export async function ensureTabInGroup(tabId, instance) {
         }
         
         if (!targetGroupId) {
+            // Try to find by title first to avoid creating duplicates
             const [existingGroup] = await chrome.tabGroups.query({ title: expectedGroupTitle });
             if (existingGroup) {
                 targetGroupId = existingGroup.id;
@@ -271,6 +289,13 @@ export async function orderTabsInGroup(groupId, instance, attempt = 1) {
     if (!groupId || !instance || !Array.isArray(instance.contents)) return false;
 
     try {
+        // [FIX] Validate group ownership before ordering
+        const group = await chrome.tabGroups.get(groupId);
+        if (!group.title.startsWith(GROUP_TITLE_PREFIX)) {
+            logger.warn('TabGroupHandler:orderTabs', 'Group ownership mismatch. Aborting reorder.', { groupId, title: group.title });
+            return false;
+        }
+
         const tabsInGroup = await chrome.tabs.query({ groupId });
         if (tabsInGroup.length <= 1) return true;
         
@@ -309,7 +334,10 @@ export async function orderTabsInGroup(groupId, instance, attempt = 1) {
             setTimeout(() => orderTabsInGroup(groupId, instance, attempt + 1), 500);
             return true;
         }
-        logger.error('TabGroupHandler:orderTabsInGroup', `Error ordering draft tabs in group ${groupId}`, error);
+        // If group not found (recycled ID case that was deleted), we just fail silently
+        if (!error.message.toLowerCase().includes('no tab group with id')) {
+            logger.error('TabGroupHandler:orderTabsInGroup', `Error ordering draft tabs in group ${groupId}`, error);
+        }
         return false;
     }
 }

@@ -1,5 +1,6 @@
 // ext/background-modules/message-handlers.js
 // DEBUG VERSION: Tracing Mark as Visited
+// REVISED: Integrated waitForRestoration to prevent state desync on wakeup.
 
 import {
     logger,
@@ -46,7 +47,8 @@ import {
     saveCurrentTime,
     setupOffscreenDocument,
     stopAndClearActiveAudio,
-    notifyOffscreenSidebarState
+    notifyOffscreenSidebarState,
+    waitForRestoration // [FIX] Import restoration promise
 } from '../background.js';
 import { checkAndPromptForCompletion, startVisitTimer } from './navigation-handler.js';
 
@@ -284,7 +286,7 @@ async function handlePlaybackActionRequest(data, sender, sendResponse) {
                 const mediaItem = findMediaItemInInstance(instance, url);
                 if (!mediaItem) throw new Error(`Could not find audio track with url ${url} in packet.`);
                 const cacheResult = await ensureMediaIsCached(instanceId, url, lrl);
-                const audioB64 = arrayBufferToBase64(cacheResult.content);
+                const audioB64 = await arrayBufferToBase64(cacheResult.content); // Await async conversion
                 const startTime = mediaItem.currentTime || 0;
                 
                 const playResult = await controlAudioInOffscreen('play', { audioB64, mimeType: mediaItem.mimeType, url: url, instanceId, startTime });
@@ -901,12 +903,15 @@ const actionHandlers = {
 export function handleMessage(message, sender, sendResponse) {
     const handler = actionHandlers[message.action];
     if (handler) {
-        Promise.resolve(handler(message.data, sender, sendResponse))
-            .catch(err => {
-                logger.error("MessageHandler", `Error in action ${message.action}:`, err);
-                try { sendResponse({ success: false, error: err.message }); } catch (e) {}
-            });
-        return true; 
+        // [FIX] Wait for state restoration before processing any message
+        waitForRestoration().then(() => {
+            return Promise.resolve(handler(message.data, sender, sendResponse));
+        }).catch(err => {
+            logger.error("MessageHandler", `Error in action ${message.action}:`, err);
+            try { sendResponse({ success: false, error: err.message }); } catch (e) {}
+        });
+        
+        return true; // Keep channel open
     }
     return false;
 }
