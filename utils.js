@@ -1,6 +1,6 @@
 // ext/utils.js
 // Shared utility functions for the Unlock extension
-// REVISED: Includes "Hot Cache" for context, CAS for IndexedDB, and updated Gemini 2.5 Pro model.
+// REVISED: Fixed memory crash in arrayBufferToBase64 by using asynchronous Blob/FileReader API.
 
 // --- Centralized Configuration ---
 const CONFIG = {
@@ -29,7 +29,6 @@ const CONFIG = {
         apiEndpoint: 'https://api.openai.com/v1/chat/completions'
       },
       {
-        // CHANGED: Updated to Gemini 2.5 Pro to fix API 404 errors
         id: 'default_gemini_2_5_pro',
         name: 'Google Gemini 2.5 Pro (Default)',
         providerType: 'gemini',
@@ -949,12 +948,17 @@ async function shouldShowOverlay() {
 }
 
 function arrayBufferToBase64(buffer) {
-    let binary = '';
-    const bytes = new Uint8Array(buffer);
-    for (let i = 0; i < bytes.byteLength; i++) {
-        binary += String.fromCharCode(bytes[i]);
-    }
-    return btoa(binary);
+    return new Promise((resolve, reject) => {
+        const blob = new Blob([buffer], { type: 'application/octet-stream' });
+        const reader = new FileReader();
+        reader.onload = () => {
+            const dataUrl = reader.result;
+            const base64 = dataUrl.split(',')[1];
+            resolve(base64);
+        };
+        reader.onerror = () => reject(reader.error);
+        reader.readAsDataURL(blob);
+    });
 }
 
 async function base64Decode(base64) {

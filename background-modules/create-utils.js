@@ -1,5 +1,6 @@
 // ext/background-modules/create-utils.js
 // Contains logic for creating new packet images, including LLM and TTS interactions.
+// REVISED: Updated to await arrayBufferToBase64 for memory safety.
 
 import {
     logger,
@@ -79,7 +80,8 @@ async function getLinksFromHtml(html) {
 
 async function getAudioDurationOffscreen(audioBuffer) {
     await setupOffscreenDocument();
-    const base64String = arrayBufferToBase64(audioBuffer);
+    // [FIX] Await the async conversion
+    const base64String = await arrayBufferToBase64(audioBuffer);
 
     const response = await chrome.runtime.sendMessage({
         type: 'get-audio-duration',
@@ -98,7 +100,8 @@ async function normalizeAudioOffscreen(audioBlob) {
     await setupOffscreenDocument();
     try {
         const arrayBuffer = await audioBlob.arrayBuffer();
-        const base64String = arrayBufferToBase64(arrayBuffer);
+        // [FIX] Await the async conversion
+        const base64String = await arrayBufferToBase64(arrayBuffer);
 
         const response = await chrome.runtime.sendMessage({
             type: 'normalize-audio',

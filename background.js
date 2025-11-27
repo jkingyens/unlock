@@ -1,5 +1,5 @@
 // ext/background.js
-// REVISED: Added explicit UI state notifications on sidebar connect/disconnect to ensure overlay hides/shows correctly.
+// REVISED: Removed legacy keep-alive alarm. Added waitForRestoration to prevent state desync on service worker wakeup.
 
 import {
     logger,
@@ -41,23 +41,12 @@ export let activeMediaPlayback = {
 let creatingOffscreenDocument;
 const reorderDebounceTimers = new Map();
 
-// --- Service Worker Keepalive ---
-const ALARM_NAME = 'keep-alive';
+// [FIX] Capture restoration promise immediately to handle race conditions with incoming messages
+let restorationPromise = restoreMediaStateOnStartup();
 
-function setupKeepaliveAlarm() {
-  chrome.alarms.get(ALARM_NAME, (alarm) => {
-    if (!alarm) {
-      chrome.alarms.create(ALARM_NAME, { periodInMinutes: 0.33 }); 
-    }
-  });
+export function waitForRestoration() {
+    return restorationPromise;
 }
-
-chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === ALARM_NAME) {
-    chrome.runtime.getManifest();
-  }
-});
-
 
 // --- Offscreen Document and Audio Management ---
 
@@ -171,14 +160,6 @@ export async function notifyUIsOfStateChange(options = {}) {
         })).isSidebarOpen;
     }
 
-    // --- DEBUG LOG ---
-    if (activeMediaPlayback.instance) {
-        // console.log('[Background] Broadcasting Media State:', {
-        //     visitedCount: activeMediaPlayback.instance.visitedUrls?.length,
-        //     isSidebarOpen: isSidebarOpen
-        // });
-    }
-
     const fullStateForSidebar = { ...activeMediaPlayback,
         instance: activeMediaPlayback.instance,
         ...options
@@ -226,7 +207,6 @@ export async function setMediaPlaybackState(newState, options = {}) {
 // --- Initialization and Event Listeners ---
 
 async function initializeExtension() {
-    setupKeepaliveAlarm();
     if (chrome.sidePanel && typeof chrome.sidePanel.setPanelBehavior === 'function') {
         await chrome.sidePanel.setPanelBehavior({
                 openPanelOnActionClick: true
@@ -235,7 +215,10 @@ async function initializeExtension() {
     }
 
     await storage.getSettings();
-    await restoreMediaStateOnStartup();
+    
+    // [FIX] Wait for the global restoration promise instead of calling again
+    await restorationPromise;
+    
     await ruleManager.refreshAllRules();
     await tabGroupHandler.cleanupDraftGroup();
 
