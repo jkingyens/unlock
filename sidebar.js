@@ -249,7 +249,20 @@ async function updateSidebarContext(contextData) {
 async function openUrl(url, instanceId) {
     if (!url || !instanceId) return;
 
-    const instanceToOpen = currentInstanceData;
+    let instanceToOpen = currentInstanceData;
+
+    // [FIX START] Recover instance data if global state is mismatched/null
+    // This handles cases where the user switches tabs (clearing global state)
+    // but clicks a link in the still-visible sidebar.
+    if (!instanceToOpen || instanceToOpen.instanceId !== instanceId) {
+        try {
+            instanceToOpen = await storage.getPacketInstance(instanceId);
+        } catch (error) {
+            logger.warn("Sidebar", "Failed to recover instance for openUrl", error);
+        }
+    }
+    // [FIX END]
+
     if (!instanceToOpen || instanceToOpen.instanceId !== instanceId) {
         logger.error("Sidebar", "Mismatch or missing instance data for openUrl", { instanceId, currentInstanceData });
         return;
@@ -323,8 +336,12 @@ async function handleBackgroundMessage(message) {
             } else if (activeMediaInstanceId === data.instanceId) {
                 activeMediaInstanceId = null;
             }
+            if (currentView === 'packet-detail' && currentInstanceId === data.instanceId && data.instance != null) {
 
-            if (currentView === 'packet-detail' && currentInstanceId === data.instanceId) {
+                if (!data.instance) {
+                    return; // Skip update if no instance data is provided
+                }
+                
                 // --- SMART MERGE: Prefer local state for visited status ---
                 if (!currentInstanceData) {
                     currentInstanceData = data.instance;
@@ -332,6 +349,10 @@ async function handleBackgroundMessage(message) {
                     // Only merge moments (which audio player controls)
                     // Ignore visitedUrls from audio player (which might be stale)
                     currentInstanceData.momentsTripped = data.instance.momentsTripped;
+                }
+
+                if (!currentInstanceData) {
+                    return;
                 }
                 
                 detailView.updatePlaybackUI(data, currentInstanceData);

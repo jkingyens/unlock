@@ -1,18 +1,14 @@
 // ext/overlay.js
 
-// --- FIX: Idempotency Check ---
-// This check ensures that the script's logic only runs once per page context.
-if (!window.unlockOverlayInitialized) {
-    window.unlockOverlayInitialized = true; // Set a flag to prevent re-execution within this context
+// Wrap in IIFE to prevent "Identifier has already been declared" errors
+(function () {
 
     function initializeUnlockOverlay() {
         // --- Globals ---
         let overlay, playPauseBtn, playIcon, pauseIcon, overlayText, linkMention;
         let isVisible = false;
 
-        // --- NEW: Cleanup "Zombie" Elements ---
-        // When the extension restarts, the old content script dies but leaves its HTML behind.
-        // This function finds and removes those orphaned elements so we can start fresh.
+        // --- Cleanup "Zombie" Elements ---
         function cleanupZombies() {
             const oldOverlay = document.getElementById('unlock-media-overlay');
             if (oldOverlay) {
@@ -118,41 +114,64 @@ if (!window.unlockOverlayInitialized) {
         // 3. Bind Events
         playPauseBtn.addEventListener('click', (e) => {
             e.stopPropagation();
-            chrome.runtime.sendMessage({ action: 'request_playback_action', data: { intent: 'toggle' } });
+            try {
+                chrome.runtime.sendMessage({ action: 'request_playback_action', data: { intent: 'toggle' } });
+            } catch (error) {
+                // Extension context invalidated, suppress error
+            }
         });
         
         linkMention.addEventListener('click', (e) => {
             e.stopPropagation();
             const urlToOpen = linkMention.dataset.url;
             if (urlToOpen) {
-                chrome.runtime.sendMessage({ action: 'open_content_from_overlay', data: { url: urlToOpen } });
+                try {
+                    chrome.runtime.sendMessage({ action: 'open_content_from_overlay', data: { url: urlToOpen } });
+                } catch (error) {
+                    // Extension context invalidated, suppress error
+                }
             }
         });
 
         // 4. Setup Communication
-        chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-            if (message.action === 'update_overlay_state' || message.action === 'sync_overlay_state') {
-                syncState(message.data);
-            }
-            return true;
-        });
+        // Use try-catch for adding listener in case 'chrome.runtime' is gone
+        try {
+            chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+                if (message.action === 'update_overlay_state' || message.action === 'sync_overlay_state') {
+                    syncState(message.data);
+                }
+                return true;
+            });
+        } catch (e) { /* ignore */ }
         
         document.addEventListener('visibilitychange', () => {
             if (document.visibilityState === 'visible') {
-                chrome.runtime.sendMessage({ action: 'get_playback_state' }, (state) => {
-                    if (!chrome.runtime.lastError && state) {
-                        syncState(state);
+                try {
+                    if (chrome.runtime && chrome.runtime.id) {
+                        chrome.runtime.sendMessage({ action: 'get_playback_state' }, (state) => {
+                            if (!chrome.runtime.lastError && state) {
+                                syncState(state);
+                            }
+                        });
                     }
-                });
+                } catch (error) {
+                    // Context invalidated, ignore.
+                }
             }
         });
 
         // 5. Initial State Fetch
-        chrome.runtime.sendMessage({ action: 'get_playback_state' }, (initialState) => {
-            if (!chrome.runtime.lastError && initialState) {
-                syncState(initialState);
+        try {
+            if (chrome.runtime && chrome.runtime.id) {
+                chrome.runtime.sendMessage({ action: 'get_playback_state' }, (initialState) => {
+                    if (!chrome.runtime.lastError && initialState) {
+                        syncState(initialState);
+                    }
+                });
             }
-        });
+        } catch (error) {
+            // Context invalidated, ignore.
+        }
     }
 
     // --- Entry Point ---
@@ -161,4 +180,5 @@ if (!window.unlockOverlayInitialized) {
     } else {
         initializeUnlockOverlay();
     }
-}
+
+})();
