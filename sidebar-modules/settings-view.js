@@ -162,6 +162,20 @@ export function setupSettingsListeners() {
         }
     });
 
+    document.getElementById('debug-test-agent-btn')?.addEventListener('click', async () => {
+        // Reset previous result
+        if (domRefs.debugAgentResult) domRefs.debugAgentResult.style.display = 'none';
+        
+        showSettingsStatus('Running Remote Agent Test...', 'info', false);
+        const response = await sendMessageToBackground({ action: 'debug_run_remote_agent' });
+        
+        if (response.success) {
+            // Wait for the async result to come in via message
+            showSettingsStatus('Agent started... Waiting for result...', 'info', false);
+        } else {
+            showSettingsStatus(`Error: ${response.error}`, 'error');
+        }
+    });
     
     document.getElementById('debug-refresh-rules-btn')?.addEventListener('click', async () => {
         showSettingsStatus('Refreshing redirect rules...', 'info', false);
@@ -220,6 +234,17 @@ async function loadSettings() {
     } catch (error) {
         logger.error('SettingsView', 'Error loading settings into UI:', error);
         showSettingsStatus('Error loading settings', 'error');
+    }
+}
+
+export function displayAgentResult(resultText) {
+    const pre = domRefs.debugAgentResult;
+    if (pre) {
+        pre.textContent = resultText;
+        pre.style.display = 'block';
+        // Pulse animation for effect
+        pre.style.opacity = '0.5';
+        setTimeout(() => pre.style.opacity = '1', 150);
     }
 }
 

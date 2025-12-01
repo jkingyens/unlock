@@ -307,6 +307,12 @@ async function handleBackgroundMessage(message) {
                 card.classList.remove('listening-for-input');
             });
             break;
+        case 'remote_agent_result':
+            if (currentView === 'settings') {
+                settingsView.displayAgentResult(data.result);
+                showSettingsStatus('Agent execution successful!', 'success');
+            }
+            break;
         case 'draft_packet_created':
             if (data.draft) {
                 dialogHandler.hideCreateSourceDialog();
@@ -466,8 +472,11 @@ function showStatusMessage(element, message, type = 'info', autoClear = true) {
     element.className = 'status-message';
     if (type === 'error') element.classList.add('error-message');
     if (type === 'success') element.classList.add('success-message');
+
+    element.style.display = 'block'; 
     element.style.visibility = 'visible';
     element.style.opacity = '1';
+
     if (autoClear) {
         setTimeout(() => {
             if (element.textContent === message) clearStatusMessage(element);
