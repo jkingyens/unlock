@@ -77,6 +77,9 @@ export function cacheDomReferences() {
         llmEditFormSaveBtn: document.getElementById('llm-edit-form-save-btn'),
         llmEditFormCancelBtn: document.getElementById('llm-edit-form-cancel-btn'),
         
+        // Debug
+        debugAgentResult: document.getElementById('debug-agent-result'), // <--- ADD THIS
+        
         // Settings View S3 Refs
         s3ConfigsList: document.getElementById('s3-configs-list'),
         s3AddNewConfigBtn: document.getElementById('s3-add-new-config-btn'),

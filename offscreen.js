@@ -5,7 +5,7 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
 
     let audio = null;
     let timeUpdateTimer = null; // Changed from interval to timer ID
-    let isSidebarOpen = false; // NEW: Track sidebar state
+    let isSidebarOpen = false; // Track sidebar state
 
     function base64ToAb(base64) {
         const binary_string = window.atob(base64);
@@ -17,7 +17,7 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
         return bytes.buffer;
     }
 
-    // --- NEW: Dynamic Update Loop ---
+    // --- Dynamic Update Loop for Audio ---
     function scheduleTimeUpdate() {
         if (timeUpdateTimer) clearTimeout(timeUpdateTimer);
         
@@ -87,7 +87,7 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
                     audio.dataset.url = data.url;
                     audio.dataset.instanceId = data.instanceId;
 
-                    // FIX: Return a promise that waits for playback to actually start
+                    // Return a promise that waits for playback to actually start
                     return new Promise((resolve) => {
                         const onMetadata = async () => {
                             if (data.startTime) audio.currentTime = data.startTime;
@@ -147,7 +147,7 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
         return { success: true };
     }
 
-    // ... (normalizeAudioAndGetDuration, encodeWAV, interleave, readability preserved below) ...
+    // --- Audio Normalization Logic ---
     
     async function normalizeAudioAndGetDuration(audioBuffer) {
         try {
@@ -228,7 +228,22 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
         if (request.target !== 'offscreen') return false;
 
         switch (request.type) {
-            case 'set_sidebar_state': // NEW: Handle state update
+            // --- NEW: Execute Remote Agent (JCO/WASM Bridge) ---
+            case 'execute_remote_agent':
+                const sandboxFrame = document.getElementById('sandbox-frame');
+                if (sandboxFrame && sandboxFrame.contentWindow) {
+                    sandboxFrame.contentWindow.postMessage({
+                        type: 'EXECUTE_AGENT',
+                        payload: request.data // The code/wasm to run
+                    }, '*');
+                    sendResponse({ success: true, message: 'Agent execution started' });
+                } else {
+                    console.error("[Offscreen] Sandbox frame not found or not ready.");
+                    sendResponse({ success: false, error: 'Sandbox frame not ready' });
+                }
+                return false;
+
+            case 'set_sidebar_state': 
                 isSidebarOpen = request.data.isOpen;
                 // If audio is playing, the next tick of scheduleTimeUpdate will automatically pick up the new delay.
                 sendResponse({ success: true });
@@ -284,7 +299,6 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
                 }
                 return false;
             case 'control-audio':
-                // FIX: Await the async handler before sending response
                 handleAudioControl(request.data).then(sendResponse);
                 return true; // Keep channel open for async response
             case 'parse-html-for-text':
@@ -340,4 +354,49 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
     } else {
         console.error("Offscreen document loaded without chrome.runtime.onMessage. This should not happen.");
     }
+
+    // --- NEW: Listen for messages FROM the Sandbox ---
+    window.addEventListener('message', async (event) => {
+        const sandboxFrame = document.getElementById('sandbox-frame');
+        // Only accept messages from our own sandbox iframe
+        if (!sandboxFrame || event.source !== sandboxFrame.contentWindow) return;
+
+        const { type, requestId, prompt, result, error } = event.data;
+
+        // Case A: Sandbox needs AI (The JCO/JSPI Hook)
+        if (type === 'BRIDGE_AI_REQUEST') {
+            try {
+                // Ask Background to call LLM (which may use Gemini Nano or Cloud)
+                const response = await chrome.runtime.sendMessage({
+                    action: 'perform_llm_check', 
+                    data: { prompt }
+                });
+                
+                // Reply to Sandbox
+                sandboxFrame.contentWindow.postMessage({
+                    type: 'BRIDGE_AI_RESPONSE',
+                    requestId,
+                    success: response.success,
+                    data: response.data
+                }, '*');
+            } catch (err) {
+                sandboxFrame.contentWindow.postMessage({
+                    type: 'BRIDGE_AI_RESPONSE',
+                    requestId,
+                    success: false,
+                    error: err.message
+                }, '*');
+            }
+        }
+
+        // Case B: Sandbox finished execution
+        if (type === 'AGENT_EXECUTION_COMPLETE') {
+            console.log('[Offscreen] Agent finished with result:', result);
+
+            chrome.runtime.sendMessage({
+                action: 'remote_agent_complete',
+                data: { result }
+            });
+        }
+    });
 }

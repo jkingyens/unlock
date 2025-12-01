@@ -4,7 +4,7 @@
   "version": "1.97",
   "description": "Unlock your browser",
   "action": {
-    "default_popup": "popup.html", 
+    "default_popup": "popup.html",
     "default_icon": {
       "16": "images/icon16.png",
       "48": "images/icon48.png",
@@ -38,6 +38,15 @@
     "service_worker": "background.js",
     "type": "module"
   },
+  "sandbox": {
+    "pages": [
+      "sandbox.html"
+    ]
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'",
+    "sandbox": "sandbox allow-scripts; script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval' blob:; object-src 'self'"
+  },
   "web_accessible_resources": [
     {
       "resources": [
@@ -51,6 +60,16 @@
       "matches": [
         "<all_urls>"
       ]
+    },
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "resources": [
+        "**/*",
+        "*"
+      ],
+      "use_dynamic_url": false
     }
   ],
   "side_panel": {

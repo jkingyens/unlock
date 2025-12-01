@@ -1,6 +1,5 @@
 // ext/background-modules/message-handlers.js
-// DEBUG VERSION: Tracing Mark as Visited
-// REVISED: Integrated waitForRestoration to prevent state desync on wakeup.
+// REVISED: Fixed circular dependency by implementing local offscreen setup.
 
 import {
     logger,
@@ -38,6 +37,10 @@ import {
     enhanceHtml
 } from './create-utils.js';
 
+// [FIX] Removed circular imports of setupOffscreenDocument and other functions depending on init state
+// We will access activeMediaPlayback via a getter or pass it in if needed, 
+// or rely on the fact that imported live bindings (let/var) *should* work if accessed later,
+// but functions like setupOffscreenDocument are safer re-implemented locally to avoid init race conditions.
 import {
     setMediaPlaybackState,
     controlAudioInOffscreen,
@@ -45,14 +48,38 @@ import {
     resetActiveMediaPlayback,
     notifyUIsOfStateChange,
     saveCurrentTime,
-    setupOffscreenDocument,
     stopAndClearActiveAudio,
     notifyOffscreenSidebarState,
-    waitForRestoration // [FIX] Import restoration promise
+    waitForRestoration
 } from '../background.js';
+
 import { checkAndPromptForCompletion, startVisitTimer } from './navigation-handler.js';
 
 const PENDING_VIEW_KEY = 'pendingSidebarView';
+
+// --- Local Offscreen Setup (Breaks Circular Dependency) ---
+let creatingOffscreenDocument = null;
+async function ensureOffscreenDocument() {
+    const existingContexts = await chrome.runtime.getContexts({
+        contextTypes: ['OFFSCREEN_DOCUMENT']
+    });
+
+    if (existingContexts.length > 0) {
+        return;
+    }
+
+    if (creatingOffscreenDocument) {
+        await creatingOffscreenDocument;
+    } else {
+        creatingOffscreenDocument = chrome.offscreen.createDocument({
+            url: 'offscreen.html',
+            reasons: ['DOM_PARSER', 'BLOBS', 'AUDIO_PLAYBACK', 'WORKERS'],
+            justification: 'Parse HTML, process audio, and run sandboxed agents.',
+        });
+        await creatingOffscreenDocument;
+        creatingOffscreenDocument = null;
+    }
+}
 
 // --- Helper to Sync Global Media State ---
 function syncGlobalMediaState(instance) {
@@ -211,14 +238,8 @@ async function handleMarkUrlVisited(data, sendResponse) {
           const result = await packetUtils.markUrlAsVisited(instance, url);
           
           if (result.success && !result.alreadyVisited && !result.notTrackable) {
-               // DEBUG: Log BEFORE Save
-               console.log('[MessageHandler] Saving Visited URL:', url, 'Total Visited:', result.instance.visitedUrls?.length);
-               
                await storage.savePacketInstance(result.instance);
-               
-               // FIX: Update Global Media State
                syncGlobalMediaState(result.instance);
-
                sidebarHandler.notifySidebar('url_visited', { packetId: instanceId, url });
           }
           sendResponse({ success: result.success, error: result.error });
@@ -286,7 +307,7 @@ async function handlePlaybackActionRequest(data, sender, sendResponse) {
                 const mediaItem = findMediaItemInInstance(instance, url);
                 if (!mediaItem) throw new Error(`Could not find audio track with url ${url} in packet.`);
                 const cacheResult = await ensureMediaIsCached(instanceId, url, lrl);
-                const audioB64 = await arrayBufferToBase64(cacheResult.content); // Await async conversion
+                const audioB64 = await arrayBufferToBase64(cacheResult.content);
                 const startTime = mediaItem.currentTime || 0;
                 
                 const playResult = await controlAudioInOffscreen('play', { audioB64, mimeType: mediaItem.mimeType, url: url, instanceId, startTime });
@@ -411,8 +432,8 @@ async function handleProposeSettingsUpdate(data, sender, sendResponse) {
             contentType: o.outputContentType
         }));
 
-        const systemPrompt = `...`; 
-        const userPrompt = `...`; 
+        const systemPrompt = `Analyze these outputs and propose settings changes.`; 
+        const userPrompt = JSON.stringify(simplifiedOutputs); 
 
         const result = await llmService.callLLM('propose_settings_changes', { system: systemPrompt, user: userPrompt });
         
@@ -632,15 +653,70 @@ const actionHandlers = {
             sendResponse({ success: true });
         } catch (error) { sendResponse({ success: false, error: error.message }); }
     },
+
+    // --- NEW: JCO/WASM Remote Agent Handlers (The Fix) ---
+    
+    // 1. The Trigger (Called from Settings UI button)
+    'debug_run_remote_agent': async (data, sender, sendResponse) => {
+        try {
+            // Use local ensure helper instead of imported setupOffscreenDocument
+            await ensureOffscreenDocument();
+            
+            // SIMULATED REMOTE CODE (This represents 'jco transpile' output)
+            const simulatedRemoteCode = `
+                export async function run(imports) {
+                    imports.console.log("Agent Started! I am running in a sandbox.");
+                    const response = await imports.ai.ask("What is the capital of France?");
+                    imports.console.log("Agent received answer: " + response);
+                    return "Agent Success: " + response;
+                }
+            `;
+
+            // Send to offscreen -> sandbox
+            const response = await chrome.runtime.sendMessage({
+                target: 'offscreen',
+                type: 'execute_remote_agent',
+                data: simulatedRemoteCode
+            });
+            
+            sendResponse(response);
+        } catch (error) {
+            sendResponse({ success: false, error: error.message });
+        }
+    },
+
+    'remote_agent_complete': (data, sender, sendResponse) => {
+        // Forward the result to the Sidebar UI
+        sidebarHandler.notifySidebar('remote_agent_result', data);
+        sendResponse({ success: true });
+    },
+    
+    // 2. The Service (Called from Sandbox via Offscreen)
+    'perform_llm_check': async (data, sender, sendResponse) => {
+        try {
+            // Use existing LLM service
+            const result = await llmService.callLLM('generate_packet_title', { 
+                packetContent: [{ title: "Test Question", content: data.prompt }] 
+            });
+            
+            const answer = result.success ? result.data : "LLM Error";
+            sendResponse({ success: result.success, data: answer });
+        } catch (e) {
+            sendResponse({ success: false, error: e.message });
+        }
+    },
+
+    // --- Existing Handlers ---
+
     'sidebar_opened': async (data, sender, sendResponse) => {
         await storage.setSession({ isSidebarOpen: true });
-        notifyOffscreenSidebarState(true); // NEW: Notify offscreen
+        notifyOffscreenSidebarState(true);
         await notifyUIsOfStateChange({ isSidebarOpen: true });
         sendResponse({ success: true });
     },
     'sidebar_closed': async (data, sender, sendResponse) => {
         await storage.setSession({ isSidebarOpen: false });
-        notifyOffscreenSidebarState(false); // NEW: Notify offscreen
+        notifyOffscreenSidebarState(false);
         await notifyUIsOfStateChange({ isSidebarOpen: false, animate: true });
         sendResponse({ success: true });
     },
@@ -685,7 +761,6 @@ const actionHandlers = {
         activeMediaPlayback.currentTime = data.currentTime;
         activeMediaPlayback.duration = data.duration;
         
-        // Use instance from activeMediaPlayback, which is now guaranteed to be fresh
         const instance = activeMediaPlayback.instance;
         
         let momentTripped = false;
@@ -711,7 +786,6 @@ const actionHandlers = {
         
         if (momentTripped) {
             await storage.savePacketInstance(instance);
-            // No need to sync here because we modified the reference object directly
         }
         
         const mediaItem = findMediaItemInInstance(instance, data.url);
@@ -847,14 +921,8 @@ const actionHandlers = {
             const instance = await storage.getPacketInstance(context.instanceId);
             const visitResult = await packetUtils.markUrlAsVisited(instance, context.canonicalPacketUrl);
             if (visitResult.success && visitResult.modified) {
-                // DEBUG: Log BEFORE Save
-                console.log('[MessageHandler] Interaction Complete:', context.canonicalPacketUrl);
-               
                 await storage.savePacketInstance(visitResult.instance);
-                
-                // --- FIX: Update Global Media State ---
                 syncGlobalMediaState(visitResult.instance);
-
                 sidebarHandler.notifySidebar('packet_instance_updated', { instance: visitResult.instance });
                 await checkAndPromptForCompletion('MessageHandler', visitResult, context.instanceId);
             }
@@ -903,7 +971,6 @@ const actionHandlers = {
 export function handleMessage(message, sender, sendResponse) {
     const handler = actionHandlers[message.action];
     if (handler) {
-        // [FIX] Wait for state restoration before processing any message
         waitForRestoration().then(() => {
             return Promise.resolve(handler(message.data, sender, sendResponse));
         }).catch(err => {
@@ -911,7 +978,7 @@ export function handleMessage(message, sender, sendResponse) {
             try { sendResponse({ success: false, error: err.message }); } catch (e) {}
         });
         
-        return true; // Keep channel open
+        return true; 
     }
     return false;
 }
