@@ -1,5 +1,5 @@
 // ext/sandbox.js
-console.log("[Sandbox] Initialized.");
+console.log("[Sandbox] Initialized. SharedArrayBuffer:", typeof SharedArrayBuffer !== 'undefined', "WebAssembly.promising:", typeof WebAssembly.promising);
 
 const pendingRequests = new Map();
 
@@ -46,21 +46,21 @@ async function executeAgentCode(codeString) {
         console.log("[Sandbox] Loading Agent...");
         const blob = new Blob([codeString], { type: 'text/javascript' });
         const url = URL.createObjectURL(blob);
-        
+
         // 2. Import the Bundled Module
         // This module self-instantiates because we inlined the Wasm.
         // It self-wires because we bundled the bridge.
         const agentModule = await import(url);
-        
+
         // 3. Run
         if (agentModule.run) {
             console.log("[Sandbox] Running Agent...");
-            const result = await agentModule.run(); 
+            const result = await agentModule.run();
             window.parent.postMessage({ type: 'AGENT_EXECUTION_COMPLETE', result }, '*');
         } else {
             throw new Error("Agent module does not export 'run'.");
         }
-        
+
         URL.revokeObjectURL(url);
     } catch (e) {
         console.error("[Sandbox] Execution Error:", e);
