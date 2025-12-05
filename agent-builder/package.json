@@ -1,0 +1,16 @@
+{
+  "name": "agent-builder",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs && node patch-agent.mjs && node bundle.mjs && node inline-wasm.mjs && cp dist/agent.bundled.js ../agents/agent.js"
+  },
+  "dependencies": {
+    "@bytecodealliance/componentize-js": "^0.19.3",
+    "@bytecodealliance/jco": "^1.15.4"
+  },
+  "devDependencies": {
+    "@bytecodealliance/preview2-shim": "^0.17.5",
+    "esbuild": "^0.20.0"
+  }
+}

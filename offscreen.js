@@ -26,7 +26,7 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
         const delay = isSidebarOpen ? 250 : 1000;
         timeUpdateTimer = setTimeout(() => {
             if (!audio || audio.paused) return;
-            if (chrome.runtime?.id) { 
+            if (chrome.runtime?.id) {
                 chrome.runtime.sendMessage({
                     action: 'audio_time_update',
                     data: {
@@ -48,7 +48,7 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
         audio.onended = () => {
             if (timeUpdateTimer) clearTimeout(timeUpdateTimer);
             timeUpdateTimer = null;
-            if (chrome.runtime?.id) { 
+            if (chrome.runtime?.id) {
                 chrome.runtime.sendMessage({
                     action: 'media_playback_complete',
                     data: { instanceId: audio.dataset.instanceId, url: audio.dataset.url }
@@ -74,7 +74,7 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
                     return new Promise((resolve) => {
                         const onMetadata = async () => {
                             if (data.startTime) audio.currentTime = data.startTime;
-                            try { await audio.play(); resolve({ success: true, isPlaying: true, currentTime: audio.currentTime }); } 
+                            try { await audio.play(); resolve({ success: true, isPlaying: true, currentTime: audio.currentTime }); }
                             catch (e) { console.error("Audio play failed:", e); resolve({ success: false, error: e.message }); }
                         };
                         audio.addEventListener('loadedmetadata', onMetadata, { once: true });
@@ -82,13 +82,13 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
                     });
                 } else {
                     if (data.startTime) audio.currentTime = data.startTime;
-                    try { await audio.play(); return { success: true, isPlaying: true, currentTime: audio.currentTime }; } 
+                    try { await audio.play(); return { success: true, isPlaying: true, currentTime: audio.currentTime }; }
                     catch (e) { return { success: false, error: e.message }; }
                 }
             case 'pause': audio.pause(); return { success: true, isPlaying: false, currentTime: audio.currentTime };
             case 'stop': audio.pause(); audio.currentTime = 0; if (audio.src && audio.src.startsWith('blob:')) URL.revokeObjectURL(audio.src); audio.src = ''; return { success: true, isPlaying: false, currentTime: 0 };
-            case 'toggle': 
-                if (audio.paused) { try { await audio.play(); return { success: true, isPlaying: true, currentTime: audio.currentTime }; } catch(e) { return { success: false, error: e.message }; } } 
+            case 'toggle':
+                if (audio.paused) { try { await audio.play(); return { success: true, isPlaying: true, currentTime: audio.currentTime }; } catch (e) { return { success: false, error: e.message }; } }
                 else { audio.pause(); return { success: true, isPlaying: false, currentTime: audio.currentTime }; }
             case 'get_current_time': return { success: true, currentTime: audio.currentTime, isPlaying: !audio.paused };
         }
@@ -100,7 +100,7 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
         try {
             const audioContext = new (window.AudioContext || window.webkitAudioContext)();
             const originalAudioBuffer = await audioContext.decodeAudioData(audioBuffer);
-            const duration = originalAudioBuffer.duration; 
+            const duration = originalAudioBuffer.duration;
             const offlineContext = new OfflineAudioContext(originalAudioBuffer.numberOfChannels, originalAudioBuffer.length, originalAudioBuffer.sampleRate);
             const compressor = offlineContext.createDynamicsCompressor();
             compressor.threshold.setValueAtTime(-40, 0);
@@ -166,7 +166,7 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
             case 'execute_remote_agent':
                 const sandboxFrame = document.getElementById('sandbox-frame');
                 if (sandboxFrame && sandboxFrame.contentWindow) {
-                    
+
                     const payload = {
                         type: 'EXECUTE_AGENT',
                         payload: request.data
@@ -190,16 +190,16 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
                 return false; // Keep this false as we responded synchronously
             case 'set_sidebar_state': isSidebarOpen = request.data.isOpen; sendResponse({ success: true }); return false;
             case 'create-blob-url':
-                try { const blob = new Blob([request.data.html], { type: 'text/html' }); const blobUrl = URL.createObjectURL(blob); sendResponse({ success: true, blobUrl: blobUrl }); } 
+                try { const blob = new Blob([request.data.html], { type: 'text/html' }); const blobUrl = URL.createObjectURL(blob); sendResponse({ success: true, blobUrl: blobUrl }); }
                 catch (error) { sendResponse({ success: false, error: error.message }); } return false;
             case 'create-blob-url-from-buffer':
-                try { const buffer = base64ToAb(request.data.bufferB64); const blob = new Blob([buffer], { type: request.data.type }); const blobUrl = URL.createObjectURL(blob); sendResponse({ success: true, blobUrl: blobUrl }); } 
-                catch (error) { sendResponse({ success: false, error: error.message }); } return false; 
+                try { const buffer = base64ToAb(request.data.bufferB64); const blob = new Blob([buffer], { type: request.data.type }); const blobUrl = URL.createObjectURL(blob); sendResponse({ success: true, blobUrl: blobUrl }); }
+                catch (error) { sendResponse({ success: false, error: error.message }); } return false;
             case 'parse-html-for-tts-and-links':
                 try {
                     const parser = new DOMParser(); const doc = parser.parseFromString(request.data.html, 'text/html'); const context = { plainText: '', linkMappings: [] };
                     function processNode(node) {
-                        if (node.nodeType === Node.TEXT_NODE) { context.plainText += node.textContent.replace(/\s+/g, ' ').trim() + ' '; } 
+                        if (node.nodeType === Node.TEXT_NODE) { context.plainText += node.textContent.replace(/\s+/g, ' ').trim() + ' '; }
                         else if (node.nodeType === Node.ELEMENT_NODE) {
                             if (node.tagName === 'A' && node.hasAttribute('data-timestampable')) {
                                 const href = node.getAttribute('href');
@@ -246,7 +246,7 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
         }
         return false;
     }
-    
+
     if (chrome.runtime && chrome.runtime.onMessage) {
         chrome.runtime.onMessage.addListener(handleMessages);
     }
@@ -272,26 +272,29 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
         if (type === 'BRIDGE_AI_REQUEST') {
             try {
                 console.log("[Offscreen] Received AI Request:", prompt);
-                
+
                 // Options for Chrome v140+ (Canary/Dev)
                 const options = {
-                    expectedOutputLanguages: ['en']
+                    expectedOutputLanguages: ['en'],
                 };
 
                 let session;
-                
+
                 // 1. Feature Detect
-                if (window.LanguageModel) {
-                     const status = await window.LanguageModel.availability(); 
-                     if (status === 'no') throw new Error("LanguageModel.availability() returned 'no'");
-                     session = await window.LanguageModel.create(options); 
-                } 
-                else if (window.ai && window.ai.languageModel) {
+                if (window.ai && window.ai.languageModel) {
+                    console.log("[Offscreen] Using window.ai.languageModel");
                     const capabilities = await window.ai.languageModel.capabilities();
                     if (capabilities.available === 'no') throw new Error("ai.languageModel not available");
                     session = await window.ai.languageModel.create(options);
-                } 
+                }
+                else if (window.LanguageModel) {
+                    console.log("[Offscreen] Using window.LanguageModel");
+                    const status = await window.LanguageModel.availability();
+                    if (status === 'no') throw new Error("LanguageModel.availability() returned 'no'");
+                    session = await window.LanguageModel.create(options);
+                }
                 else {
+                    console.log("[Offscreen] No AI API found. window.ai:", window.ai);
                     throw new Error("No Gemini Nano API found.");
                 }
 
@@ -312,7 +315,7 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
                     success: true,
                     data: typeof answer === 'string' ? answer : JSON.stringify(answer)
                 }, '*');
-                
+
                 if (session.destroy) session.destroy();
 
             } catch (err) {
