@@ -768,13 +768,34 @@ const llmService = {
             let llmOutput;
     
             if (processor.isLocalApi) {
-                const languageModelAPI = globalThis.LanguageModel;
+                // --- FIX STARTS HERE ---
+                // Detect the available API namespace
+                const languageModelAPI = globalThis.LanguageModel || self.ai?.languageModel;
+                
                 if (!languageModelAPI || typeof languageModelAPI.create !== 'function') {
                     throw new Error('Chrome LanguageModel API is not available.');
                 }
-                const session = await languageModelAPI.create({});
-                llmOutput = await session.prompt(llmInput);
+
+                // Define the mandatory options
+                const options = {
+                    expectedOutputLanguages: ['en'] // Mandatory in Chrome v140+
+                };
+
+                // Create session with options
+                const session = await languageModelAPI.create(options);
+                
+                // Prompt the model
+                // Check for .prompt() vs .generate() compatibility
+                if (typeof session.prompt === 'function') {
+                    llmOutput = await session.prompt(llmInput);
+                } else if (typeof session.generate === 'function') {
+                    llmOutput = await session.generate(llmInput);
+                } else {
+                     throw new Error("Session created but no prompt method found.");
+                }
+
                 if(typeof session.destroy === 'function') session.destroy();
+                // --- FIX ENDS HERE ---
             } else {
                 const effectiveApiUrl = processor.constructApiUrl(apiEndpoint, modelName, apiKey);
                 const headers = { ...processor.getHeaders(apiKey) };

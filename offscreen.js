@@ -3,10 +3,14 @@
 if (typeof window.unlockOffscreenInitialized === 'undefined') {
     window.unlockOffscreenInitialized = true;
 
-    let audio = null;
-    let timeUpdateTimer = null; // Changed from interval to timer ID
-    let isSidebarOpen = false; // Track sidebar state
+    let isSandboxReady = false;
+    const sandboxMessageQueue = [];
 
+    let audio = null;
+    let timeUpdateTimer = null;
+    let isSidebarOpen = false;
+
+    // ... (Helper functions base64ToAb, scheduleTimeUpdate, setupAudioElement, handleAudioControl, normalizeAudioAndGetDuration, encodeWAV, interleave, Readability remain the same) ...
     function base64ToAb(base64) {
         const binary_string = window.atob(base64);
         const len = binary_string.length;
@@ -17,16 +21,11 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
         return bytes.buffer;
     }
 
-    // --- Dynamic Update Loop for Audio ---
     function scheduleTimeUpdate() {
         if (timeUpdateTimer) clearTimeout(timeUpdateTimer);
-        
-        // Determine delay based on visibility: 250ms if active, 1000ms if background
         const delay = isSidebarOpen ? 250 : 1000;
-        
         timeUpdateTimer = setTimeout(() => {
-            if (!audio || audio.paused) return; // Stop if paused
-
+            if (!audio || audio.paused) return;
             if (chrome.runtime?.id) { 
                 chrome.runtime.sendMessage({
                     action: 'audio_time_update',
@@ -37,7 +36,6 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
                     }
                 });
             }
-            // Schedule next tick
             scheduleTimeUpdate();
         }, delay);
     }
@@ -45,23 +43,15 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
     function setupAudioElement() {
         if (audio) return;
         audio = new Audio();
-        audio.onplay = () => {
-            scheduleTimeUpdate(); // Start the loop
-        };
-        audio.onpause = () => {
-            if (timeUpdateTimer) clearTimeout(timeUpdateTimer);
-            timeUpdateTimer = null;
-        };
+        audio.onplay = () => scheduleTimeUpdate();
+        audio.onpause = () => { if (timeUpdateTimer) clearTimeout(timeUpdateTimer); timeUpdateTimer = null; };
         audio.onended = () => {
             if (timeUpdateTimer) clearTimeout(timeUpdateTimer);
             timeUpdateTimer = null;
             if (chrome.runtime?.id) { 
                 chrome.runtime.sendMessage({
                     action: 'media_playback_complete',
-                    data: {
-                        instanceId: audio.dataset.instanceId,
-                        url: audio.dataset.url
-                    }
+                    data: { instanceId: audio.dataset.instanceId, url: audio.dataset.url }
                 });
             }
         };
@@ -73,88 +63,44 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
         switch (command) {
             case 'play':
                 const needsSrcUpdate = audio.dataset.instanceId !== data.instanceId || audio.dataset.url !== data.url;
-                
                 if (needsSrcUpdate) {
                     const audioBuffer = base64ToAb(data.audioB64);
                     const blob = new Blob([audioBuffer], { type: data.mimeType });
                     const audioUrl = URL.createObjectURL(blob);
-                    
-                    if (audio.src && audio.src.startsWith('blob:')) {
-                        URL.revokeObjectURL(audio.src);
-                    }
-                    
+                    if (audio.src && audio.src.startsWith('blob:')) URL.revokeObjectURL(audio.src);
                     audio.src = audioUrl;
                     audio.dataset.url = data.url;
                     audio.dataset.instanceId = data.instanceId;
-
-                    // Return a promise that waits for playback to actually start
                     return new Promise((resolve) => {
                         const onMetadata = async () => {
                             if (data.startTime) audio.currentTime = data.startTime;
-                            try {
-                                await audio.play();
-                                resolve({ success: true, isPlaying: true, currentTime: audio.currentTime });
-                            } catch (e) {
-                                console.error("Audio play failed after metadata load:", e);
-                                resolve({ success: false, error: e.message });
-                            }
+                            try { await audio.play(); resolve({ success: true, isPlaying: true, currentTime: audio.currentTime }); } 
+                            catch (e) { console.error("Audio play failed:", e); resolve({ success: false, error: e.message }); }
                         };
                         audio.addEventListener('loadedmetadata', onMetadata, { once: true });
                         audio.load();
                     });
-
                 } else {
                     if (data.startTime) audio.currentTime = data.startTime;
-                    try {
-                        await audio.play();
-                        return { success: true, isPlaying: true, currentTime: audio.currentTime };
-                    } catch (e) {
-                        console.error("Audio play failed:", e);
-                        return { success: false, error: e.message };
-                    }
+                    try { await audio.play(); return { success: true, isPlaying: true, currentTime: audio.currentTime }; } 
+                    catch (e) { return { success: false, error: e.message }; }
                 }
-
-            case 'pause':
-                audio.pause();
-                return { success: true, isPlaying: false, currentTime: audio.currentTime };
-            case 'stop':
-                audio.pause();
-                audio.currentTime = 0;
-                if (audio.src && audio.src.startsWith('blob:')) {
-                    URL.revokeObjectURL(audio.src);
-                }
-                audio.src = '';
-                audio.removeAttribute('src');
-                audio.dataset.url = '';
-                audio.dataset.instanceId = '';
-                return { success: true, isPlaying: false, currentTime: 0 };
-            case 'toggle':
-                if (audio.paused) {
-                    try {
-                        await audio.play();
-                        return { success: true, isPlaying: true, currentTime: audio.currentTime };
-                    } catch(e) {
-                        console.error(e);
-                        return { success: false, error: e.message };
-                    }
-                } else {
-                    audio.pause();
-                    return { success: true, isPlaying: false, currentTime: audio.currentTime };
-                }
-            case 'get_current_time':
-                return { success: true, currentTime: audio.currentTime, isPlaying: !audio.paused };
+            case 'pause': audio.pause(); return { success: true, isPlaying: false, currentTime: audio.currentTime };
+            case 'stop': audio.pause(); audio.currentTime = 0; if (audio.src && audio.src.startsWith('blob:')) URL.revokeObjectURL(audio.src); audio.src = ''; return { success: true, isPlaying: false, currentTime: 0 };
+            case 'toggle': 
+                if (audio.paused) { try { await audio.play(); return { success: true, isPlaying: true, currentTime: audio.currentTime }; } catch(e) { return { success: false, error: e.message }; } } 
+                else { audio.pause(); return { success: true, isPlaying: false, currentTime: audio.currentTime }; }
+            case 'get_current_time': return { success: true, currentTime: audio.currentTime, isPlaying: !audio.paused };
         }
         return { success: true };
     }
 
-    // --- Audio Normalization Logic ---
-    
+    // ... (normalizeAudioAndGetDuration, encodeWAV, interleave, Readability) ...
     async function normalizeAudioAndGetDuration(audioBuffer) {
         try {
             const audioContext = new (window.AudioContext || window.webkitAudioContext)();
             const originalAudioBuffer = await audioContext.decodeAudioData(audioBuffer);
             const duration = originalAudioBuffer.duration; 
-
             const offlineContext = new OfflineAudioContext(originalAudioBuffer.numberOfChannels, originalAudioBuffer.length, originalAudioBuffer.sampleRate);
             const compressor = offlineContext.createDynamicsCompressor();
             compressor.threshold.setValueAtTime(-40, 0);
@@ -168,12 +114,8 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
             compressor.connect(offlineContext.destination);
             source.start(0);
             const processedAudioBuffer = await offlineContext.startRendering();
-            
             return { wavBuffer: encodeWAV(processedAudioBuffer), duration: duration };
-        } catch (error) {
-            console.error('[Offscreen] Audio normalization failed:', error);
-            throw error;
-        }
+        } catch (error) { console.error('[Offscreen] Audio normalization failed:', error); throw error; }
     }
 
     function encodeWAV(audioBuffer) {
@@ -196,20 +138,13 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
         writeString(view, offset, 'data'); offset += 4;
         view.setUint32(offset, dataLength, true); offset += 4;
         let lng = result.length, index = 44, volume = 1;
-        for (let i = 0; i < lng; i++) {
-            view.setInt16(index, result[i] * (0x7FFF * volume), true);
-            index += 2;
-        }
+        for (let i = 0; i < lng; i++) { view.setInt16(index, result[i] * (0x7FFF * volume), true); index += 2; }
         return view.buffer;
     }
 
     function interleave(inputL, inputR) {
         let length = inputL.length + inputR.length, result = new Float32Array(length), index = 0, inputIndex = 0;
-        while (index < length) {
-            result[index++] = inputL[inputIndex];
-            result[index++] = inputR[inputIndex];
-            inputIndex++;
-        }
+        while (index < length) { result[index++] = inputL[inputIndex]; result[index++] = inputR[inputIndex]; inputIndex++; }
         return result;
     }
 
@@ -228,171 +163,172 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
         if (request.target !== 'offscreen') return false;
 
         switch (request.type) {
-            // --- NEW: Execute Remote Agent (JCO/WASM Bridge) ---
             case 'execute_remote_agent':
                 const sandboxFrame = document.getElementById('sandbox-frame');
                 if (sandboxFrame && sandboxFrame.contentWindow) {
-                    sandboxFrame.contentWindow.postMessage({
+                    
+                    const payload = {
                         type: 'EXECUTE_AGENT',
-                        payload: request.data // The code/wasm to run
-                    }, '*');
-                    sendResponse({ success: true, message: 'Agent execution started' });
+                        payload: request.data
+                    };
+
+                    if (isSandboxReady) {
+                        // Sandbox is ready, send immediately
+                        sandboxFrame.contentWindow.postMessage(payload, '*');
+                        console.log("[Offscreen] Agent sent to sandbox (Immediate)");
+                    } else {
+                        // Sandbox loading, queue it
+                        sandboxMessageQueue.push(payload);
+                        console.log("[Offscreen] Agent queued (Waiting for Sandbox)");
+                    }
+
+                    sendResponse({ success: true, message: 'Agent queued/forwarded' });
                 } else {
-                    console.error("[Offscreen] Sandbox frame not found or not ready.");
+                    console.error("[Offscreen] Sandbox frame missing.");
                     sendResponse({ success: false, error: 'Sandbox frame not ready' });
                 }
-                return false;
-
-            case 'set_sidebar_state': 
-                isSidebarOpen = request.data.isOpen;
-                // If audio is playing, the next tick of scheduleTimeUpdate will automatically pick up the new delay.
-                sendResponse({ success: true });
-                return false;
+                return false; // Keep this false as we responded synchronously
+            case 'set_sidebar_state': isSidebarOpen = request.data.isOpen; sendResponse({ success: true }); return false;
             case 'create-blob-url':
-                try {
-                    const blob = new Blob([request.data.html], { type: 'text/html' });
-                    const blobUrl = URL.createObjectURL(blob);
-                    sendResponse({ success: true, blobUrl: blobUrl });
-                } catch (error) {
-                    sendResponse({ success: false, error: error.message });
-                }
-                return false;
+                try { const blob = new Blob([request.data.html], { type: 'text/html' }); const blobUrl = URL.createObjectURL(blob); sendResponse({ success: true, blobUrl: blobUrl }); } 
+                catch (error) { sendResponse({ success: false, error: error.message }); } return false;
             case 'create-blob-url-from-buffer':
-                try {
-                    const buffer = base64ToAb(request.data.bufferB64);
-                    const blob = new Blob([buffer], { type: request.data.type });
-                    const blobUrl = URL.createObjectURL(blob);
-                    sendResponse({ success: true, blobUrl: blobUrl });
-                } catch (error) {
-                    sendResponse({ success: false, error: error.message });
-                }
-                return false; 
+                try { const buffer = base64ToAb(request.data.bufferB64); const blob = new Blob([buffer], { type: request.data.type }); const blobUrl = URL.createObjectURL(blob); sendResponse({ success: true, blobUrl: blobUrl }); } 
+                catch (error) { sendResponse({ success: false, error: error.message }); } return false; 
             case 'parse-html-for-tts-and-links':
                 try {
-                    const parser = new DOMParser();
-                    const doc = parser.parseFromString(request.data.html, 'text/html');
-                    const context = { plainText: '', linkMappings: [] };
+                    const parser = new DOMParser(); const doc = parser.parseFromString(request.data.html, 'text/html'); const context = { plainText: '', linkMappings: [] };
                     function processNode(node) {
-                        if (node.nodeType === Node.TEXT_NODE) {
-                            context.plainText += node.textContent.replace(/\s+/g, ' ').trim() + ' ';
-                        } else if (node.nodeType === Node.ELEMENT_NODE) {
+                        if (node.nodeType === Node.TEXT_NODE) { context.plainText += node.textContent.replace(/\s+/g, ' ').trim() + ' '; } 
+                        else if (node.nodeType === Node.ELEMENT_NODE) {
                             if (node.tagName === 'A' && node.hasAttribute('data-timestampable')) {
                                 const href = node.getAttribute('href');
-                                if (href && !context.linkMappings.some(m => m.href === href)) {
-                                    context.linkMappings.push({
-                                        href: href,
-                                        text: node.textContent.trim(),
-                                        charIndex: context.plainText.length
-                                    });
-                                }
+                                if (href && !context.linkMappings.some(m => m.href === href)) { context.linkMappings.push({ href: href, text: node.textContent.trim(), charIndex: context.plainText.length }); }
                             }
                             node.childNodes.forEach(processNode);
-                            const blockElements = ['P', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'DIV', 'LI'];
-                            if (blockElements.includes(node.tagName)) context.plainText += '\n';
+                            if (['P', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'DIV', 'LI'].includes(node.tagName)) context.plainText += '\n';
                         }
                     }
-                    processNode(doc.body);
-                    context.plainText = context.plainText.replace(/\s+/g, ' ').trim();
-                    sendResponse({ success: true, data: { plainText: context.plainText, linkMappings: context.linkMappings } });
-                } catch (error) {
-                    sendResponse({ success: false, error: error.message });
-                }
-                return false;
-            case 'control-audio':
-                handleAudioControl(request.data).then(sendResponse);
-                return true; // Keep channel open for async response
+                    processNode(doc.body); context.plainText = context.plainText.replace(/\s+/g, ' ').trim(); sendResponse({ success: true, data: { plainText: context.plainText, linkMappings: context.linkMappings } });
+                } catch (error) { sendResponse({ success: false, error: error.message }); } return false;
+            case 'control-audio': handleAudioControl(request.data).then(sendResponse); return true;
             case 'parse-html-for-text':
             case 'parse-html-for-text-with-markers':
             case 'parse-html-for-links':
                 try {
-                    const parser = new DOMParser();
-                    const doc = parser.parseFromString(request.data, 'text/html');
+                    const parser = new DOMParser(); const doc = parser.parseFromString(request.data, 'text/html');
                     if (request.type === 'parse-html-for-links') {
                         const links = Array.from(doc.querySelectorAll('a[data-timestampable="true"]')).map(link => ({ href: link.getAttribute('href'), text: link.textContent.trim() }));
                         sendResponse({ success: true, data: links });
                     } else {
                         if (request.type === 'parse-html-for-text-with-markers') {
-                            doc.querySelectorAll('a[data-timestampable="true"]').forEach(link => {
-                                link.parentNode.replaceChild(document.createTextNode(`*${link.textContent.trim()}*`), link);
-                            });
+                            doc.querySelectorAll('a[data-timestampable="true"]').forEach(link => { link.parentNode.replaceChild(document.createTextNode(`*${link.textContent.trim()}*`), link); });
                         }
-                        const reader = new readability.Readability(doc);
-                        const article = reader.parse();
-                        sendResponse({ success: true, data: article ? article.textContent : "" });
+                        const reader = new readability.Readability(doc); const article = reader.parse(); sendResponse({ success: true, data: article ? article.textContent : "" });
                     }
-                } catch (error) {
-                    sendResponse({ success: false, error: error.message });
-                }
-                return false;
+                } catch (error) { sendResponse({ success: false, error: error.message }); } return false;
             case 'normalize-audio':
                 if (request.data && request.data.base64) {
                     normalizeAudioAndGetDuration(base64ToAb(request.data.base64)).then(result => {
                         const processedBase64 = btoa(new Uint8Array(result.wavBuffer).reduce((data, byte) => data + String.fromCharCode(byte), ''));
                         sendResponse({ success: true, data: { base64: processedBase64, type: 'audio/wav', duration: result.duration } });
                     }).catch(error => sendResponse({ success: false, error: error.message }));
-                } else {
-                    sendResponse({ success: false, error: 'No audio data provided.' });
-                }
-                return true;
+                } else { sendResponse({ success: false, error: 'No audio data provided.' }); } return true;
             case 'get-audio-duration':
                 if (request.data && request.data.base64) {
                     try {
-                        const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-                        const audioBuffer = base64ToAb(request.data.base64);
+                        const audioContext = new (window.AudioContext || window.webkitAudioContext)(); const audioBuffer = base64ToAb(request.data.base64);
                         audioContext.decodeAudioData(audioBuffer)
                             .then(decodedData => { sendResponse({ success: true, duration: decodedData.duration }); })
                             .catch(e => { console.error('[Offscreen] Audio decoding failed:', e); sendResponse({ success: false, error: 'Audio decoding failed.' }); });
                     } catch (e) { sendResponse({ success: false, error: e.message }); }
-                } else { sendResponse({ success: false, error: 'No audio data provided.' }); }
-                return true;
+                } else { sendResponse({ success: false, error: 'No audio data provided.' }); } return true;
         }
         return false;
     }
     
     if (chrome.runtime && chrome.runtime.onMessage) {
         chrome.runtime.onMessage.addListener(handleMessages);
-    } else {
-        console.error("Offscreen document loaded without chrome.runtime.onMessage. This should not happen.");
     }
 
-    // --- NEW: Listen for messages FROM the Sandbox ---
+    // --- DIRECT AI HANDLER ---
     window.addEventListener('message', async (event) => {
         const sandboxFrame = document.getElementById('sandbox-frame');
-        // Only accept messages from our own sandbox iframe
         if (!sandboxFrame || event.source !== sandboxFrame.contentWindow) return;
 
-        const { type, requestId, prompt, result, error } = event.data;
+        const { type, requestId, prompt, result } = event.data;
 
-        // Case A: Sandbox needs AI (The JCO/JSPI Hook)
+        if (type === 'SANDBOX_READY') {
+            console.log("[Offscreen] Sandbox reported ready. Flushing queue...");
+            isSandboxReady = true;
+            while (sandboxMessageQueue.length > 0) {
+                const payload = sandboxMessageQueue.shift();
+                sandboxFrame.contentWindow.postMessage(payload, '*');
+            }
+            return;
+        }
+
+        // Case A: Sandbox needs AI
         if (type === 'BRIDGE_AI_REQUEST') {
             try {
-                // Ask Background to call LLM (which may use Gemini Nano or Cloud)
-                const response = await chrome.runtime.sendMessage({
-                    action: 'perform_llm_check', 
-                    data: { prompt }
-                });
+                console.log("[Offscreen] Received AI Request:", prompt);
                 
-                // Reply to Sandbox
+                // Options for Chrome v140+ (Canary/Dev)
+                const options = {
+                    expectedOutputLanguages: ['en']
+                };
+
+                let session;
+                
+                // 1. Feature Detect
+                if (window.LanguageModel) {
+                     const status = await window.LanguageModel.availability(); 
+                     if (status === 'no') throw new Error("LanguageModel.availability() returned 'no'");
+                     session = await window.LanguageModel.create(options); 
+                } 
+                else if (window.ai && window.ai.languageModel) {
+                    const capabilities = await window.ai.languageModel.capabilities();
+                    if (capabilities.available === 'no') throw new Error("ai.languageModel not available");
+                    session = await window.ai.languageModel.create(options);
+                } 
+                else {
+                    throw new Error("No Gemini Nano API found.");
+                }
+
+                // 2. Prompt
+                let answer;
+                if (typeof session.prompt === 'function') {
+                    answer = await session.prompt(prompt);
+                } else if (typeof session.generate === 'function') {
+                    answer = await session.generate(prompt);
+                } else {
+                    throw new Error("Session created but no prompt method found.");
+                }
+
+                // 3. Reply
                 sandboxFrame.contentWindow.postMessage({
                     type: 'BRIDGE_AI_RESPONSE',
                     requestId,
-                    success: response.success,
-                    data: response.data
+                    success: true,
+                    data: typeof answer === 'string' ? answer : JSON.stringify(answer)
                 }, '*');
+                
+                if (session.destroy) session.destroy();
+
             } catch (err) {
+                console.error("[Offscreen] AI Failed:", err);
                 sandboxFrame.contentWindow.postMessage({
                     type: 'BRIDGE_AI_RESPONSE',
                     requestId,
                     success: false,
-                    error: err.message
+                    error: err.message || "Unknown AI Error"
                 }, '*');
             }
         }
 
         // Case B: Sandbox finished execution
         if (type === 'AGENT_EXECUTION_COMPLETE') {
-            console.log('[Offscreen] Agent finished with result:', result);
-
+            console.log('[Offscreen] Agent finished:', result);
             chrome.runtime.sendMessage({
                 action: 'remote_agent_complete',
                 data: { result }

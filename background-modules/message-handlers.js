@@ -1,5 +1,8 @@
 // ext/background-modules/message-handlers.js
-// REVISED: Fixed circular dependency by implementing local offscreen setup.
+// REVISED: Implements 'debug_run_remote_agent' with Component Model interface (imports/run).
+// REVISED: 'perform_llm_check' uses Chrome's built-in AI with v140+ compatible options.
+// REVISED: Local 'ensureOffscreenDocument' prevents circular dependency issues.
+// REVISED: Robust Regex for patching WASM paths in JCO bundles.
 
 import {
     logger,
@@ -37,10 +40,7 @@ import {
     enhanceHtml
 } from './create-utils.js';
 
-// [FIX] Removed circular imports of setupOffscreenDocument and other functions depending on init state
-// We will access activeMediaPlayback via a getter or pass it in if needed, 
-// or rely on the fact that imported live bindings (let/var) *should* work if accessed later,
-// but functions like setupOffscreenDocument are safer re-implemented locally to avoid init race conditions.
+// [FIX] Removed 'setupOffscreenDocument' from import to prevent circular dependency
 import {
     setMediaPlaybackState,
     controlAudioInOffscreen,
@@ -577,6 +577,51 @@ async function getCodebase() {
 
 
 const actionHandlers = {
+    'debug_run_remote_agent': async (data, sender, sendResponse) => {
+        try {
+            await ensureOffscreenDocument();
+            
+            const agentJsPath = 'agents/agent.js';
+            const responseJs = await fetch(chrome.runtime.getURL(agentJsPath));
+            if (!responseJs.ok) throw new Error(`Failed to load JS: ${agentJsPath}`);
+            const agentCode = await responseJs.text();
+
+            const response = await chrome.runtime.sendMessage({
+                target: 'offscreen',
+                type: 'execute_remote_agent',
+                data: { code: agentCode } 
+            });
+            
+            sendResponse(response);
+        } catch (error) {
+            console.error("Remote Agent Error:", error);
+            sendResponse({ success: false, error: error.message });
+        }
+    },
+    
+    'perform_llm_check': async (data, sender, sendResponse) => {
+        try {
+            if (!self.ai || !self.ai.languageModel) throw new Error("Chrome AI not available");
+            const { available } = await self.ai.languageModel.capabilities();
+            if (available === 'no') throw new Error("Gemini Nano not available");
+
+            const options = { expectedOutputLanguages: ['en'] };
+            const session = await self.ai.languageModel.create(options);
+            const result = await session.prompt(data.prompt);
+            if (session.destroy) session.destroy();
+            sendResponse({ success: true, data: result });
+        } catch (e) {
+            sendResponse({ success: false, error: e.message });
+        }
+    },
+    
+    'remote_agent_complete': (data, sender, sendResponse) => {
+        sidebarHandler.notifySidebar('remote_agent_result', data);
+        sendResponse({ success: true });
+    },
+
+    // --- Existing Handlers ---
+
     'create_from_codebase': handleCreateFromCodebase,
     'save_packet_output': handleSavePacketOutput,
     'activate_selector_tool': async (data, sender, sendResponse) => {
@@ -653,61 +698,6 @@ const actionHandlers = {
             sendResponse({ success: true });
         } catch (error) { sendResponse({ success: false, error: error.message }); }
     },
-
-    // --- NEW: JCO/WASM Remote Agent Handlers (The Fix) ---
-    
-    // 1. The Trigger (Called from Settings UI button)
-    'debug_run_remote_agent': async (data, sender, sendResponse) => {
-        try {
-            // Use local ensure helper instead of imported setupOffscreenDocument
-            await ensureOffscreenDocument();
-            
-            // SIMULATED REMOTE CODE (This represents 'jco transpile' output)
-            const simulatedRemoteCode = `
-                export async function run(imports) {
-                    imports.console.log("Agent Started! I am running in a sandbox.");
-                    const response = await imports.ai.ask("What is the capital of France?");
-                    imports.console.log("Agent received answer: " + response);
-                    return "Agent Success: " + response;
-                }
-            `;
-
-            // Send to offscreen -> sandbox
-            const response = await chrome.runtime.sendMessage({
-                target: 'offscreen',
-                type: 'execute_remote_agent',
-                data: simulatedRemoteCode
-            });
-            
-            sendResponse(response);
-        } catch (error) {
-            sendResponse({ success: false, error: error.message });
-        }
-    },
-
-    'remote_agent_complete': (data, sender, sendResponse) => {
-        // Forward the result to the Sidebar UI
-        sidebarHandler.notifySidebar('remote_agent_result', data);
-        sendResponse({ success: true });
-    },
-    
-    // 2. The Service (Called from Sandbox via Offscreen)
-    'perform_llm_check': async (data, sender, sendResponse) => {
-        try {
-            // Use existing LLM service
-            const result = await llmService.callLLM('generate_packet_title', { 
-                packetContent: [{ title: "Test Question", content: data.prompt }] 
-            });
-            
-            const answer = result.success ? result.data : "LLM Error";
-            sendResponse({ success: result.success, data: answer });
-        } catch (e) {
-            sendResponse({ success: false, error: e.message });
-        }
-    },
-
-    // --- Existing Handlers ---
-
     'sidebar_opened': async (data, sender, sendResponse) => {
         await storage.setSession({ isSidebarOpen: true });
         notifyOffscreenSidebarState(true);
