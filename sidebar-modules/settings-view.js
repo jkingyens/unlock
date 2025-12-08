@@ -113,7 +113,7 @@ export function setupSettingsListeners() {
     });
     s.llmHelpLink?.addEventListener('click', (e) => { e.preventDefault(); openHelpPage('llm_help.html'); });
     s.s3HelpLink?.addEventListener('click', (e) => { e.preventDefault(); openHelpPage('s3_help.html'); });
-    
+
     // ElevenLabs API Key
     const elevenLabsApiKeyInput = document.getElementById('elevenlabs-api-key');
     const toggleElevenlabsApiKeyVisibilityBtn = document.getElementById('toggle-elevenlabs-api-key-visibility');
@@ -124,7 +124,7 @@ export function setupSettingsListeners() {
     if (toggleElevenlabsApiKeyVisibilityBtn) {
         toggleElevenlabsApiKeyVisibilityBtn.addEventListener('click', () => toggleVisibility(elevenLabsApiKeyInput, toggleElevenlabsApiKeyVisibilityBtn));
     }
-    
+
     // --- START OF FIX: Add listeners for new debug buttons ---
     document.getElementById('debug-clear-data-btn')?.addEventListener('click', async () => {
         const confirmed = await showConfirmDialog(
@@ -165,10 +165,15 @@ export function setupSettingsListeners() {
     document.getElementById('debug-test-agent-btn')?.addEventListener('click', async () => {
         // Reset previous result
         if (domRefs.debugAgentResult) domRefs.debugAgentResult.style.display = 'none';
-        
+
         showSettingsStatus('Running Remote Agent Test...', 'info', false);
-        const response = await sendMessageToBackground({ action: 'debug_run_remote_agent' });
-        
+        const response = await sendMessageToBackground({
+            action: 'debug_run_remote_agent',
+            data: {
+                userCode: "const a = 100; const b = 42; return `Dynamic Result from Wasm: ${a} + ${b} = ${a+b}`;"
+            }
+        });
+
         if (response.success) {
             // Wait for the async result to come in via message
             showSettingsStatus('Agent started... Waiting for result...', 'info', false);
@@ -176,7 +181,7 @@ export function setupSettingsListeners() {
             showSettingsStatus(`Error: ${response.error}`, 'error');
         }
     });
-    
+
     document.getElementById('debug-refresh-rules-btn')?.addEventListener('click', async () => {
         showSettingsStatus('Refreshing redirect rules...', 'info', false);
         await sendMessageToBackground({ action: 'request_rule_refresh' });
@@ -198,12 +203,12 @@ export async function prepareSettingsView() {
 async function loadSettings() {
     try {
         const loadedSettings = await storage.getSettings();
-        
+
         currentLlmModelsSetting = loadedSettings.llmModels || [];
         currentSelectedModelIdSetting = loadedSettings.selectedModelId;
         renderLlmModelsList();
         hideLlmEditForm();
-        
+
         currentStorageConfigsSetting = loadedSettings.storageConfigs || [];
         currentActiveStorageIdSetting = loadedSettings.activeStorageId || null;
         renderStorageConfigsList();
@@ -225,7 +230,7 @@ async function loadSettings() {
         if (domRefs.themeAutoRadio) domRefs.themeAutoRadio.checked = theme === 'auto';
         if (domRefs.themeLightRadio) domRefs.themeLightRadio.checked = theme === 'light';
         if (domRefs.themeDarkRadio) domRefs.themeDarkRadio.checked = theme === 'dark';
-        
+
         const elevenLabsApiKeyInput = document.getElementById('elevenlabs-api-key');
         if (elevenLabsApiKeyInput) {
             elevenLabsApiKeyInput.value = loadedSettings.elevenlabsApiKey || '';
@@ -336,7 +341,7 @@ async function gatherAndSaveSettings() {
         };
         await storage.saveSettings(settingsToSave);
         showSettingsStatus('Settings saved.', 'success');
-        
+
         if (oldSettings.themePreference !== settingsToSave.themePreference) {
             await applyThemeMode();
             await sendMessageToBackground({ action: 'theme_preference_updated' });
@@ -411,7 +416,7 @@ function saveLlmModelFromForm() {
     } else {
         currentLlmModelsSetting.push(modelData);
     }
-    
+
     if (!currentLlmModelsSetting.some(m => m.id === currentSelectedModelIdSetting)) {
         currentSelectedModelIdSetting = currentLlmModelsSetting[0]?.id || null;
     }
@@ -424,7 +429,7 @@ function saveLlmModelFromForm() {
 async function deleteLlmModel(modelId) {
     const modelName = currentLlmModelsSetting.find(m => m.id === modelId)?.name || 'this model';
     if (!await showConfirmDialog(`Delete LLM configuration "${modelName}"?`, 'Delete', 'Cancel', true)) return;
-    
+
     currentLlmModelsSetting = currentLlmModelsSetting.filter(m => m.id !== modelId);
     if (currentSelectedModelIdSetting === modelId) {
         currentSelectedModelIdSetting = currentLlmModelsSetting[0]?.id || null;

@@ -11,5 +11,5 @@ interface host-console {
 world agent {
   import host-capabilities;
   import host-console;
-  export run: func() -> string;
+  export run-code: func(code: string) -> string;
 }

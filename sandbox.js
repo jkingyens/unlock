@@ -37,11 +37,11 @@ window.addEventListener('message', (event) => {
     }
 
     if (type === 'EXECUTE_AGENT') {
-        executeAgentCode(payload.code);
+        executeAgentCode(payload.code, payload);
     }
 });
 
-async function executeAgentCode(codeString) {
+async function executeAgentCode(codeString, payload) {
     try {
         console.log("[Sandbox] Loading Agent...");
         const blob = new Blob([codeString], { type: 'text/javascript' });
@@ -53,12 +53,36 @@ async function executeAgentCode(codeString) {
         const agentModule = await import(url);
 
         // 3. Run
-        if (agentModule.run) {
-            console.log("[Sandbox] Running Agent...");
+        if (agentModule.runCode) {
+            console.log("[Sandbox] Running Agent (Eval Mode)...");
+            // Pass the code string to the agent. Ideally this comes from payload.code but 
+            // the current flow instantiates the blob URL *containing* the agent. 
+            // Wait, the Architecture is: 
+            // 1. debug_run_remote_agent fetches `agents/agent.js`
+            // 2. sends it to sandbox.
+            // 3. sandbox loads it.
+            // 
+            // Use Case: "Universal Eval Agent"
+            // The agent.js we just built is GENERIC. It expects `runCode(userCode)`.
+            // But currently `executeAgentCode` assumes the loaded module *starts* the work.
+            //
+            // FIX: We need to separate the "Agent Runtime" from the "User Code".
+            // For now, let's assume the `codeString` passed to `executeAgentCode` IS the `agent.js` bundle.
+            // But we need the *User's script* to pass to `runCode`.
+            //
+            // Hack for now: We will execute a hardcoded "Hello World" or accept a secondary payload.
+            // Better: update executeAgentCode signature.
+
+            const userScript = payload.args?.code || "return 'No code provided'";
+            const result = await agentModule.runCode(userScript);
+            window.parent.postMessage({ type: 'AGENT_EXECUTION_COMPLETE', result }, '*');
+        } else if (agentModule.run) {
+            // Backward compat
+            console.log("[Sandbox] Running Agent (Standard Mode)...");
             const result = await agentModule.run();
             window.parent.postMessage({ type: 'AGENT_EXECUTION_COMPLETE', result }, '*');
         } else {
-            throw new Error("Agent module does not export 'run'.");
+            throw new Error("Agent module does not export 'run' or 'runCode'.");
         }
 
         URL.revokeObjectURL(url);
