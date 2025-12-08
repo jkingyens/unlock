@@ -20,7 +20,7 @@ import {
     sanitizeForFileName
 } from '../utils.js';
 import * as tabGroupHandler from './tab-group-handler.js';
-import * as sidebarHandler from './sidebar-handler.js'; 
+import * as sidebarHandler from './sidebar-handler.js';
 import cloudStorage from '../cloud-storage.js';
 import llmService from '../llm_service.js';
 import * as ruleManager from './rule-manager.js';
@@ -118,14 +118,14 @@ async function processDeletePacketsRequest(data) {
             const instance = await storage.getPacketInstance(instanceId);
             if (!instance) {
                 logger.warn('MessageHandler:delete', `Instance ${instanceId} not found, cleaning up any stale artifacts.`);
-                await storage.deletePacketBrowserState(instanceId).catch(()=>{});
+                await storage.deletePacketBrowserState(instanceId).catch(() => { });
                 await ruleManager.removePacketRules(instanceId);
                 continue;
             }
 
             const runtime = new PacketRuntime(instance);
             await runtime.delete();
-            
+
             await storage.deletePacketInstance(instanceId);
 
             sidebarHandler.notifySidebar('packet_instance_deleted', { packetId: instanceId, source: 'user_action' });
@@ -140,7 +140,7 @@ async function processDeletePacketsRequest(data) {
         success: errors.length === 0, deletedCount, totalRequested: packetIds.length, errors,
         message: errors.length > 0 ? `${deletedCount} deleted, ${errors.length} failed.` : `${deletedCount} packet(s) deleted successfully.`
     };
-    
+
     sidebarHandler.notifySidebar('packet_deletion_complete', result);
     return result;
 }
@@ -172,17 +172,17 @@ async function handleGetContextForTab(data, sender, sendResponse) {
         let instanceData = null;
         let tabData = null;
 
-         try { tabData = await chrome.tabs.get(tabId); } catch (tabError) { /* ignore */ }
+        try { tabData = await chrome.tabs.get(tabId); } catch (tabError) { /* ignore */ }
 
         if (instanceId) {
-             try {
-                 instanceData = await storage.getPacketInstance(instanceId);
-                 if (!instanceData) {
-                      await clearPacketContext(tabId);
-                 }
-             } catch (instanceError) {
-                  await clearPacketContext(tabId);
-             }
+            try {
+                instanceData = await storage.getPacketInstance(instanceId);
+                if (!instanceData) {
+                    await clearPacketContext(tabId);
+                }
+            } catch (instanceError) {
+                await clearPacketContext(tabId);
+            }
         }
 
         const responseData = {
@@ -197,17 +197,17 @@ async function handleGetContextForTab(data, sender, sendResponse) {
 }
 
 async function handleGetCurrentTabContext(data, sender, sendResponse) {
-     try {
-          const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-          if (!tabs || tabs.length === 0) {
-               sendResponse({ success: true, tabId: null, instanceId: null, instance: null, packetUrl: null, currentUrl: null, title: null });
-               return;
-          }
-          const activeTab = tabs[0];
-          await handleGetContextForTab({ tabId: activeTab.id }, sender, sendResponse);
-     } catch (error) {
-          sendResponse({ success: false, error: error.message });
-     }
+    try {
+        const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (!tabs || tabs.length === 0) {
+            sendResponse({ success: true, tabId: null, instanceId: null, instance: null, packetUrl: null, currentUrl: null, title: null });
+            return;
+        }
+        const activeTab = tabs[0];
+        await handleGetContextForTab({ tabId: activeTab.id }, sender, sendResponse);
+    } catch (error) {
+        sendResponse({ success: false, error: error.message });
+    }
 }
 
 async function handleGetPageDetailsFromDOM(sender, sendResponse) {
@@ -215,7 +215,7 @@ async function handleGetPageDetailsFromDOM(sender, sendResponse) {
         const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
         if (!activeTab || typeof activeTab.id !== 'number') throw new Error("Could not find the current active tab.");
         if (!activeTab.url || activeTab.url.startsWith('chrome://') || activeTab.url.startsWith('chrome-extension://')) {
-             throw new Error("Cannot access content of special browser pages.");
+            throw new Error("Cannot access content of special browser pages.");
         }
         const injectionResults = await chrome.scripting.executeScript({
             target: { tabId: activeTab.id },
@@ -229,23 +229,23 @@ async function handleGetPageDetailsFromDOM(sender, sendResponse) {
 }
 
 async function handleMarkUrlVisited(data, sendResponse) {
-     const { packetId: instanceId, url } = data;
-     if (!instanceId || !url) return sendResponse({ success: false, error: 'Missing instanceId or url' });
-     try {
-          const instance = await storage.getPacketInstance(instanceId);
-          if (!instance) return sendResponse({ success: false, error: 'Instance not found.' });
-          
-          const result = await packetUtils.markUrlAsVisited(instance, url);
-          
-          if (result.success && !result.alreadyVisited && !result.notTrackable) {
-               await storage.savePacketInstance(result.instance);
-               syncGlobalMediaState(result.instance);
-               sidebarHandler.notifySidebar('url_visited', { packetId: instanceId, url });
-          }
-          sendResponse({ success: result.success, error: result.error });
-     } catch (error) {
-          sendResponse({ success: false, error: error.message });
-     }
+    const { packetId: instanceId, url } = data;
+    if (!instanceId || !url) return sendResponse({ success: false, error: 'Missing instanceId or url' });
+    try {
+        const instance = await storage.getPacketInstance(instanceId);
+        if (!instance) return sendResponse({ success: false, error: 'Instance not found.' });
+
+        const result = await packetUtils.markUrlAsVisited(instance, url);
+
+        if (result.success && !result.alreadyVisited && !result.notTrackable) {
+            await storage.savePacketInstance(result.instance);
+            syncGlobalMediaState(result.instance);
+            sidebarHandler.notifySidebar('url_visited', { packetId: instanceId, url });
+        }
+        sendResponse({ success: result.success, error: result.error });
+    } catch (error) {
+        sendResponse({ success: false, error: error.message });
+    }
 }
 
 async function handleReorderPacketTabs(data, sendResponse) {
@@ -253,7 +253,7 @@ async function handleReorderPacketTabs(data, sendResponse) {
     if (!(await shouldUseTabGroups())) { return sendResponse({ success: false, error: 'Tab Groups feature is disabled in settings.' }); }
     if (!instanceId) { return sendResponse({ success: false, error: 'Missing instanceId' }); }
     try {
-        const [instance, browserState] = await Promise.all([ storage.getPacketInstance(instanceId), storage.getPacketBrowserState(instanceId) ]);
+        const [instance, browserState] = await Promise.all([storage.getPacketInstance(instanceId), storage.getPacketBrowserState(instanceId)]);
         if (!instance) return sendResponse({ success: false, error: 'Packet instance not found' });
         if (!browserState?.tabGroupId) return sendResponse({ success: true, message: 'Packet instance has no associated group.' });
         const result = await tabGroupHandler.orderTabsInGroup(browserState.tabGroupId, instance);
@@ -264,11 +264,11 @@ async function handleReorderPacketTabs(data, sendResponse) {
 }
 
 async function handleSidebarReady(data, sender, sendResponse) {
-     if (sidebarHandler && typeof sidebarHandler.handleSidebarReady === 'function') {
-         await sidebarHandler.handleSidebarReady(data, sender, sendResponse);
-     } else {
-          sendResponse({ success: true, message: "Readiness acknowledged." });
-     }
+    if (sidebarHandler && typeof sidebarHandler.handleSidebarReady === 'function') {
+        await sidebarHandler.handleSidebarReady(data, sender, sendResponse);
+    } else {
+        sendResponse({ success: true, message: "Readiness acknowledged." });
+    }
 }
 
 function findMediaItemInInstance(instance, url) {
@@ -309,9 +309,9 @@ async function handlePlaybackActionRequest(data, sender, sendResponse) {
                 const cacheResult = await ensureMediaIsCached(instanceId, url, lrl);
                 const audioB64 = await arrayBufferToBase64(cacheResult.content);
                 const startTime = mediaItem.currentTime || 0;
-                
+
                 const playResult = await controlAudioInOffscreen('play', { audioB64, mimeType: mediaItem.mimeType, url: url, instanceId, startTime });
-                
+
                 const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
                 await setMediaPlaybackState({
                     isPlaying: playResult.isPlaying,
@@ -323,7 +323,7 @@ async function handlePlaybackActionRequest(data, sender, sendResponse) {
                 if (!activeMediaPlayback.url || !activeMediaPlayback.instance) {
                     return sendResponse({ success: true, message: "No active media." });
                 }
-                
+
                 const toggleResult = await controlAudioInOffscreen(intent, {});
                 if (!toggleResult.isPlaying) {
                     await saveCurrentTime(activeMediaPlayback.instanceId, activeMediaPlayback.url, toggleResult.currentTime);
@@ -406,7 +406,7 @@ async function handleSavePacketOutput(data, sender, sendResponse) {
         }
 
         await storage.savePacketInstance(instance);
-        
+
         syncGlobalMediaState(instance);
 
         sidebarHandler.notifySidebar('packet_instance_updated', { instance });
@@ -432,11 +432,11 @@ async function handleProposeSettingsUpdate(data, sender, sendResponse) {
             contentType: o.outputContentType
         }));
 
-        const systemPrompt = `Analyze these outputs and propose settings changes.`; 
-        const userPrompt = JSON.stringify(simplifiedOutputs); 
+        const systemPrompt = `Analyze these outputs and propose settings changes.`;
+        const userPrompt = JSON.stringify(simplifiedOutputs);
 
         const result = await llmService.callLLM('propose_settings_changes', { system: systemPrompt, user: userPrompt });
-        
+
         if (result.success) {
             try {
                 const proposedChanges = typeof result.data === 'string' ? JSON.parse(result.data) : result.data;
@@ -456,7 +456,7 @@ async function handleProposeSettingsUpdate(data, sender, sendResponse) {
         logger.error('MessageHandler', 'Error proposing settings update', error);
         sendResponse({ success: false, error: error.message });
     }
-    return true; 
+    return true;
 }
 
 async function handleApplyProposedSettings(data, sender, sendResponse) {
@@ -498,7 +498,7 @@ async function handleCreateFromCodebase(data, sender, sendResponse) {
 
             packetImage.id = imageId;
             packetImage.created = new Date().toISOString();
-            
+
             if (!packetImage.title || !Array.isArray(packetImage.sourceContent)) {
                 throw new Error("LLM returned invalid packet structure.");
             }
@@ -543,9 +543,9 @@ async function getCodebase() {
 
         'sidebar-modules/create-view.js', 'sidebar-modules/detail-view.js', 'sidebar-modules/dialog-handler.js',
         'sidebar-modules/dom-references.js', 'sidebar-modules/root-view.js', 'sidebar-modules/settings-view.js',
-        
+
         'sidebar.css', 'popup.css', 'overlay.css', 'selector.css', 'generated_page_style.css', 'help_style.css',
-        
+
         'readme.md', 'LICENSE', 'package.json'
     ]);
 
@@ -558,10 +558,10 @@ async function getCodebase() {
     for (const filePath of filePaths) {
         try {
             if (filePath.endsWith('.png') || filePath.endsWith('.svg') || filePath.endsWith('.json')) {
-                 if (filePath.endsWith('package.json') || filePath.endsWith('manifest.json')) {
-                 } else {
+                if (filePath.endsWith('package.json') || filePath.endsWith('manifest.json')) {
+                } else {
                     continue;
-                 }
+                }
             }
             const url = chrome.runtime.getURL(filePath);
             const response = await fetch(url);
@@ -580,25 +580,32 @@ const actionHandlers = {
     'debug_run_remote_agent': async (data, sender, sendResponse) => {
         try {
             await ensureOffscreenDocument();
-            
+
             const agentJsPath = 'agents/agent.js';
             const responseJs = await fetch(chrome.runtime.getURL(agentJsPath));
             if (!responseJs.ok) throw new Error(`Failed to load JS: ${agentJsPath}`);
             const agentCode = await responseJs.text();
 
+            // Handle different message structures (flat vs nested data)
+            const payload = data || {};
+            const userScript = payload.userCode || payload.code || "console.log('No user code provided'); 'Default Result'";
+
             const response = await chrome.runtime.sendMessage({
                 target: 'offscreen',
                 type: 'execute_remote_agent',
-                data: { code: agentCode } 
+                data: {
+                    code: agentCode,
+                    args: { code: userScript }
+                }
             });
-            
+
             sendResponse(response);
         } catch (error) {
             console.error("Remote Agent Error:", error);
             sendResponse({ success: false, error: error.message });
         }
     },
-    
+
     'perform_llm_check': async (data, sender, sendResponse) => {
         try {
             if (!self.ai || !self.ai.languageModel) throw new Error("Chrome AI not available");
@@ -614,7 +621,7 @@ const actionHandlers = {
             sendResponse({ success: false, error: e.message });
         }
     },
-    
+
     'remote_agent_complete': (data, sender, sendResponse) => {
         sidebarHandler.notifySidebar('remote_agent_result', data);
         sendResponse({ success: true });
@@ -628,7 +635,7 @@ const actionHandlers = {
         const { toolType, sourceUrl } = data;
         const allTabs = await chrome.tabs.query({ url: sourceUrl });
         let targetTab = allTabs.length > 0 ? allTabs[0] : null;
-        
+
         if (targetTab) {
             try {
                 await chrome.tabs.sendMessage(targetTab.id, { action: 'activate_selector_tool', data: { toolType } });
@@ -750,9 +757,9 @@ const actionHandlers = {
         if (!activeMediaPlayback.instance || activeMediaPlayback.url !== data.url || !activeMediaPlayback.isPlaying) return;
         activeMediaPlayback.currentTime = data.currentTime;
         activeMediaPlayback.duration = data.duration;
-        
+
         const instance = activeMediaPlayback.instance;
-        
+
         let momentTripped = false;
         (instance.moments || []).forEach((moment, index) => {
             if (moment.type === 'mediaTimestamp' && moment.sourceUrl === activeMediaPlayback.lrl &&
@@ -773,20 +780,20 @@ const actionHandlers = {
                 }
             }
         });
-        
+
         if (momentTripped) {
             await storage.savePacketInstance(instance);
         }
-        
+
         const mediaItem = findMediaItemInInstance(instance, data.url);
         if (mediaItem) {
             mediaItem.currentTime = data.currentTime;
             mediaItem.duration = data.duration;
         }
-        
+
         sidebarHandler.notifySidebar('playback_state_updated', { ...activeMediaPlayback });
     },
-    'overlay_setting_updated': (d, s, r) => { notifyUIsOfStateChange().then(() => r({success: true})); },
+    'overlay_setting_updated': (d, s, r) => { notifyUIsOfStateChange().then(() => r({ success: true })); },
     'generate_packet_title': (data, sender, sendResponse) => {
         (async () => {
             try {
@@ -794,7 +801,7 @@ const actionHandlers = {
                 sendResponse(result.success ? { success: true, title: result.data } : { success: false, error: result.error });
             } catch (error) { sendResponse({ success: false, error: error.message }); }
         })();
-        return true; 
+        return true;
     },
     'get_draft_item_for_preview': async (data, sender, sendResponse) => {
         const { rlr } = data;
@@ -856,7 +863,7 @@ const actionHandlers = {
         const visitResult = await packetUtils.markUrlAsVisited(activeMediaPlayback.instance, data.url);
         if (visitResult.success && visitResult.modified) {
             await storage.savePacketInstance(visitResult.instance);
-            activeMediaPlayback.instance = visitResult.instance; 
+            activeMediaPlayback.instance = visitResult.instance;
             await notifyUIsOfStateChange({ showVisitedAnimation: true });
             await checkAndPromptForCompletion('MessageHandler', visitResult, data.instanceId);
         }
@@ -885,7 +892,7 @@ const actionHandlers = {
         try {
             const instance = await storage.getPacketInstance(instanceId);
             if (!instance) throw new Error(`Instance ${instanceId} not found.`);
-            await handleOpenContent({ instance, url }, sender, () => {});
+            await handleOpenContent({ instance, url }, sender, () => { });
             await chrome.tabs.remove(tabId);
             sendResponse({ success: true });
         } catch (error) { sendResponse({ success: false, error: error.message }); }
@@ -965,10 +972,10 @@ export function handleMessage(message, sender, sendResponse) {
             return Promise.resolve(handler(message.data, sender, sendResponse));
         }).catch(err => {
             logger.error("MessageHandler", `Error in action ${message.action}:`, err);
-            try { sendResponse({ success: false, error: err.message }); } catch (e) {}
+            try { sendResponse({ success: false, error: err.message }); } catch (e) { }
         });
-        
-        return true; 
+
+        return true;
     }
     return false;
 }
