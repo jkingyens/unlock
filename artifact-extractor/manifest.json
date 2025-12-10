@@ -1,0 +1,19 @@
+{
+    "manifest_version": 3,
+    "name": "Artifact Extractor Prototype",
+    "version": "1.0",
+    "permissions": [
+        "sidePanel",
+        "scripting",
+        "activeTab"
+    ],
+    "background": {
+        "service_worker": "service-worker.js"
+    },
+    "side_panel": {
+        "default_path": "sidepanel.html"
+    },
+    "host_permissions": [
+        "*://*/*"
+    ]
+}

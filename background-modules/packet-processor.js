@@ -13,8 +13,8 @@ import {
     sanitizeForFileName,
 } from '../utils.js';
 import cloudStorage from '../cloud-storage.js';
-import PacketRuntime from './packet-runtime.js'; 
-import * as sidebarHandler from './sidebar-handler.js'; 
+import PacketRuntime from './packet-runtime.js';
+import * as sidebarHandler from './sidebar-handler.js';
 import * as ruleManager from './rule-manager.js'; // Ensure ruleManager is imported for delete cleanup
 
 // --- Helper to send progress notifications ---
@@ -61,7 +61,7 @@ export async function instantiatePacket(imageId, preGeneratedInstanceId, initiat
             }
         }
 
-        const internalContentToUpload = packetImage.sourceContent.filter(item => item.origin === 'internal' && item.format !== 'interactive-input');
+        const internalContentToUpload = packetImage.sourceContent.filter(item => item.origin === 'internal' && item.format !== 'interactive-input' && item.format !== 'wasm');
         const totalFilesToUpload = internalContentToUpload.length;
         let filesUploaded = 0;
         let activeCloudConfig = null;
@@ -75,7 +75,7 @@ export async function instantiatePacket(imageId, preGeneratedInstanceId, initiat
         sendInstantiationProgress(instanceId, 10, "Configuration checked", packetImage.title);
 
         const packetInstanceContents = JSON.parse(JSON.stringify(packetImage.sourceContent));
-        
+
         for (const item of packetInstanceContents) {
             if (item.origin === 'internal') {
                 if (item.format === 'interactive-input') {
@@ -84,26 +84,36 @@ export async function instantiatePacket(imageId, preGeneratedInstanceId, initiat
 
                 const lrl = item.lrl;
                 if (!lrl) continue;
-                
+
                 const indexedDbKey = sanitizeForFileName(lrl);
                 const contentSourceId = settings.quickCopyEnabled ? instanceId : imageId;
                 const storedContent = await indexedDbStorage.getGeneratedContent(contentSourceId, indexedDbKey);
-                
+
                 if (!storedContent || !storedContent[0]?.content) {
                     throw new Error(`Cannot instantiate: Content for ${lrl} is missing.`);
+                }
+
+                // [FIX] For Wasm, skip upload and ensure content is copied to instance IDB for runtime access
+                if (item.format === 'wasm') {
+                    if (!settings.quickCopyEnabled) {
+                        // If quickCopy wasn't enabled globally, we still MUST copy the Wasm binary to the instance namespace
+                        // so PacketRuntime can find it at runtime.
+                        await indexedDbStorage.saveGeneratedContent(instanceId, indexedDbKey, storedContent);
+                    }
+                    continue; // Skip uploading Wasm
                 }
 
                 const contentToUpload = storedContent[0].content;
                 let contentType = storedContent[0]?.contentType || item.contentType || item.mimeType || 'application/octet-stream';
                 const cloudPath = `packets/${instanceId}${lrl.startsWith('/') ? lrl : '/' + lrl}`;
                 const uploadResult = await cloudStorage.uploadFile(cloudPath, contentToUpload, contentType, 'private');
-                
+
                 if (uploadResult.success) {
                     filesUploaded++;
                     const progress = 10 + Math.round((filesUploaded / totalFilesToUpload) * 85);
                     sendInstantiationProgress(instanceId, progress, `Uploading ${filesUploaded}/${totalFilesToUpload}...`, packetImage.title);
 
-                    item.url = uploadResult.fileName; 
+                    item.url = uploadResult.fileName;
                     item.published = true;
                     item.publishContext = {
                         storageConfigId: activeCloudConfig.id,
@@ -119,12 +129,12 @@ export async function instantiatePacket(imageId, preGeneratedInstanceId, initiat
 
         const validUrls = new Set(packetInstanceContents.map(item => item.url).filter(Boolean));
         const validLrls = new Set(packetInstanceContents.map(item => item.lrl).filter(Boolean));
-        
-        const filteredMoments = (packetImage.moments || []).filter(moment => 
+
+        const filteredMoments = (packetImage.moments || []).filter(moment =>
             moment.sourceUrl.startsWith('/') ? validLrls.has(moment.sourceUrl) : validUrls.has(moment.sourceUrl)
         );
         const filteredCheckpoints = (packetImage.checkpoints || []).filter(checkpoint => checkpoint.requiredItems.every(item => validUrls.has(item.url)));
-        
+
         const packetInstance = {
             instanceId: instanceId,
             imageId: imageId,
@@ -140,10 +150,10 @@ export async function instantiatePacket(imageId, preGeneratedInstanceId, initiat
         };
 
         await storage.savePacketInstance(packetInstance);
-        
+
         const runtime = new PacketRuntime(packetInstance);
         await runtime.start();
-        
+
         sendInstantiationProgress(instanceId, 100, "Complete", packetImage.title);
         logger.log('PacketProcessor:instantiatePacket', 'Packet instance data created and runtime started.', { instanceId });
 
@@ -152,7 +162,7 @@ export async function instantiatePacket(imageId, preGeneratedInstanceId, initiat
     } catch (error) {
         logger.error('PacketProcessor:instantiatePacket', 'Error during instantiation', { imageId, instanceId, error });
         sendProgressNotification('packet_creation_failed', { instanceId: instanceId, error: error.message });
-        
+
         return { success: false, error: error.message || 'Unknown instantiation error' };
     }
 }
@@ -171,14 +181,14 @@ export async function processDeletePacketsRequest(data, initiatorTabId = null) {
             const instance = await storage.getPacketInstance(instanceId);
             if (!instance) {
                 logger.warn('PacketProcessor:delete', `Instance ${instanceId} not found, cleaning up any stale artifacts.`);
-                await storage.deletePacketBrowserState(instanceId).catch(()=>{});
+                await storage.deletePacketBrowserState(instanceId).catch(() => { });
                 await ruleManager.removePacketRules(instanceId);
                 continue;
             }
 
             const runtime = new PacketRuntime(instance);
             await runtime.delete();
-            
+
             await storage.deletePacketInstance(instanceId);
 
             sendProgressNotification('packet_instance_deleted', { packetId: instanceId, source: 'user_action' });
@@ -232,33 +242,51 @@ export async function importImageFromUrl(url) {
         const response = await fetch(url, { cache: 'no-store' });
         if (!response.ok) throw new Error(`Failed to download packet from URL (${response.status})`);
         const sharedImage = await response.json();
-        if (!sharedImage || !sharedImage.title || !Array.isArray(sharedImage.sourceContent)) {
-            throw new Error("Invalid packet image format in downloaded JSON.");
-        }
-        const importedPacketImage = { ...sharedImage, id: newImageId, created: new Date().toISOString(), shareUrl: url };
-        
-        for (const contentItem of importedPacketImage.sourceContent) {
-            if (contentItem.origin === 'internal' && contentItem.contentB64) {
-                const contentBuffer = await base64Decode(contentItem.contentB64);
-                const indexedDbKey = sanitizeForFileName(contentItem.lrl);
-                await indexedDbStorage.saveGeneratedContent(newImageId, indexedDbKey, [{
-                    name: contentItem.lrl.split('/').pop(),
-                    content: contentBuffer,
-                    contentType: contentItem.contentType || contentItem.mimeType
-                }]);
-                delete contentItem.contentB64;
-            }
-        }
 
-        await storage.savePacketImage(importedPacketImage);
-        sendProgressNotification('packet_image_created', { image: importedPacketImage });
-        return { success: true, imageId: newImageId };
+        return await processImportedPacketData(sharedImage, newImageId, url);
 
     } catch (error) {
         logger.error('PacketProcessor:importImageFromUrl', 'Error importing image', { url, error });
         sendProgressNotification('packet_creation_failed', { imageId: newImageId, error: error.message, step: 'import_failure' });
         return { success: false, error: error.message };
     }
+}
+
+export async function importImageFromJson(packetData) {
+    const newImageId = `img_${Date.now()}_imported_${Math.random().toString(36).substring(2, 9)}`;
+    try {
+        sendProgressNotification('packet_creation_progress', { imageId: newImageId, status: 'active', text: 'Processing File...', progressPercent: 10, title: 'Importing Packet...' });
+        return await processImportedPacketData(packetData, newImageId, null);
+    } catch (error) {
+        logger.error('PacketProcessor:importImageFromJson', 'Error importing image from JSON', { error });
+        sendProgressNotification('packet_creation_failed', { imageId: newImageId, error: error.message, step: 'import_failure' });
+        return { success: false, error: error.message };
+    }
+}
+
+async function processImportedPacketData(sharedImage, newImageId, sourceUrl) {
+    if (!sharedImage || !sharedImage.title || !Array.isArray(sharedImage.sourceContent)) {
+        throw new Error("Invalid packet image format.");
+    }
+    const importedPacketImage = { ...sharedImage, id: newImageId, created: new Date().toISOString() };
+    if (sourceUrl) importedPacketImage.shareUrl = sourceUrl;
+
+    for (const contentItem of importedPacketImage.sourceContent) {
+        if (contentItem.origin === 'internal' && contentItem.contentB64) {
+            const contentBuffer = await base64Decode(contentItem.contentB64);
+            const indexedDbKey = sanitizeForFileName(contentItem.lrl);
+            await indexedDbStorage.saveGeneratedContent(newImageId, indexedDbKey, [{
+                name: contentItem.lrl.split('/').pop(),
+                content: contentBuffer,
+                contentType: contentItem.contentType || contentItem.mimeType
+            }]);
+            delete contentItem.contentB64;
+        }
+    }
+
+    await storage.savePacketImage(importedPacketImage);
+    sendProgressNotification('packet_image_created', { image: importedPacketImage });
+    return { success: true, imageId: newImageId };
 }
 
 export async function publishImageForSharing(imageId) {
@@ -270,7 +298,7 @@ export async function publishImageForSharing(imageId) {
         const packetImage = await storage.getPacketImage(imageId);
         if (!packetImage) return { success: false, error: `Packet image ${imageId} not found.` };
         const imageForExport = JSON.parse(JSON.stringify(packetImage));
-        
+
         for (const contentItem of imageForExport.sourceContent) {
             if (contentItem.origin === 'internal' && contentItem.lrl) {
                 const indexedDbKey = sanitizeForFileName(contentItem.lrl);
@@ -281,7 +309,7 @@ export async function publishImageForSharing(imageId) {
                 }
             }
         }
-        
+
         const jsonString = JSON.stringify(imageForExport);
         const shareFileName = `shared/img_${imageId.replace(/^img_/, '')}_${Date.now()}.json`;
         const uploadResult = await cloudStorage.uploadFile(shareFileName, jsonString, 'application/json', 'public-read');

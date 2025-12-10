@@ -801,9 +801,14 @@ body.dark-mode .waveform-link-marker.visited {
     right: -2px;
     width: 8px;
     height: 8px;
-    background-color: var(--border-secondary);
     border-radius: 50%;
+    background-color: var(--status-success-color);
     border: 1px solid var(--bg-secondary);
+}
+
+.drop-zone.highlight {
+    background-color: var(--bg-accent) !important;
+    border-color: var(--text-accent) !important;
 }
 .card.listening-for-input {
     border-left-color: var(--text-accent);

@@ -30,6 +30,7 @@ import {
     instantiatePacket,
     publishImageForSharing,
     importImageFromUrl,
+    importImageFromJson,
     processDeletePacketImageRequest
 } from './packet-processor.js';
 
@@ -617,6 +618,15 @@ const actionHandlers = {
             const result = await session.prompt(data.prompt);
             if (session.destroy) session.destroy();
             sendResponse({ success: true, data: result });
+        } catch (e) {
+            sendResponse({ success: false, error: e.message });
+        }
+    },
+
+    'import_image_from_json': async (data, sender, sendResponse) => {
+        try {
+            const result = await importImageFromJson(data.json);
+            sendResponse(result);
         } catch (e) {
             sendResponse({ success: false, error: e.message });
         }

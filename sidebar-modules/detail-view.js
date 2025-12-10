@@ -9,8 +9,8 @@ import { logger, storage, packetUtils, indexedDbStorage, sanitizeForFileName } f
 let isDisplayingPacketContent = false;
 let queuedDisplayRequest = null;
 const audioDataCache = new Map();
-let saveStateDebounceTimer = null; 
-let currentPlayingUrl = null; 
+let saveStateDebounceTimer = null;
+let currentPlayingUrl = null;
 let sendMessageToBackground;
 let navigateTo;
 let openUrl;
@@ -41,15 +41,15 @@ async function handleDataCaptured(data) {
 
     const instanceId = listeningCard.closest('#detail-cards-container')?.dataset.instanceId;
     const lrl = listeningCard.dataset.lrl;
-    
+
     if (instanceId && lrl) {
         const instance = await storage.getPacketInstance(instanceId);
         const contentItem = instance.contents.find(item => item.lrl === lrl);
-        
+
         if (contentItem) {
             listeningCard.classList.remove('listening-for-input');
             listeningCard.classList.add('visited');
-            
+
             await sendMessageToBackground({
                 action: 'save_packet_output',
                 data: {
@@ -61,9 +61,9 @@ async function handleDataCaptured(data) {
                 }
             });
 
-            sendMessageToBackground({ 
-                action: 'deactivate_selector_tool', 
-                data: { sourceUrl: contentItem.sourceUrl } 
+            sendMessageToBackground({
+                action: 'deactivate_selector_tool',
+                data: { sourceUrl: contentItem.sourceUrl }
             });
         }
     }
@@ -180,7 +180,7 @@ function drawLinkMarkers(markerContainer, options) {
         }
         const marker = document.createElement('div');
         marker.className = 'waveform-link-marker';
-        
+
         const percentage = (moment.timestamp / audioDuration) * 100;
         marker.style.left = `${percentage}%`;
 
@@ -194,7 +194,7 @@ async function redrawAllVisibleWaveforms(playbackState = {}, instance) {
 
     const mediaCards = domRefs.packetDetailView.querySelectorAll('.card.media');
     if (mediaCards.length === 0) return;
-    
+
     const settings = await storage.getSettings();
     const colorOptions = {
         accentColor: getComputedStyle(domRefs.packetDetailView).getPropertyValue('--packet-color-accent').trim(),
@@ -210,17 +210,17 @@ async function redrawAllVisibleWaveforms(playbackState = {}, instance) {
         const markerContainer = card.querySelector('.waveform-marker-container');
         const contentItem = instance.contents.find(item => item.url === url);
         const audioCacheKey = `${instance.instanceId}::${url}`;
-        
+
         const cachedAudioData = audioDataCache.get(audioCacheKey);
         if (!cachedAudioData || !cachedAudioData.barHeights) continue;
-        
+
         const { barHeights, duration: cachedDuration } = cachedAudioData;
 
         if (canvas && contentItem && barHeights) {
             const isTheActiveTrack = playbackState.url === url;
             const currentTime = isTheActiveTrack ? (playbackState.currentTime || 0) : (contentItem.currentTime || 0);
             const audioDuration = isTheActiveTrack && playbackState.duration > 0 ? playbackState.duration : cachedDuration;
-            
+
             drawWaveform(canvas, {
                 ...colorOptions,
                 barHeights,
@@ -229,7 +229,7 @@ async function redrawAllVisibleWaveforms(playbackState = {}, instance) {
             });
 
             const relevantMoments = (instance.moments || []).filter(m => m.sourceUrl === lrl);
-            
+
             drawLinkMarkers(markerContainer, {
                 ...colorOptions,
                 moments: relevantMoments,
@@ -258,7 +258,7 @@ export async function redrawSingleWaveform(lrl) {
     try {
         const indexedDbKey = sanitizeForFileName(lrl);
         const audioContent = await indexedDbStorage.getGeneratedContent(instanceId, indexedDbKey);
-        
+
         if (audioContent && audioContent[0]?.content) {
             const audioContext = new (window.AudioContext || window.webkitAudioContext)();
             const audioData = audioContent[0].content;
@@ -288,7 +288,7 @@ export function updateSingleCardToCached(lrl) {
             const downloadIcon = cardIconContainer.querySelector('.download-icon');
             if (downloadIcon) downloadIcon.remove();
             card.classList.add('clickable');
-            
+
             const instanceId = card.closest('#detail-cards-container').dataset.instanceId;
             const url = card.dataset.url;
             card.addEventListener('click', (e) => {
@@ -326,7 +326,7 @@ export async function displayPacketContent(instance, browserState, canonicalPack
     }
 
     const currentState = await sendMessageToBackground({ action: 'get_playback_state' });
-    
+
     try {
         const isAlreadyRendered = container.querySelector(`#detail-cards-container[data-instance-id="${instance.instanceId}"]`);
         const { progressPercentage, visitedCount, totalCount } = packetUtils.calculateInstanceProgress(instance);
@@ -334,21 +334,21 @@ export async function displayPacketContent(instance, browserState, canonicalPack
         if (isAlreadyRendered) {
             await updateCardVisibility(instance, browserState);
             updateActiveCardHighlight(canonicalPacketUrl);
-            
+
             const progressBar = domRefs.detailProgressContainer?.querySelector('.progress-bar');
             if (progressBar) progressBar.style.width = `${progressPercentage}%`;
-            
+
             const progressBarContainer = domRefs.detailProgressContainer?.querySelector('.progress-bar-container');
             if (progressBarContainer) progressBarContainer.title = `${visitedCount}/${totalCount} - ${progressPercentage}% Complete`;
-            
+
             const oldActionButtonContainer = document.getElementById('detail-action-button-container');
             const newActionButtonContainer = await createActionButtons(instance, browserState);
             if (oldActionButtonContainer) {
                 oldActionButtonContainer.replaceWith(newActionButtonContainer);
             }
-            
+
             renderOutputsSection(instance, domRefs.detailCardsContainer);
-            
+
             await redrawAllVisibleWaveforms(currentState, instance);
 
         } else {
@@ -365,13 +365,13 @@ export async function displayPacketContent(instance, browserState, canonicalPack
             const cardsWrapper = await createCardsSection(instance);
             cardsWrapper.dataset.instanceId = instance.instanceId;
             fragment.appendChild(cardsWrapper);
-            
+
             renderOutputsSection(instance, cardsWrapper);
 
             container.innerHTML = '';
             container.appendChild(fragment);
             updatePlaybackUI(currentState, instance);
-            
+
             const mediaCards = container.querySelectorAll('.card.media');
             for (const mediaCard of mediaCards) {
                 const url = mediaCard.dataset.url;
@@ -382,19 +382,19 @@ export async function displayPacketContent(instance, browserState, canonicalPack
                 if (lrl && canvas && waveformContainer) {
                     const indexedDbKey = sanitizeForFileName(lrl);
                     const audioContent = await indexedDbStorage.getGeneratedContent(instance.instanceId, indexedDbKey);
-                    
+
                     if (audioContent && audioContent[0]?.content) {
                         try {
                             const audioData = audioContent[0].content;
                             const audioContext = new (window.AudioContext || window.webkitAudioContext)();
                             const decodedData = await audioContext.decodeAudioData(audioData.slice(0));
-                            
+
                             const barHeights = calculateWaveformBars(decodedData.getChannelData(0), canvas.clientWidth);
                             audioDataCache.set(`${instance.instanceId}::${url}`, {
                                 barHeights: barHeights,
                                 duration: decodedData.duration
                             });
-                            
+
                             redrawAllVisibleWaveforms(currentState, instance);
 
                         } catch (err) {
@@ -418,7 +418,7 @@ export async function displayPacketContent(instance, browserState, canonicalPack
 
 export async function updateCardVisibility(instance, browserState) {
     if (!domRefs.detailCardsContainer || !instance) return;
-    
+
     const isCompleted = await packetUtils.isPacketInstanceCompleted(instance);
 
     let openTabUrls = new Set();
@@ -430,35 +430,35 @@ export async function updateCardVisibility(instance, browserState) {
             // It's possible for the tab group to be gone, which is fine.
         }
     }
-    
+
     // --- START OF FIX: Normalized URL Matching ---
     const visitedUrlsSet = new Set();
     (instance.visitedUrls || []).forEach(url => {
         visitedUrlsSet.add(url);
-        try { visitedUrlsSet.add(decodeURIComponent(url)); } catch (e) {}
+        try { visitedUrlsSet.add(decodeURIComponent(url)); } catch (e) { }
     });
 
     domRefs.detailCardsContainer.querySelectorAll('.card').forEach(card => {
         let cardUrl = card.dataset.url;
         const cardLrl = card.dataset.lrl;
-        
+
         let isVisited = false;
-        
+
         // Check raw and decoded URL
         if (cardUrl) {
             isVisited = visitedUrlsSet.has(cardUrl);
             if (!isVisited) {
-                try { isVisited = visitedUrlsSet.has(decodeURIComponent(cardUrl)); } catch (e) {}
+                try { isVisited = visitedUrlsSet.has(decodeURIComponent(cardUrl)); } catch (e) { }
             }
         }
-        
+
         if (!isVisited && cardLrl) {
             isVisited = visitedUrlsSet.has(cardLrl);
         }
-        
+
         card.classList.toggle('visited', isVisited);
         // --- END OF FIX ---
-        
+
         if (isCompleted) {
             card.dataset.completed = 'true';
         } else {
@@ -471,7 +471,7 @@ export async function updateCardVisibility(instance, browserState) {
             const isOpenInTab = cardUrl && openTabUrls.has(cardUrl);
 
             const isRevealed = isRevealedByMoment || isVisited || isOpenInTab;
-            
+
             const wasHidden = card.classList.contains('hidden-by-rule');
             card.classList.toggle('hidden-by-rule', !isRevealed);
 
@@ -480,14 +480,14 @@ export async function updateCardVisibility(instance, browserState) {
                     card.classList.remove('drop-zone-active', 'clickable', 'listening-for-input');
                     card.style.opacity = '0.6';
                     const cardUrlEl = card.querySelector('.card-url');
-                    if(cardUrlEl) cardUrlEl.textContent = "Input disabled (Packet Completed)";
+                    if (cardUrlEl) cardUrlEl.textContent = "Input disabled (Packet Completed)";
                 } else if (isRevealed) {
                     card.style.opacity = '1.0';
-                    card.classList.add('drop-zone-active', 'clickable'); 
-                    
+                    card.classList.add('drop-zone-active', 'clickable');
+
                     if (wasHidden && !card.classList.contains('listening-for-input')) {
                         const cardUrlEl = card.querySelector('.card-url');
-                        if(cardUrlEl) cardUrlEl.textContent = "Click to Activate Input Capture";
+                        if (cardUrlEl) cardUrlEl.textContent = "Click to Activate Input Capture";
                     }
 
                     if (wasHidden) {
@@ -502,10 +502,10 @@ export async function updateCardVisibility(instance, browserState) {
                 }
             }
         } else if (card.dataset.format === 'interactive-input' && isCompleted) {
-             card.classList.remove('drop-zone-active', 'clickable', 'listening-for-input');
-             card.style.opacity = '0.6';
-             const cardUrlEl = card.querySelector('.card-url');
-             if(cardUrlEl) cardUrlEl.textContent = "Input disabled (Packet Completed)";
+            card.classList.remove('drop-zone-active', 'clickable', 'listening-for-input');
+            card.style.opacity = '0.6';
+            const cardUrlEl = card.querySelector('.card-url');
+            if (cardUrlEl) cardUrlEl.textContent = "Input disabled (Packet Completed)";
         }
     });
 }
@@ -562,7 +562,7 @@ async function createActionButtons(instance, browserState) {
 async function createCardsSection(instance) {
     const cardsWrapper = document.createElement('div');
     cardsWrapper.id = 'detail-cards-container';
-    
+
     if (instance.contents && instance.contents.length > 0) {
         const cardPromises = instance.contents.map(item => createContentCard(item, instance));
         const cards = await Promise.all(cardPromises);
@@ -580,7 +580,7 @@ async function createCardsSection(instance) {
 async function renderOutputsSection(instance, container) {
     const existingHeader = container.querySelector('.outputs-header');
     if (existingHeader) existingHeader.remove();
-    
+
     const existingCards = container.querySelectorAll('.output-card');
     existingCards.forEach(card => card.remove());
 
@@ -628,7 +628,7 @@ function createOutputCard(outputItem) {
 
 
 async function createContentCard(contentItem, instance) {
-    if (!contentItem) return null; 
+    if (!contentItem) return null;
 
     const card = document.createElement('div');
     card.className = 'card';
@@ -639,7 +639,7 @@ async function createContentCard(contentItem, instance) {
     if (lrl) card.dataset.lrl = lrl;
 
     let isClickable = (origin === 'external') || (origin === 'internal' && (contentItem.published || cacheable));
-    
+
     if (format === 'html') {
         let iconHTML = origin === 'external' ? '🌐' : '📄';
         let displayUrl = '';
@@ -648,9 +648,9 @@ async function createContentCard(contentItem, instance) {
         } else {
             displayUrl = isClickable ? title : '(Not Published)';
         }
-        
+
         card.innerHTML = `<div class="card-icon">${iconHTML}</div><div class="card-text"><div class="card-title">${title}</div><div class="card-url">${displayUrl}</div>${context ? `<div class="card-relevance">${context}</div>` : ''}</div>`;
-    
+
     } else if (format === 'audio') {
         card.classList.add('media');
         card.innerHTML = `
@@ -662,7 +662,7 @@ async function createContentCard(contentItem, instance) {
     } else if (format === 'pdf') {
         let iconHTML = '📄';
         let displayUrl = title;
-        
+
         card.innerHTML = `
             <div class="card-icon-container" style="display: flex; align-items: center; padding-left: 12px;">
                  <div class="download-icon" style="display: none;"></div>
@@ -672,7 +672,7 @@ async function createContentCard(contentItem, instance) {
                 <div class="card-title">${title}</div>
                 <div class="card-url">${displayUrl}</div>
             </div>`;
-        
+
         const iconContainer = card.querySelector('.card-icon-container');
         const indexedDbKey = sanitizeForFileName(lrl);
         const cachedContent = await indexedDbStorage.getGeneratedContent(instance.instanceId, indexedDbKey);
@@ -694,12 +694,17 @@ async function createContentCard(contentItem, instance) {
                 <button class="paste-from-clipboard-btn">Paste from Clipboard</button>
             </div>`;
         isClickable = true;
+    } else if (format === 'wasm') {
+        let iconHTML = '🤖';
+        card.innerHTML = `<div class="card-icon">${iconHTML}</div><div class="card-text"><div class="card-title">${title}</div><div class="card-url">Background Agent</div></div>`;
+        card.style.opacity = '1.0';
+        isClickable = false; // Wasm agents run automatically, not clickable by user
     } else {
         card.innerHTML = `<div class="card-icon">❓</div><div class="card-text"><div class="card-title">${title}</div><div class="card-url">Unknown item type: ${format}</div></div>`;
         card.style.opacity = '0.6';
         isClickable = false;
     }
-    
+
     if (!isClickable) {
         card.style.opacity = '0.7';
     }
@@ -710,13 +715,13 @@ async function createContentCard(contentItem, instance) {
     if (isVisited) {
         card.classList.add('visited');
     }
-    
+
     const momentIndices = Array.isArray(contentItem.revealedByMoments) ? contentItem.revealedByMoments : [];
     if (momentIndices.length > 0) {
         card.dataset.momentIndices = JSON.stringify(momentIndices);
         const isRevealedByMoment = momentIndices.some(index => instance.momentsTripped && instance.momentsTripped[index] === 1);
         const isRevealed = isRevealedByMoment || isVisited;
-        
+
         if (!isRevealed) {
             card.classList.add('hidden-by-rule');
         }
@@ -736,7 +741,7 @@ async function createContentCard(contentItem, instance) {
         card.classList.add('clickable');
         if (format === 'audio') {
             playMediaInCard(card, contentItem, instance);
-        } else if (format !== 'interactive-input') { 
+        } else if (format !== 'interactive-input') {
             card.addEventListener('click', async (e) => {
                 if (card.classList.contains('opening')) return;
 
@@ -750,7 +755,7 @@ async function createContentCard(contentItem, instance) {
                     });
                     iconContainer.classList.remove('loading');
                 }
-                
+
                 card.classList.add('opening');
                 setTimeout(() => card.classList.remove('opening'), 2000);
 
@@ -778,14 +783,14 @@ export function updateActiveCardHighlight(canonicalPacketUrl) {
         try {
             if (cardUrl) cardUrl = decodeURIComponent(cardUrl);
         } catch (e) { /* ignore invalid url */ }
-        
+
         let packetUrl = canonicalPacketUrl;
         try {
             if (packetUrl) packetUrl = decodeURIComponent(packetUrl);
         } catch (e) { /* ignore invalid url */ }
 
         const isActive = (packetUrl && cardUrl === packetUrl);
-        
+
         card.classList.toggle('active', isActive);
         if (isActive) {
             activeCardElement = card;
@@ -804,13 +809,13 @@ function handleCloseTabGroup(tabGroupId) {
         action: 'request_playback_action',
         data: { intent: 'stop' }
     });
-    
+
     clearCurrentDetailView();
 
     if (typeof navigateTo === 'function') {
         navigateTo('root');
     }
-    
+
     sendMessageToBackground({
         action: 'remove_tab_groups',
         data: { groupIds: [tabGroupId] }
@@ -871,7 +876,7 @@ function attachInteractiveCardHandlers(card, contentItem, instance) {
 
     const { output, sourceUrl } = contentItem;
     const cardUrlEl = card.querySelector('.card-url');
-    
+
     const pasteButton = card.querySelector('.paste-from-clipboard-btn');
 
     const saveData = async (capturedData) => {
@@ -885,7 +890,7 @@ function attachInteractiveCardHandlers(card, contentItem, instance) {
 
         card.classList.remove('listening-for-input', 'drag-over');
         card.classList.add('visited');
-        
+
         await sendMessageToBackground({
             action: 'save_packet_output',
             data: {
@@ -896,7 +901,7 @@ function attachInteractiveCardHandlers(card, contentItem, instance) {
                 outputContentType: output.contentType
             }
         });
-        
+
         sendMessageToBackground({ action: 'deactivate_selector_tool_global' });
     };
 
@@ -904,12 +909,12 @@ function attachInteractiveCardHandlers(card, contentItem, instance) {
         pasteButton.addEventListener('click', async (event) => {
             event.stopPropagation();
             if (card.dataset.completed === 'true') return;
-            
+
             // --- NEW: Paste Guard ---
             if (!card.classList.contains('listening-for-input')) {
                 if (!card.classList.contains('listening-for-input')) {
-                     showRootViewStatus('Click the card to activate input first.', 'error');
-                     return;
+                    showRootViewStatus('Click the card to activate input first.', 'error');
+                    return;
                 }
             }
 
@@ -920,7 +925,7 @@ function attachInteractiveCardHandlers(card, contentItem, instance) {
                     if (item.types.includes('image/png') || item.types.includes('image/jpeg')) {
                         const imageType = item.types.includes('image/png') ? 'image/png' : 'image/jpeg';
                         const blob = await item.getType(imageType);
-                        
+
                         const reader = new FileReader();
                         reader.onloadend = () => {
                             saveData(reader.result);
@@ -952,7 +957,7 @@ function attachInteractiveCardHandlers(card, contentItem, instance) {
         if (card.dataset.completed === 'true') return;
 
         const wasActive = card.classList.contains('listening-for-input');
-        
+
         // --- NEW: Mutual Exclusivity and Visual Reset ---
         document.querySelectorAll('.card.listening-for-input').forEach(otherCard => {
             if (otherCard !== card) {
@@ -971,25 +976,25 @@ function attachInteractiveCardHandlers(card, contentItem, instance) {
         } else {
             card.classList.add('listening-for-input');
             if (cardUrlEl) cardUrlEl.textContent = "Listening... Drag & Drop or Paste here";
-            
+
             const toolType = output.contentType.startsWith('image') ? 'image' : 'text';
-            sendMessageToBackground({ 
-                action: 'activate_selector_tool', 
+            sendMessageToBackground({
+                action: 'activate_selector_tool',
                 data: { sourceUrl, toolType, instanceId: instance.instanceId }
             });
         }
     });
 
-    card.addEventListener('dragover', (e) => { 
-        e.preventDefault(); 
+    card.addEventListener('dragover', (e) => {
+        e.preventDefault();
         // Only show drag styling if active
         if (card.classList.contains('listening-for-input')) {
             card.classList.add('drag-over');
         }
     });
-    
+
     card.addEventListener('dragleave', () => { card.classList.remove('drag-over'); });
-    
+
     card.addEventListener('drop', async (e) => {
         e.preventDefault();
         if (card.dataset.completed === 'true') return;
@@ -1003,10 +1008,10 @@ function attachInteractiveCardHandlers(card, contentItem, instance) {
         if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
             const file = e.dataTransfer.files[0];
             if (file.type.startsWith('image/')) {
-                 const reader = new FileReader();
-                 reader.onloadend = () => saveData(reader.result); // Saves as DataURL
-                 reader.readAsDataURL(file);
-                 return;
+                const reader = new FileReader();
+                reader.onloadend = () => saveData(reader.result); // Saves as DataURL
+                reader.readAsDataURL(file);
+                return;
             }
         }
         // Fallback to checking for text/uri-list (e.g. images dragged from web pages)
@@ -1015,7 +1020,7 @@ function attachInteractiveCardHandlers(card, contentItem, instance) {
             saveData(droppedData);
         }
     });
-    
+
     const toolType = output.contentType.startsWith('image') ? 'image' : 'text';
     // Initial state text handled in createContentCard
 }

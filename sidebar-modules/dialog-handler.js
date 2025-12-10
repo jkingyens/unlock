@@ -73,6 +73,26 @@ export function setupDialogListeners() {
         }
     });
 
+    // File Import Listeners
+    domRefs.importFileSelectBtn?.addEventListener('click', () => domRefs.importFileInput?.click());
+    domRefs.importFileInput?.addEventListener('change', (e) => {
+        if (e.target.files?.length > 0) handleFileImport(e.target.files[0]);
+    });
+
+    const dropZone = domRefs.importDropZone;
+    if (dropZone) {
+        ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+            dropZone.addEventListener(eventName, preventDefaults, false);
+        });
+        ['dragenter', 'dragover'].forEach(eventName => {
+            dropZone.addEventListener(eventName, highlight, false);
+        });
+        ['dragleave', 'drop'].forEach(eventName => {
+            dropZone.addEventListener(eventName, unhighlight, false);
+        });
+        dropZone.addEventListener('drop', handleDrop, false);
+    }
+
     // Generic Confirm Dialog
     domRefs.genericConfirmConfirmBtn?.addEventListener('click', () => hideConfirmDialog(true));
     domRefs.genericConfirmCancelBtn?.addEventListener('click', () => hideConfirmDialog(false));
@@ -86,7 +106,7 @@ export function setupDialogListeners() {
     if (settingsDialog) {
         settingsDialog.querySelector('.confirm-btn')?.addEventListener('click', () => hideConfirmSettingsDialog(true));
         settingsDialog.querySelector('.cancel-btn')?.addEventListener('click', () => hideConfirmSettingsDialog(false));
-        settingsDialog.addEventListener('click', (e) => { 
+        settingsDialog.addEventListener('click', (e) => {
             if (e.target === settingsDialog) hideConfirmSettingsDialog(false);
         });
     }
@@ -103,7 +123,7 @@ function showDialogStatus(element, message, type = 'info', autoClear = true) {
     if (type === 'error') element.classList.add('error-message');
     if (type === 'success') element.classList.add('success-message');
     element.style.visibility = 'visible';
-    
+
     const existingTimeoutId = parseInt(element.dataset.clearTimeoutId, 10);
     if (!isNaN(existingTimeoutId)) clearTimeout(existingTimeoutId);
 
@@ -150,7 +170,7 @@ export function showShareDialog(url) {
     if (!dialog || !domRefs.shareDialogUrlInput || !domRefs.copyShareLinkBtn || !qrCodeContainer) return;
     domRefs.shareDialogUrlInput.value = url;
     domRefs.copyShareLinkBtn.textContent = 'Copy Link';
-    
+
     if (typeof QRCode !== 'undefined') {
         if (qrCodeInstance === null) {
             qrCodeInstance = new QRCode(qrCodeContainer, {
@@ -166,17 +186,17 @@ export function showShareDialog(url) {
         qrCodeContainer.innerHTML = '<p style="color:red; font-size: 0.9em;">QR Code library failed to load.</p>';
         console.error("QRCode library not loaded!");
     }
-    
+
     qrCodeContainer.style.display = 'none';
     document.getElementById('toggle-qr-code-btn').textContent = 'Show QR Code';
 
     dialog.style.display = 'flex';
-    
+
     requestAnimationFrame(() => {
         dialog.classList.add('visible');
         requestAnimationFrame(() => {
             domRefs.shareDialogUrlInput.select();
-            try { domRefs.shareDialogUrlInput.focus(); } catch (e) {}
+            try { domRefs.shareDialogUrlInput.focus(); } catch (e) { }
         });
     });
 }
@@ -201,9 +221,14 @@ export function showImportDialog() {
         domRefs.importDialogUrlInput.disabled = false;
         domRefs.confirmImportDialogBtn.disabled = false;
         domRefs.cancelImportDialogBtn.disabled = false;
+
+        // Reset File Import State
+        if (domRefs.importFileSelectBtn) domRefs.importFileSelectBtn.disabled = false;
+        if (domRefs.importFileInput) domRefs.importFileInput.value = ''; // Reset so 'change' fires again for same file
+
         clearDialogStatus(domRefs.importDialogStatusMessage);
         dialog.style.display = 'flex';
-        
+
         requestAnimationFrame(() => {
             dialog.classList.add('visible');
             requestAnimationFrame(() => {
@@ -226,7 +251,7 @@ async function handleImportPacket() {
     const urlInput = domRefs.importDialogUrlInput;
     const importBtn = domRefs.confirmImportDialogBtn;
     const cancelBtn = domRefs.cancelImportDialogBtn;
-    
+
     clearDialogStatus(domRefs.importDialogStatusMessage);
     if (!url || !url.startsWith('http')) {
         showDialogStatus(domRefs.importDialogStatusMessage, 'Please enter a valid Packet Share URL.', 'error', false);
@@ -252,13 +277,72 @@ async function handleImportPacket() {
     }
 }
 
+// --- File Import Handlers ---
+
+function preventDefaults(e) {
+    e.preventDefault();
+    e.stopPropagation();
+}
+
+function highlight(e) {
+    domRefs.importDropZone?.classList.add('highlight');
+}
+
+function unhighlight(e) {
+    domRefs.importDropZone?.classList.remove('highlight');
+}
+
+function handleDrop(e) {
+    const dt = e.dataTransfer;
+    const files = dt.files;
+    if (files.length > 0) handleFileImport(files[0]);
+}
+
+function handleFileImport(file) {
+    clearDialogStatus(domRefs.importDialogStatusMessage);
+
+    if (file.type !== 'application/json' && !file.name.endsWith('.json')) {
+        showDialogStatus(domRefs.importDialogStatusMessage, 'Please select a valid JSON file.', 'error', false);
+        return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = async (e) => {
+        try {
+            const json = JSON.parse(e.target.result);
+            showDialogStatus(domRefs.importDialogStatusMessage, 'Importing packet...', 'info', false);
+
+            // Disable inputs
+            if (domRefs.confirmImportDialogBtn) domRefs.confirmImportDialogBtn.disabled = true;
+            if (domRefs.importFileSelectBtn) domRefs.importFileSelectBtn.disabled = true;
+
+            const response = await sendMessageToBackground({ action: 'import_image_from_json', data: { json } });
+
+            if (response && response.success) {
+                // Success is handled via packet_image_created event listener in sidebar.js which hides dialog
+            } else {
+                throw new Error(response?.error || 'Import failed.');
+            }
+        } catch (error) {
+            console.error("Import Error:", error);
+            showDialogStatus(domRefs.importDialogStatusMessage, `Import failed: ${error.message}`, 'error', false);
+            if (domRefs.confirmImportDialogBtn) domRefs.confirmImportDialogBtn.disabled = false;
+            if (domRefs.importFileSelectBtn) domRefs.importFileSelectBtn.disabled = false;
+        }
+    };
+    reader.onerror = () => {
+        showDialogStatus(domRefs.importDialogStatusMessage, 'Error reading file.', 'error', false);
+    };
+    reader.readAsText(file);
+}
+
 export function showCloseGroupDialog(data) {
     const { topic, tabGroupId, instanceId } = data;
     if (!domRefs.closeGroupDialog) return;
-    
+
     removeCloseGroupDialogListeners();
     domRefs.closeGroupDialogMessage.textContent = `Packet '${topic || 'this packet'}' complete!`;
-    
+
     closeGroupConfirmListener = () => handleConfirmCloseGroup(tabGroupId, instanceId);
     closeGroupCancelListener = hideCloseGroupDialog;
     closeGroupOverlayClickListener = (e) => { if (e.target === domRefs.closeGroupDialog) hideCloseGroupDialog(); };
@@ -266,7 +350,7 @@ export function showCloseGroupDialog(data) {
     domRefs.confirmCloseGroupBtn.addEventListener('click', closeGroupConfirmListener);
     domRefs.cancelCloseGroupBtn.addEventListener('click', closeGroupCancelListener);
     domRefs.closeGroupDialog.addEventListener('click', closeGroupOverlayClickListener);
-    
+
     domRefs.closeGroupDialog.style.display = 'flex';
     setTimeout(() => domRefs.closeGroupDialog.classList.add('visible'), 10);
 }
@@ -291,9 +375,9 @@ async function handleConfirmCloseGroup(tabGroupId, instanceIdToClose) {
     hideCloseGroupDialog();
 
     if (typeof navigateTo === 'function') {
-        navigateTo('root'); 
+        navigateTo('root');
     }
-    
+
     const playbackState = await sendMessageToBackground({ action: 'get_playback_state' });
     if (playbackState && playbackState.instanceId === instanceIdToClose) {
         sendMessageToBackground({
@@ -349,7 +433,7 @@ export function showInputPromptDialog(options) {
         domRefs.inputPromptInput.value = '';
         domRefs.confirmInputPromptBtn.disabled = true;
         showDialogStatus(statusEl, 'Generating suggestion...', 'info', false);
-        
+
         defaultValuePromise.then(defaultValue => {
             domRefs.inputPromptInput.value = defaultValue;
             domRefs.confirmInputPromptBtn.disabled = false;
@@ -358,7 +442,7 @@ export function showInputPromptDialog(options) {
             domRefs.confirmInputPromptBtn.disabled = false;
             clearDialogStatus(statusEl);
         });
-        
+
         inputPromptConfirmListener = () => hideInputPromptDialog(domRefs.inputPromptInput.value.trim());
         inputPromptCancelListener = () => hideInputPromptDialog(null);
         inputPromptKeyListener = (e) => {
@@ -373,7 +457,7 @@ export function showInputPromptDialog(options) {
         domRefs.inputPromptInput.addEventListener('keypress', inputPromptKeyListener);
 
         dialog.style.display = 'flex';
-        
+
         requestAnimationFrame(() => {
             dialog.classList.add('visible');
             requestAnimationFrame(() => {
@@ -394,7 +478,7 @@ function hideInputPromptDialog(valueToResolve) {
     if (inputPromptConfirmListener) domRefs.confirmInputPromptBtn?.removeEventListener('click', inputPromptConfirmListener);
     if (inputPromptCancelListener) domRefs.cancelInputPromptBtn?.removeEventListener('click', inputPromptCancelListener);
     if (inputPromptKeyListener) domRefs.inputPromptInput?.removeEventListener('keypress', inputPromptKeyListener);
-    
+
     inputPromptConfirmListener = null;
     inputPromptCancelListener = null;
     inputPromptKeyListener = null;
@@ -433,10 +517,10 @@ export function showCreateSourceDialog() {
             };
 
             dialog.querySelector('#cancel-create-source-btn').onclick = () => hideCreateSourceDialog('cancel');
-            dialog.onclick = (e) => { 
+            dialog.onclick = (e) => {
                 if (e.target === dialog) hideCreateSourceDialog('cancel');
             };
-            
+
             dialog.style.display = 'flex';
             setTimeout(() => dialog.classList.add('visible'), 10);
         } else {
@@ -485,7 +569,7 @@ export function showConfirmSettingsDialog(options) {
         const { proposedChanges } = options;
         const dialog = document.getElementById('confirm-settings-dialog-overlay');
         const contentContainer = document.getElementById('confirm-settings-dialog-content');
-        
+
         if (!dialog || !contentContainer) {
             logger.error("DialogHandler", "Confirm Settings dialog elements not found!");
             return resolve(false);
