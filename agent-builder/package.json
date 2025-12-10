@@ -3,7 +3,8 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "build": "node build.mjs && node patch-agent.mjs && node bundle.mjs && node inline-wasm.mjs && cp dist/agent.bundled.js ../agents/agent.js"
+    "build": "node build.mjs && node patch-agent.mjs && node bundle.mjs && node inline-wasm.mjs && cp dist/agent.bundled.js ../agents/agent.js",
+    "package": "node package-packet.mjs"
   },
   "dependencies": {
     "@bytecodealliance/componentize-js": "^0.19.3",

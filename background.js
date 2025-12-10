@@ -61,8 +61,11 @@ async function hasOffscreenDocument() {
 }
 
 export async function setupOffscreenDocument() {
-    if (await hasOffscreenDocument()) return;
-    
+    // FORCE FRESH: If one exists, kill it to ensure we run latest code.
+    if (await hasOffscreenDocument()) {
+        await chrome.offscreen.closeDocument();
+    }
+
     if (creatingOffscreenDocument) {
         await creatingOffscreenDocument;
     } else {
@@ -71,10 +74,10 @@ export async function setupOffscreenDocument() {
             reasons: ['AUDIO_PLAYBACK', 'DOM_PARSER'],
             justification: 'Play audio persistently and parse HTML content.',
         });
-        
+
         await creatingOffscreenDocument;
         creatingOffscreenDocument = null;
-        
+
         const session = await storage.getSession({ isSidebarOpen: false });
         if (session.isSidebarOpen) {
             notifyOffscreenSidebarState(true);
@@ -100,7 +103,7 @@ export async function notifyOffscreenSidebarState(isOpen) {
             target: 'offscreen',
             type: 'set_sidebar_state',
             data: { isOpen }
-        }).catch(() => {}); 
+        }).catch(() => { });
     }
 }
 
@@ -153,14 +156,15 @@ export async function saveCurrentTime(instanceId, url, providedCurrentTime, isSt
 export async function notifyUIsOfStateChange(options = {}) {
     // FIX: Prefer the passed-in option (which is immediate) over the async storage read (which might be stale)
     let isSidebarOpen = options.isSidebarOpen;
-    
+
     if (typeof isSidebarOpen === 'undefined') {
         isSidebarOpen = (await storage.getSession({
             isSidebarOpen: false
         })).isSidebarOpen;
     }
 
-    const fullStateForSidebar = { ...activeMediaPlayback,
+    const fullStateForSidebar = {
+        ...activeMediaPlayback,
         instance: activeMediaPlayback.instance,
         ...options
     };
@@ -185,13 +189,14 @@ export async function notifyUIsOfStateChange(options = {}) {
         await chrome.tabs.sendMessage(activeTab.id, {
             action: 'update_overlay_state',
             data: lightweightStateForOverlay
-        }).catch(() => {});
+        }).catch(() => { });
 
-    } catch (e) {}
+    } catch (e) { }
 }
 
 export async function setMediaPlaybackState(newState, options = {}) {
-    activeMediaPlayback = { ...activeMediaPlayback,
+    activeMediaPlayback = {
+        ...activeMediaPlayback,
         ...newState
     };
     if (activeMediaPlayback.instanceId && !activeMediaPlayback.instance) {
@@ -209,16 +214,16 @@ export async function setMediaPlaybackState(newState, options = {}) {
 async function initializeExtension() {
     if (chrome.sidePanel && typeof chrome.sidePanel.setPanelBehavior === 'function') {
         await chrome.sidePanel.setPanelBehavior({
-                openPanelOnActionClick: true
-            })
+            openPanelOnActionClick: true
+        })
             .catch((error) => logger.warn('Background:init', 'Failed to set panel behavior', error));
     }
 
     await storage.getSettings();
-    
+
     // [FIX] Wait for the global restoration promise instead of calling again
     await restorationPromise;
-    
+
     await ruleManager.refreshAllRules();
     await tabGroupHandler.cleanupDraftGroup();
 
@@ -229,7 +234,7 @@ async function initializeExtension() {
     }
 
     await restoreContextOnStartup();
-    await reinjectScriptsOnStartup(); 
+    await reinjectScriptsOnStartup();
 }
 
 async function reinjectScriptsOnStartup() {
@@ -260,9 +265,9 @@ chrome.runtime.onConnect.addListener((port) => {
         notifyUIsOfStateChange({ isSidebarOpen: true });
 
         port.onDisconnect.addListener(() => {
-             // Forces the overlay to SHOW because the sidebar is now closed
-             notifyUIsOfStateChange({ isSidebarOpen: false, animate: true });
-             notifyOffscreenSidebarState(false);
+            // Forces the overlay to SHOW because the sidebar is now closed
+            notifyUIsOfStateChange({ isSidebarOpen: false, animate: true });
+            notifyOffscreenSidebarState(false);
         });
     }
 });
@@ -310,7 +315,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
                 target: { tabId: tabId },
                 files: ['selector.css']
             });
-        } catch (e) {}
+        } catch (e) { }
     }
 });
 
@@ -334,7 +339,7 @@ chrome.tabs.onMoved.addListener(async (tabId, moveInfo) => {
         if (tab.groupId && tab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE) {
             await scheduleReorder(tab.groupId);
         }
-    } catch (e) {}
+    } catch (e) { }
 });
 
 if (chrome.tabGroups) {

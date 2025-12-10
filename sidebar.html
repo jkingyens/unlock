@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html>
+
 <head>
   <title>Unlock Sidebar</title>
   <link rel="stylesheet" href="sidebar.css">
@@ -7,78 +8,357 @@
   <style>
     /* New style for the remove button on draft cards */
     .card .delete-draft-item-btn {
-        position: absolute;
-        top: 2px;
-        right: 5px;
-        background: none;
-        border: none;
-        font-size: 1.6em;
-        line-height: 1;
-        cursor: pointer;
-        color: var(--text-secondary);
-        padding: 2px 5px;
-        font-weight: 300;
+      position: absolute;
+      top: 2px;
+      right: 5px;
+      background: none;
+      border: none;
+      font-size: 1.6em;
+      line-height: 1;
+      cursor: pointer;
+      color: var(--text-secondary);
+      padding: 2px 5px;
+      font-weight: 300;
     }
+
     .card .delete-draft-item-btn:hover {
-        color: var(--status-error-color);
+      color: var(--status-error-color);
     }
+
     .card {
-        position: relative; /* Needed for absolute positioning of child button */
+      position: relative;
+      /* Needed for absolute positioning of child button */
     }
 
     /* Styles for Share Dialog (Keep as is) */
-    .share-dialog-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.5); display: flex; justify-content: center; align-items: center; z-index: 1002; padding: 15px; }
-    .share-dialog { background-color: var(--bg-primary); padding: 20px; border-radius: 6px; box-shadow: 0 4px 15px rgba(0,0,0,0.2); max-width: 90%; width: 400px; text-align: center; color: var(--text-primary); }
-    .share-dialog p { margin-bottom: 10px; font-size: 0.95em; }
-    .share-dialog input[type="text"] { width: 100%; padding: 8px; margin-bottom: 15px; border: 1px solid var(--border-primary); border-radius: 4px; font-size: 0.9em; box-sizing: border-box; background-color: var(--input-bg); color: var(--text-primary); }
-    .share-dialog button { padding: 8px 15px; border: none; border-radius: 4px; cursor: pointer; background-color: var(--button-primary-bg); color: var(--text-on-primary-button); font-size: 0.9em; margin: 0 5px; }
-    .share-dialog button:hover { background-color: var(--button-primary-hover-bg); }
-    .share-dialog .close-btn { background-color: var(--button-secondary-bg); color: var(--text-on-secondary-button); }
-     .share-dialog .close-btn:hover { background-color: var(--button-secondary-hover-bg); }
+    .share-dialog-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background-color: rgba(0, 0, 0, 0.5);
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      z-index: 1002;
+      padding: 15px;
+    }
+
+    .share-dialog {
+      background-color: var(--bg-primary);
+      padding: 20px;
+      border-radius: 6px;
+      box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
+      max-width: 90%;
+      width: 400px;
+      text-align: center;
+      color: var(--text-primary);
+    }
+
+    .share-dialog p {
+      margin-bottom: 10px;
+      font-size: 0.95em;
+    }
+
+    .share-dialog input[type="text"] {
+      width: 100%;
+      padding: 8px;
+      margin-bottom: 15px;
+      border: 1px solid var(--border-primary);
+      border-radius: 4px;
+      font-size: 0.9em;
+      box-sizing: border-box;
+      background-color: var(--input-bg);
+      color: var(--text-primary);
+    }
+
+    .share-dialog button {
+      padding: 8px 15px;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      background-color: var(--button-primary-bg);
+      color: var(--text-on-primary-button);
+      font-size: 0.9em;
+      margin: 0 5px;
+    }
+
+    .share-dialog button:hover {
+      background-color: var(--button-primary-hover-bg);
+    }
+
+    .share-dialog .close-btn {
+      background-color: var(--button-secondary-bg);
+      color: var(--text-on-secondary-button);
+    }
+
+    .share-dialog .close-btn:hover {
+      background-color: var(--button-secondary-hover-bg);
+    }
+
     /* Dark mode adjustments */
-     body.dark-mode .share-dialog input[type="text"] { border-color: var(--border-primary); }
-     body.dark-mode .share-dialog button { background-color: var(--button-primary-bg); color: var(--text-on-primary-button); }
-     body.dark-mode .share-dialog button:hover { background-color: var(--button-primary-hover-bg); }
-     body.dark-mode .share-dialog .close-btn { background-color: var(--button-secondary-bg); color: var(--text-on-secondary-button); }
-      body.dark-mode .share-dialog .close-btn:hover { background-color: var(--button-secondary-hover-bg); }
+    body.dark-mode .share-dialog input[type="text"] {
+      border-color: var(--border-primary);
+    }
+
+    body.dark-mode .share-dialog button {
+      background-color: var(--button-primary-bg);
+      color: var(--text-on-primary-button);
+    }
+
+    body.dark-mode .share-dialog button:hover {
+      background-color: var(--button-primary-hover-bg);
+    }
+
+    body.dark-mode .share-dialog .close-btn {
+      background-color: var(--button-secondary-bg);
+      color: var(--text-on-secondary-button);
+    }
+
+    body.dark-mode .share-dialog .close-btn:hover {
+      background-color: var(--button-secondary-hover-bg);
+    }
 
     /* --- Styles for Import Dialog --- */
-    .import-dialog-overlay, .make-page-dialog-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.5); display: flex; justify-content: center; align-items: center; z-index: 1002; padding: 15px; }
-    .import-dialog, .make-page-dialog { background-color: var(--bg-primary); padding: 20px; border-radius: 6px; box-shadow: 0 4px 15px rgba(0,0,0,0.2); max-width: 90%; width: 400px; text-align: center; color: var(--text-primary); }
-    .import-dialog p, .make-page-dialog p { margin-top: 0; margin-bottom: 15px; font-size: 1.05em; font-weight: 600; }
-    .import-dialog input[type="url"] { width: 100%; padding: 8px 10px; margin-bottom: 10px; border: 1px solid var(--border-primary); border-radius: 4px; font-size: 0.9em; box-sizing: border-box; background-color: var(--input-bg); color: var(--text-primary); }
-    .make-page-dialog textarea { width: 100%; min-height: 120px; padding: 8px 10px; margin-bottom: 10px; border: 1px solid var(--border-primary); border-radius: 4px; font-size: 0.9em; box-sizing: border-box; background-color: var(--input-bg); color: var(--text-primary); resize: vertical; }
-    .import-dialog .dialog-status-message { min-height: 1.2em; margin-top: 10px; margin-bottom: 10px; font-size: 0.9em; font-style: italic; color: var(--text-accent); text-align: left;}
-    .import-dialog .dialog-status-message.error-message { color: var(--status-error-color); font-weight: bold; }
-    .import-dialog .dialog-status-message.success-message { color: var(--status-success-color); font-weight: 500;}
-    .import-dialog .dialog-buttons, .make-page-dialog .dialog-buttons { margin-top: 15px; display: flex; justify-content: flex-end; gap: 10px; }
-    .import-dialog button, .make-page-dialog button { padding: 8px 15px; border: none; border-radius: 4px; cursor: pointer; font-size: 0.9em; }
-    .import-dialog .confirm-btn, .make-page-dialog .confirm-btn { background-color: var(--button-primary-bg); color: var(--text-on-primary-button); }
-    .import-dialog .confirm-btn:hover, .make-page-dialog .confirm-btn:hover { background-color: var(--button-primary-hover-bg); }
-    .import-dialog .cancel-btn, .make-page-dialog .cancel-btn { background-color: var(--button-secondary-bg); color: var(--text-on-secondary-button); }
-    .import-dialog .cancel-btn:hover, .make-page-dialog .cancel-btn:hover { background-color: var(--button-secondary-hover-bg); }
+    .import-dialog-overlay,
+    .make-page-dialog-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background-color: rgba(0, 0, 0, 0.5);
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      z-index: 1002;
+      padding: 15px;
+    }
+
+    .import-dialog,
+    .make-page-dialog {
+      background-color: var(--bg-primary);
+      padding: 20px;
+      border-radius: 6px;
+      box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
+      max-width: 90%;
+      width: 400px;
+      text-align: center;
+      color: var(--text-primary);
+    }
+
+    .import-dialog p,
+    .make-page-dialog p {
+      margin-top: 0;
+      margin-bottom: 15px;
+      font-size: 1.05em;
+      font-weight: 600;
+    }
+
+    .import-dialog input[type="url"] {
+      width: 100%;
+      padding: 8px 10px;
+      margin-bottom: 10px;
+      border: 1px solid var(--border-primary);
+      border-radius: 4px;
+      font-size: 0.9em;
+      box-sizing: border-box;
+      background-color: var(--input-bg);
+      color: var(--text-primary);
+    }
+
+    .make-page-dialog textarea {
+      width: 100%;
+      min-height: 120px;
+      padding: 8px 10px;
+      margin-bottom: 10px;
+      border: 1px solid var(--border-primary);
+      border-radius: 4px;
+      font-size: 0.9em;
+      box-sizing: border-box;
+      background-color: var(--input-bg);
+      color: var(--text-primary);
+      resize: vertical;
+    }
+
+    .import-dialog .dialog-status-message {
+      min-height: 1.2em;
+      margin-top: 10px;
+      margin-bottom: 10px;
+      font-size: 0.9em;
+      font-style: italic;
+      color: var(--text-accent);
+      text-align: left;
+    }
+
+    .import-dialog .dialog-status-message.error-message {
+      color: var(--status-error-color);
+      font-weight: bold;
+    }
+
+    .import-dialog .dialog-status-message.success-message {
+      color: var(--status-success-color);
+      font-weight: 500;
+    }
+
+    .import-dialog .dialog-buttons,
+    .make-page-dialog .dialog-buttons {
+      margin-top: 15px;
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+    }
+
+    .import-dialog button,
+    .make-page-dialog button {
+      padding: 8px 15px;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 0.9em;
+    }
+
+    .import-dialog .confirm-btn,
+    .make-page-dialog .confirm-btn {
+      background-color: var(--button-primary-bg);
+      color: var(--text-on-primary-button);
+    }
+
+    .import-dialog .confirm-btn:hover,
+    .make-page-dialog .confirm-btn:hover {
+      background-color: var(--button-primary-hover-bg);
+    }
+
+    .import-dialog .cancel-btn,
+    .make-page-dialog .cancel-btn {
+      background-color: var(--button-secondary-bg);
+      color: var(--text-on-secondary-button);
+    }
+
+    .import-dialog .cancel-btn:hover,
+    .make-page-dialog .cancel-btn:hover {
+      background-color: var(--button-secondary-hover-bg);
+    }
+
     /* Dark mode adjustments */
-    body.dark-mode .import-dialog input[type="url"], body.dark-mode .make-page-dialog textarea { border-color: var(--border-primary); }
-    body.dark-mode .import-dialog .confirm-btn, body.dark-mode .make-page-dialog .confirm-btn { background-color: var(--button-primary-bg); color: var(--text-on-primary-button); }
-    body.dark-mode .import-dialog .confirm-btn:hover, body.dark-mode .make-page-dialog .confirm-btn:hover { background-color: var(--button-primary-hover-bg); }
-    body.dark-mode .import-dialog .cancel-btn, body.dark-mode .make-page-dialog .cancel-btn { background-color: var(--button-secondary-bg); color: var(--text-on-secondary-button); }
-    body.dark-mode .import-dialog .cancel-btn:hover, body.dark-mode .make-page-dialog .cancel-btn:hover { background-color: var(--button-secondary-hover-bg); }
+    body.dark-mode .import-dialog input[type="url"],
+    body.dark-mode .make-page-dialog textarea {
+      border-color: var(--border-primary);
+    }
+
+    body.dark-mode .import-dialog .confirm-btn,
+    body.dark-mode .make-page-dialog .confirm-btn {
+      background-color: var(--button-primary-bg);
+      color: var(--text-on-primary-button);
+    }
+
+    body.dark-mode .import-dialog .confirm-btn:hover,
+    body.dark-mode .make-page-dialog .confirm-btn:hover {
+      background-color: var(--button-primary-hover-bg);
+    }
+
+    body.dark-mode .import-dialog .cancel-btn,
+    body.dark-mode .make-page-dialog .cancel-btn {
+      background-color: var(--button-secondary-bg);
+      color: var(--text-on-secondary-button);
+    }
+
+    body.dark-mode .import-dialog .cancel-btn:hover,
+    body.dark-mode .make-page-dialog .cancel-btn:hover {
+      background-color: var(--button-secondary-hover-bg);
+    }
 
     /* --- NEW: Styles for Close Group Dialog --- */
-    .close-group-dialog-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.5); display: flex; justify-content: center; align-items: center; z-index: 1002; padding: 15px; }
-    .close-group-dialog { background-color: var(--bg-primary); padding: 25px; border-radius: 6px; box-shadow: 0 4px 15px rgba(0,0,0,0.2); max-width: 90%; width: 380px; /* Slightly narrower */ text-align: center; color: var(--text-primary); }
-    .close-group-dialog p { margin-top: 0; margin-bottom: 20px; font-size: 1.0em; line-height: 1.4; } /* Slightly smaller font, more line height */
-    .close-group-dialog .dialog-buttons { margin-top: 15px; display: flex; justify-content: center; gap: 15px; } /* Centered buttons, more gap */
-    .close-group-dialog button { padding: 9px 18px; border: none; border-radius: 4px; cursor: pointer; font-size: 0.95em; font-weight: 500; } /* Slightly larger buttons */
-    .close-group-dialog .confirm-btn { background-color: var(--button-danger-bg); color: var(--text-on-primary-button); } /* Use danger for confirm close */
-    .close-group-dialog .confirm-btn:hover { background-color: var(--button-danger-hover-bg); }
-    .close-group-dialog .cancel-btn { background-color: var(--button-secondary-bg); color: var(--text-on-secondary-button); }
-    .close-group-dialog .cancel-btn:hover { background-color: var(--button-secondary-hover-bg); }
+    .close-group-dialog-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background-color: rgba(0, 0, 0, 0.5);
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      z-index: 1002;
+      padding: 15px;
+    }
+
+    .close-group-dialog {
+      background-color: var(--bg-primary);
+      padding: 25px;
+      border-radius: 6px;
+      box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
+      max-width: 90%;
+      width: 380px;
+      /* Slightly narrower */
+      text-align: center;
+      color: var(--text-primary);
+    }
+
+    .close-group-dialog p {
+      margin-top: 0;
+      margin-bottom: 20px;
+      font-size: 1.0em;
+      line-height: 1.4;
+    }
+
+    /* Slightly smaller font, more line height */
+    .close-group-dialog .dialog-buttons {
+      margin-top: 15px;
+      display: flex;
+      justify-content: center;
+      gap: 15px;
+    }
+
+    /* Centered buttons, more gap */
+    .close-group-dialog button {
+      padding: 9px 18px;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 0.95em;
+      font-weight: 500;
+    }
+
+    /* Slightly larger buttons */
+    .close-group-dialog .confirm-btn {
+      background-color: var(--button-danger-bg);
+      color: var(--text-on-primary-button);
+    }
+
+    /* Use danger for confirm close */
+    .close-group-dialog .confirm-btn:hover {
+      background-color: var(--button-danger-hover-bg);
+    }
+
+    .close-group-dialog .cancel-btn {
+      background-color: var(--button-secondary-bg);
+      color: var(--text-on-secondary-button);
+    }
+
+    .close-group-dialog .cancel-btn:hover {
+      background-color: var(--button-secondary-hover-bg);
+    }
+
     /* Dark mode adjustments */
-    body.dark-mode .close-group-dialog .confirm-btn { background-color: var(--button-danger-bg); color: var(--text-on-primary-button); }
-    body.dark-mode .close-group-dialog .confirm-btn:hover { background-color: var(--button-danger-hover-bg); }
-    body.dark-mode .close-group-dialog .cancel-btn { background-color: var(--button-secondary-bg); color: var(--text-on-secondary-button); }
-    body.dark-mode .close-group-dialog .cancel-btn:hover { background-color: var(--button-secondary-hover-bg); }
+    body.dark-mode .close-group-dialog .confirm-btn {
+      background-color: var(--button-danger-bg);
+      color: var(--text-on-primary-button);
+    }
+
+    body.dark-mode .close-group-dialog .confirm-btn:hover {
+      background-color: var(--button-danger-hover-bg);
+    }
+
+    body.dark-mode .close-group-dialog .cancel-btn {
+      background-color: var(--button-secondary-bg);
+      color: var(--text-on-secondary-button);
+    }
+
+    body.dark-mode .close-group-dialog .cancel-btn:hover {
+      background-color: var(--button-secondary-hover-bg);
+    }
 
     /* LLM Model List Item Styling */
     .llm-model-item {
@@ -90,19 +370,24 @@
       margin-bottom: 8px;
       background-color: var(--bg-secondary);
     }
+
     .llm-model-item:hover {
       background-color: var(--bg-tertiary);
     }
+
     .llm-model-item input[type="radio"] {
       margin-right: 10px;
-      width: auto; /* override general input width */
+      width: auto;
+      /* override general input width */
       accent-color: var(--text-accent);
     }
+
     .llm-model-item .model-name-display {
       flex-grow: 1;
       font-size: 0.95em;
       color: var(--text-primary);
     }
+
     .llm-model-item .model-type-display {
       font-size: 0.8em;
       color: var(--text-secondary);
@@ -111,6 +396,7 @@
       background-color: var(--bg-tertiary);
       border-radius: 3px;
     }
+
     .llm-model-item button {
       background: none;
       border: none;
@@ -121,28 +407,35 @@
       margin-left: 5px;
       border-radius: 3px;
     }
+
     .llm-model-item button:hover {
       background-color: var(--bg-accent);
-      color: var(--text-on-primary-button); /* if bg-accent is light, else var(--text-primary) */
+      color: var(--text-on-primary-button);
+      /* if bg-accent is light, else var(--text-primary) */
     }
-     body.dark-mode .llm-model-item button:hover {
-        background-color: var(--button-secondary-hover-bg);
-        color: var(--text-primary);
-     }
+
+    body.dark-mode .llm-model-item button:hover {
+      background-color: var(--button-secondary-hover-bg);
+      color: var(--text-primary);
+    }
+
     .llm-model-item .delete-btn {
       color: var(--status-error-color);
     }
+
     .llm-model-item .delete-btn:hover {
       background-color: var(--status-error-color);
       color: #fff;
     }
-     #llm-edit-form-buttons button, #llm-add-new-model-btn {
-        padding: 7px 12px;
-        font-size: 0.9em;
-     }
 
+    #llm-edit-form-buttons button,
+    #llm-add-new-model-btn {
+      padding: 7px 12px;
+      font-size: 0.9em;
+    }
   </style>
 </head>
+
 <body>
   <div class="sidebar-header">
     <button id="back-btn" class="hidden" title="Back to Packets List">Back</button>
@@ -152,73 +445,92 @@
 
   <div class="main-content-area">
     <div id="root-view" class="view-container">
-       <div class="tabs">
-         <div id="tab-inbox" class="tab active">Library</div>
-         <div id="tab-in-progress" class="tab">Started</div>
-         <div id="tab-completed" class="tab">Completed</div>
-       </div>
-       <div id="tab-content-container">
-         <div id="content-inbox" class="tab-content active">
-           <div class="table-container">
-             <table class="packet-table" id="inbox-table">
-               <thead> <tr> <th>Name</th> </tr> </thead>
-               <tbody id="inbox-list"> </tbody>
-             </table>
-           </div>
-         </div>
-         <div id="content-in-progress" class="tab-content">
-           <div class="table-container">
-             <table class="packet-table" id="in-progress-table">
-               <thead> <tr> <th class="checkbox-cell"></th> <th>Name</th> <th>Progress</th> </tr> </thead>
-               <tbody id="in-progress-list"> </tbody>
-             </table>
-           </div>
-         </div>
-         <div id="content-completed" class="tab-content">
-           <div class="table-container">
-             <table class="packet-table" id="completed-table">
-               <thead> <tr> <th class="checkbox-cell"></th> <th>Name</th> <th>Progress</th> </tr> </thead>
-               <tbody id="completed-list"> </tbody>
-             </table>
-           </div>
-         </div>
-       </div>
-       <div id="sidebar-status-message" class="status-message"></div>
-       <div class="list-action-buttons-container" style="justify-content: space-between;">
-         <button id="create-packet-sidebar-btn" class="sidebar-action-button" style="background-color: var(--button-primary-bg); color: var(--text-on-primary-button);">Create</button>
-         <div>
-            <button id="show-import-dialog-btn" class="sidebar-action-button">Import</button>
-            <button id="sidebar-delete-btn" style="display: none;">Delete Selected</button>
-         </div>
-       </div>
+      <div class="tabs">
+        <div id="tab-inbox" class="tab active">Library</div>
+        <div id="tab-in-progress" class="tab">Started</div>
+        <div id="tab-completed" class="tab">Completed</div>
+      </div>
+      <div id="tab-content-container">
+        <div id="content-inbox" class="tab-content active">
+          <div class="table-container">
+            <table class="packet-table" id="inbox-table">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                </tr>
+              </thead>
+              <tbody id="inbox-list"> </tbody>
+            </table>
+          </div>
+        </div>
+        <div id="content-in-progress" class="tab-content">
+          <div class="table-container">
+            <table class="packet-table" id="in-progress-table">
+              <thead>
+                <tr>
+                  <th class="checkbox-cell"></th>
+                  <th>Name</th>
+                  <th>Progress</th>
+                </tr>
+              </thead>
+              <tbody id="in-progress-list"> </tbody>
+            </table>
+          </div>
+        </div>
+        <div id="content-completed" class="tab-content">
+          <div class="table-container">
+            <table class="packet-table" id="completed-table">
+              <thead>
+                <tr>
+                  <th class="checkbox-cell"></th>
+                  <th>Name</th>
+                  <th>Progress</th>
+                </tr>
+              </thead>
+              <tbody id="completed-list"> </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+      <div id="sidebar-status-message" class="status-message"></div>
+      <div class="list-action-buttons-container" style="justify-content: space-between;">
+        <button id="create-packet-sidebar-btn" class="sidebar-action-button"
+          style="background-color: var(--button-primary-bg); color: var(--text-on-primary-button);">Create</button>
+        <div>
+          <button id="show-import-dialog-btn" class="sidebar-action-button">Import</button>
+          <button id="sidebar-delete-btn" style="display: none;">Delete Selected</button>
+        </div>
+      </div>
     </div>
 
     <div id="create-view" class="view-container hidden" style="display: flex; flex-direction: column;">
-        <div id="create-view-content-list" style="flex-grow: 1; overflow-y: auto; padding: 15px;">
-            <div id="drop-zone" class="placeholder-card">
-                <p>Drag & Drop Media Files Here</p>
-                <div class="placeholder-card-actions">
-                    <button id="add-current-tab-btn" class="sidebar-action-button">Add Current Tab</button>
-                    <button id="create-new-page-btn" class="sidebar-action-button">Create New Page</button>
-                </div>
-            </div>
+      <div id="create-view-content-list" style="flex-grow: 1; overflow-y: auto; padding: 15px;">
+        <div id="drop-zone" class="placeholder-card">
+          <p>Drag & Drop Media Files Here</p>
+          <div class="placeholder-card-actions">
+            <button id="add-current-tab-btn" class="sidebar-action-button">Add Current Tab</button>
+            <button id="create-new-page-btn" class="sidebar-action-button">Create New Page</button>
+          </div>
         </div>
-        <div id="create-view-actions" class="create-view-actions-bar">
+      </div>
+      <div id="create-view-actions" class="create-view-actions-bar">
         <button id="create-view-discard-btn" class="sidebar-action-button tertiary">Discard</button>
-        <button id="create-view-save-btn" class="sidebar-action-button primary" style="background-color: var(--button-primary-bg); color: var(--text-on-primary-button);">Save</button>
-        </div>
+        <button id="create-view-save-btn" class="sidebar-action-button primary"
+          style="background-color: var(--button-primary-bg); color: var(--text-on-primary-button);">Save</button>
+      </div>
     </div>
 
     <div id="packet-detail-view" class="view-container hidden">
-      </div>
+    </div>
 
     <div id="settings-view" class="view-container hidden">
       <h3>Large Language Models <a href="#" id="llm-help-link" class="help-link">(How to get keys?)</a></h3>
       <div id="llm-models-list">
-        </div>
+      </div>
       <button id="llm-add-new-model-btn" class="sidebar-action-button">Add New LLM Configuration</button>
 
-      <div id="llm-model-edit-form-section" class="hidden" style="margin-top: 15px; padding: 15px; border: 1px solid var(--border-primary); border-radius: 4px;">
+      <div id="llm-model-edit-form-section" class="hidden"
+        style="margin-top: 15px; padding: 15px; border: 1px solid var(--border-primary); border-radius: 4px;">
         <h4 id="llm-edit-form-title">Add New LLM Configuration</h4>
         <input type="hidden" id="llm-edit-model-id">
         <div class="form-group">
@@ -233,9 +545,9 @@
             <option value="anthropic">Anthropic Claude</option>
             <option value="grok">Grok (xAI)</option>
             <option value="perplexity">Perplexity</option>
-            <option value="llama">Llama (Meta)</option> 
+            <option value="llama">Llama (Meta)</option>
             <option value="deepseek">DeepSeek</option>
-            <option value="openai-compatible">OpenAI-Compatible API</option>  
+            <option value="openai-compatible">OpenAI-Compatible API</option>
           </select>
         </div>
         <div class="form-group" id="llm-edit-api-key-group">
@@ -252,22 +564,26 @@
         <div class="form-group" id="llm-edit-api-endpoint-group">
           <label for="llm-edit-api-endpoint">API Endpoint Base URL</label>
           <input type="url" id="llm-edit-api-endpoint" placeholder="e.g., https://api.openai.com/v1">
-          <p class="setting-description" id="llm-edit-api-endpoint-desc" style="font-size:0.8em;">Enter the full base URL for the API. For OpenAI-compatible, include up to /v1.</p>
+          <p class="setting-description" id="llm-edit-api-endpoint-desc" style="font-size:0.8em;">Enter the full base
+            URL for the API. For OpenAI-compatible, include up to /v1.</p>
         </div>
         <div id="llm-edit-form-buttons" style="margin-top:10px; text-align: right;">
           <button id="llm-edit-form-cancel-btn" class="sidebar-action-button">Cancel</button>
-          <button id="llm-edit-form-save-btn" class="sidebar-action-button" style="background-color: var(--button-primary-bg); color: var(--text-on-primary-button);">Save Configuration</button>
+          <button id="llm-edit-form-save-btn" class="sidebar-action-button"
+            style="background-color: var(--button-primary-bg); color: var(--text-on-primary-button);">Save
+            Configuration</button>
         </div>
       </div>
 
       <div class="section-divider"></div>
       <h3>Cloud Services <a href="#" id="s3-help-link" class="help-link">(How to get keys?)</a></h3>
-        
+
       <div id="s3-configs-list">
-        </div>
+      </div>
       <button id="s3-add-new-config-btn" class="sidebar-action-button">Add New Storage Configuration</button>
 
-      <div id="s3-config-edit-form-section" class="hidden" style="margin-top: 15px; padding: 15px; border: 1px solid var(--border-primary); border-radius: 4px;">
+      <div id="s3-config-edit-form-section" class="hidden"
+        style="margin-top: 15px; padding: 15px; border: 1px solid var(--border-primary); border-radius: 4px;">
         <h4 id="s3-edit-form-title">Add New Storage Configuration</h4>
         <input type="hidden" id="s3-edit-config-id">
         <div class="form-group">
@@ -283,21 +599,21 @@
           </select>
         </div>
         <div class="form-group">
-            <label>Cloud Storage Access Keys</label>
-            <div class="input-wrapper">
-              <label for="s3-edit-access-key" style="font-weight: normal; font-size: 0.9em;">Access Key ID:</label>
-              <div style="position: relative;">
-                <input type="password" id="s3-edit-access-key" placeholder="Enter Access Key ID">
-                <span class="eye-icon" id="toggle-s3-access-key-visibility">Show</span>
-              </div>
+          <label>Cloud Storage Access Keys</label>
+          <div class="input-wrapper">
+            <label for="s3-edit-access-key" style="font-weight: normal; font-size: 0.9em;">Access Key ID:</label>
+            <div style="position: relative;">
+              <input type="password" id="s3-edit-access-key" placeholder="Enter Access Key ID">
+              <span class="eye-icon" id="toggle-s3-access-key-visibility">Show</span>
             </div>
-            <div class="input-wrapper">
-              <label for="s3-edit-secret-key" style="font-weight: normal; font-size: 0.9em;">Secret Access Key:</label>
-              <div style="position: relative;">
-                <input type="password" id="s3-edit-secret-key" placeholder="Enter Secret Access Key">
-                <span class="eye-icon" id="toggle-s3-secret-key-visibility">Show</span>
-              </div>
+          </div>
+          <div class="input-wrapper">
+            <label for="s3-edit-secret-key" style="font-weight: normal; font-size: 0.9em;">Secret Access Key:</label>
+            <div style="position: relative;">
+              <input type="password" id="s3-edit-secret-key" placeholder="Enter Secret Access Key">
+              <span class="eye-icon" id="toggle-s3-secret-key-visibility">Show</span>
             </div>
+          </div>
         </div>
         <div class="form-group">
           <label for="s3-edit-bucket-name">Bucket / Space Name</label>
@@ -309,61 +625,64 @@
         </div>
         <div id="s3-edit-form-buttons" style="margin-top:10px; text-align: right;">
           <button id="s3-edit-form-cancel-btn" class="sidebar-action-button">Cancel</button>
-          <button id="s3-edit-form-save-btn" class="sidebar-action-button" style="background-color: var(--button-primary-bg); color: var(--text-on-primary-button);">Save Configuration</button>
+          <button id="s3-edit-form-save-btn" class="sidebar-action-button"
+            style="background-color: var(--button-primary-bg); color: var(--text-on-primary-button);">Save
+            Configuration</button>
         </div>
       </div>
       <div class="section-divider"></div>
-        <h3>Other Services</h3>
-        <div class="form-group">
-            <label for="elevenlabs-api-key">ElevenLabs API Key</label>
-            <div class="input-wrapper">
-                <input type="password" id="elevenlabs-api-key" placeholder="Enter ElevenLabs API Key">
-                <span class="eye-icon" id="toggle-elevenlabs-api-key-visibility">Show</span>
-            </div>
+      <h3>Other Services</h3>
+      <div class="form-group">
+        <label for="elevenlabs-api-key">ElevenLabs API Key</label>
+        <div class="input-wrapper">
+          <input type="password" id="elevenlabs-api-key" placeholder="Enter ElevenLabs API Key">
+          <span class="eye-icon" id="toggle-elevenlabs-api-key-visibility">Show</span>
         </div>
+      </div>
       <div class="section-divider"></div>
       <h3>Features</h3>
       <div class="form-group">
-          <label class="checkbox-label">
-              <input type="checkbox" id="tab-groups-enabled" name="tab-groups-enabled">
-              Enable Tab Group Management
-          </label>
-          <p class="setting-description">Automatically group tabs related to a packet.</p>
-      </div>
-      <div class="form-group">
-          <label class="checkbox-label">
-              <input type="checkbox" id="confetti-enabled" name="confetti-enabled">
-              Enable Completion Confetti
-          </label>
-          <p class="setting-description">Show a celebratory animation when a packet is completed.</p>
-      </div>
-       <div class="form-group">
-          <label class="checkbox-label">
-              <input type="checkbox" id="media-overlay-enabled" name="media-overlay-enabled">
-              Show Media Playback Overlay
-          </label>
-          <p class="setting-description">Display a floating controller when media is playing.</p>
-      </div>
-      <div class="form-group">
-          <label class="checkbox-label">
-              <input type="checkbox" id="prefer-audio-enabled" name="prefer-audio-enabled">
-              Prefer Audio Summaries
-          </label>
-          <p class="setting-description">When available, show the audio version of a summary by default.</p>
-      </div>
-      <div class="form-group">
-          <label class="checkbox-label">
-              <input type="checkbox" id="waveform-link-markers-enabled" name="waveform-link-markers-enabled">
-              Show Link Markers on Waveform
-          </label>
-          <p class="setting-description">When playing audio, show visual cues on the waveform for upcoming links.</p>
+        <label class="checkbox-label">
+          <input type="checkbox" id="tab-groups-enabled" name="tab-groups-enabled">
+          Enable Tab Group Management
+        </label>
+        <p class="setting-description">Automatically group tabs related to a packet.</p>
       </div>
       <div class="form-group">
         <label class="checkbox-label">
-            <input type="checkbox" id="quick-copy-enabled" name="quick-copy-enabled">
-            Enable Quick Copy Instantiation
+          <input type="checkbox" id="confetti-enabled" name="confetti-enabled">
+          Enable Completion Confetti
         </label>
-        <p class="setting-description">Instantly copy local content to a new packet instance instead of re-downloading.</p>
+        <p class="setting-description">Show a celebratory animation when a packet is completed.</p>
+      </div>
+      <div class="form-group">
+        <label class="checkbox-label">
+          <input type="checkbox" id="media-overlay-enabled" name="media-overlay-enabled">
+          Show Media Playback Overlay
+        </label>
+        <p class="setting-description">Display a floating controller when media is playing.</p>
+      </div>
+      <div class="form-group">
+        <label class="checkbox-label">
+          <input type="checkbox" id="prefer-audio-enabled" name="prefer-audio-enabled">
+          Prefer Audio Summaries
+        </label>
+        <p class="setting-description">When available, show the audio version of a summary by default.</p>
+      </div>
+      <div class="form-group">
+        <label class="checkbox-label">
+          <input type="checkbox" id="waveform-link-markers-enabled" name="waveform-link-markers-enabled">
+          Show Link Markers on Waveform
+        </label>
+        <p class="setting-description">When playing audio, show visual cues on the waveform for upcoming links.</p>
+      </div>
+      <div class="form-group">
+        <label class="checkbox-label">
+          <input type="checkbox" id="quick-copy-enabled" name="quick-copy-enabled">
+          Enable Quick Copy Instantiation
+        </label>
+        <p class="setting-description">Instantly copy local content to a new packet instance instead of re-downloading.
+        </p>
       </div>
       <div class="form-group">
         <div class="setting-row">
@@ -376,35 +695,39 @@
       <h3>Theme</h3>
       <div class="form-group">
         <div class="radio-group">
-          <label class="radio-label"><input type="radio" name="theme" value="auto" id="theme-auto" checked> Auto (System Default)</label>
+          <label class="radio-label"><input type="radio" name="theme" value="auto" id="theme-auto" checked> Auto (System
+            Default)</label>
           <label class="radio-label"><input type="radio" name="theme" value="light" id="theme-light"> Light</label>
           <label class="radio-label"><input type="radio" name="theme" value="dark" id="theme-dark"> Dark</label>
         </div>
       </div>
       <div class="form-group">
-          <button id="debug-test-agent-btn" class="sidebar-action-button">Test Remote Agent (JCO/WASM)</button>
-          <p class="setting-description">Simulates downloading and running a sandboxed agent that calls the LLM.</p>
-          <pre id="debug-agent-result" class="status-message" style="display:none; text-align:left; white-space: pre-wrap; background: var(--bg-tertiary); padding: 10px; border-radius: 4px; font-family: monospace; font-size: 0.85em; color: var(--text-primary); margin-top: 10px;"></pre>
+        <button id="debug-test-agent-btn" class="sidebar-action-button">Test Remote Agent (JCO/WASM)</button>
+        <p class="setting-description">Simulates downloading and running a sandboxed agent that calls the LLM.</p>
+        <pre id="debug-agent-result" class="status-message"
+          style="display:none; text-align:left; white-space: pre-wrap; background: var(--bg-tertiary); padding: 10px; border-radius: 4px; font-family: monospace; font-size: 0.85em; color: var(--text-primary); margin-top: 10px;"></pre>
       </div>
-      
+
       <div class="section-divider"></div>
       <h3>Debug</h3>
       <div class="form-group">
-          <button id="debug-clear-data-btn" class="sidebar-action-button danger">Clear All Packet Data</button>
-          <p class="setting-description">Deletes all packet images, instances, and cached content. Use with caution.</p>
+        <button id="debug-clear-data-btn" class="sidebar-action-button danger">Clear All Packet Data</button>
+        <p class="setting-description">Deletes all packet images, instances, and cached content. Use with caution.</p>
       </div>
       <div class="form-group">
-          <button id="debug-clear-instance-cache-btn" class="sidebar-action-button danger">Clear Instance Caches</button>
-          <p class="setting-description">Deletes all locally cached media and pages for started packets. Content will be re-downloaded from the cloud as needed.</p>
+        <button id="debug-clear-instance-cache-btn" class="sidebar-action-button danger">Clear Instance Caches</button>
+        <p class="setting-description">Deletes all locally cached media and pages for started packets. Content will be
+          re-downloaded from the cloud as needed.</p>
       </div>
       <div class="form-group">
-          <button id="debug-refresh-rules-btn" class="sidebar-action-button">Refresh Redirect Rules</button>
-          <p class="setting-description">Manually forces the background script to refresh all redirect rules.</p>
+        <button id="debug-refresh-rules-btn" class="sidebar-action-button">Refresh Redirect Rules</button>
+        <p class="setting-description">Manually forces the background script to refresh all redirect rules.</p>
       </div>
       <div id="settings-status-message" class="status-message"></div>
     </div>
 
-  </div> <div id="share-dialog" class="share-dialog-overlay" style="display: none;">
+  </div>
+  <div id="share-dialog" class="share-dialog-overlay" style="display: none;">
     <div class="share-dialog">
       <p id="share-dialog-message">Share this packet link:</p>
       <input type="text" id="share-dialog-url" readonly>
@@ -417,54 +740,73 @@
     </div>
   </div>
   <div id="make-page-dialog" class="make-page-dialog-overlay" style="display: none;">
-      <div class="make-page-dialog">
-          <p>Make a Custom Page</p>
-          <textarea id="make-page-prompt-input" placeholder="Enter a prompt for the page you want to create. For example: 'Create a short summary of all the pages I've added so far.'"></textarea>
-          
-          <div class="dialog-progress-container hidden">
-              <div class="dialog-progress-bar"></div>
-          </div>
-          
-          <div class="dialog-buttons">
-              <button id="cancel-make-page-btn" class="cancel-btn">Cancel</button>
-              <button id="confirm-make-page-btn" class="confirm-btn">Create</button>
-          </div>
-      </div>
-  </div>
-  <div id="import-dialog" class="import-dialog-overlay" style="display: none;">
-      <div class="import-dialog">
-          <p>Import Packet from URL</p>
-          <input type="url" id="import-dialog-url-input" placeholder="Paste Packet Share URL...">
-          <div id="import-dialog-status-message" class="dialog-status-message"></div>
-          <div class="dialog-buttons">
-              <button id="cancel-import-dialog-btn" class="cancel-btn">Cancel</button>
-              <button id="confirm-import-dialog-btn" class="confirm-btn">Import</button>
-          </div>
-      </div>
-  </div>
+    <div class="make-page-dialog">
+      <p>Make a Custom Page</p>
+      <textarea id="make-page-prompt-input"
+        placeholder="Enter a prompt for the page you want to create. For example: 'Create a short summary of all the pages I've added so far.'"></textarea>
 
-    <div id="make-page-dialog" class="make-page-dialog-overlay" style="display: none;">
-      <div class="make-page-dialog">
-          <p>Make a Custom Page</p>
-          <textarea id="make-page-prompt-input" placeholder="Enter a prompt for the page you want to create. For example: 'Create a short summary of all the pages I've added so far.'"></textarea>
-          
-          <div class="dialog-buttons">
-              <button id="cancel-make-page-btn" class="cancel-btn">Cancel</button>
-              <button id="confirm-make-page-btn" class="confirm-btn">Create</button>
-          </div>
+      <div class="dialog-progress-container hidden">
+        <div class="dialog-progress-bar"></div>
+      </div>
+
+      <div class="dialog-buttons">
+        <button id="cancel-make-page-btn" class="cancel-btn">Cancel</button>
+        <button id="confirm-make-page-btn" class="confirm-btn">Create</button>
       </div>
     </div>
+  </div>
+  <div id="import-dialog" class="import-dialog-overlay" style="display: none;">
+    <div class="import-dialog">
+      <p>Import Packet</p>
 
-  <div id="close-group-dialog" class="close-group-dialog-overlay" style="display: none;"> <div class="close-group-dialog">
-          <p id="close-group-dialog-message">Packet complete! Close related tabs?</p>
-          <div class="dialog-buttons">
-              <button id="cancel-close-group-btn" class="cancel-btn">No</button>
-              <button id="confirm-close-group-btn" class="confirm-btn">Yes, Close Tabs</button>
-          </div>
+      <div id="import-drop-zone" class="drop-zone"
+        style="border: 2px dashed var(--border-primary); padding: 20px; border-radius: 4px; margin-bottom: 15px; cursor: pointer; transition: background-color 0.2s;">
+        <p style="margin: 0 0 5px 0; font-size: 0.95em;">Drag & Drop JSON File</p>
+        <button id="import-file-select-btn" class="sidebar-action-button tertiary" style="font-size: 0.8em;">Select
+          File</button>
+        <input type="file" id="import-file-input" accept=".json" style="display: none;">
       </div>
+
+      <div style="display: flex; align-items: center; margin-bottom: 15px;">
+        <div style="flex-grow: 1; height: 1px; background-color: var(--border-primary);"></div>
+        <span style="padding: 0 10px; font-size: 0.8em; color: var(--text-secondary);">OR URL</span>
+        <div style="flex-grow: 1; height: 1px; background-color: var(--border-primary);"></div>
+      </div>
+
+      <input type="url" id="import-dialog-url-input" placeholder="Paste Packet Share URL...">
+      <div id="import-dialog-status-message" class="dialog-status-message"></div>
+      <div class="dialog-buttons">
+        <button id="cancel-import-dialog-btn" class="cancel-btn">Cancel</button>
+        <button id="confirm-import-dialog-btn" class="confirm-btn">Import URL</button>
+      </div>
+    </div>
   </div>
 
-    </div> <div id="generic-confirm-dialog" class="confirm-dialog-overlay" style="display: none;">
+  <div id="make-page-dialog" class="make-page-dialog-overlay" style="display: none;">
+    <div class="make-page-dialog">
+      <p>Make a Custom Page</p>
+      <textarea id="make-page-prompt-input"
+        placeholder="Enter a prompt for the page you want to create. For example: 'Create a short summary of all the pages I've added so far.'"></textarea>
+
+      <div class="dialog-buttons">
+        <button id="cancel-make-page-btn" class="cancel-btn">Cancel</button>
+        <button id="confirm-make-page-btn" class="confirm-btn">Create</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="close-group-dialog" class="close-group-dialog-overlay" style="display: none;">
+    <div class="close-group-dialog">
+      <p id="close-group-dialog-message">Packet complete! Close related tabs?</p>
+      <div class="dialog-buttons">
+        <button id="cancel-close-group-btn" class="cancel-btn">No</button>
+        <button id="confirm-close-group-btn" class="confirm-btn">Yes, Close Tabs</button>
+      </div>
+    </div>
+  </div>
+
+  </div>
+  <div id="generic-confirm-dialog" class="confirm-dialog-overlay" style="display: none;">
     <div class="confirm-dialog">
       <p id="generic-confirm-message">Are you sure you want to proceed?</p>
       <div class="dialog-buttons">
@@ -476,7 +818,8 @@
   <div id="input-prompt-dialog" class="confirm-dialog-overlay" style="display: none;">
     <div class="confirm-dialog">
       <p id="input-prompt-message">Enter a title for your packet:</p>
-      <input type="text" id="input-prompt-input" placeholder="Packet title..." style="width: 100%; padding: 8px 10px; box-sizing: border-box; background-color: var(--input-bg); color: var(--text-primary); border: 1px solid var(--border-primary); border-radius: 4px;">
+      <input type="text" id="input-prompt-input" placeholder="Packet title..."
+        style="width: 100%; padding: 8px 10px; box-sizing: border-box; background-color: var(--input-bg); color: var(--text-primary); border: 1px solid var(--border-primary); border-radius: 4px;">
       <div id="input-prompt-status" class="dialog-status-message" style="text-align: center; margin-top: 10px;"></div>
       <div class="dialog-buttons">
         <button id="cancel-input-prompt-btn" class="cancel-btn">Cancel</button>
@@ -484,7 +827,7 @@
       </div>
     </div>
   </div>
-<div id="create-source-dialog" class="confirm-dialog-overlay" style="display: none;">
+  <div id="create-source-dialog" class="confirm-dialog-overlay" style="display: none;">
     <div class="confirm-dialog">
       <div id="create-source-dialog-buttons">
         <p id="create-source-dialog-message">Create a new packet from:</p>
@@ -492,7 +835,8 @@
           <button id="create-from-blank-btn" class="sidebar-action-button">Blank Packet</button>
           <button id="create-from-tab-btn" class="sidebar-action-button primary">Current Tab</button>
           <button id="create-from-codebase-btn" class="sidebar-action-button">With Codebase</button>
-          <button id="cancel-create-source-btn" class="sidebar-action-button tertiary" style="margin-top: 10px;">Cancel</button>
+          <button id="cancel-create-source-btn" class="sidebar-action-button tertiary"
+            style="margin-top: 10px;">Cancel</button>
         </div>
       </div>
       <div id="create-source-dialog-progress" class="hidden">
@@ -502,7 +846,8 @@
         </div>
       </div>
     </div>
-  </div>  <div id="library-action-dialog" class="confirm-dialog-overlay" style="display: none;">
+  </div>
+  <div id="library-action-dialog" class="confirm-dialog-overlay" style="display: none;">
     <div class="confirm-dialog" style="text-align: left;">
       <p id="library-action-title" style="text-align: center; margin-bottom: 20px;">Packet Actions</p>
       <div class="dialog-buttons" style="flex-direction: column; gap: 12px;">
@@ -510,22 +855,24 @@
         <button id="lib-action-edit-btn" class="sidebar-action-button">Edit</button>
         <button id="lib-action-export-btn" class="sidebar-action-button">Export</button>
         <button id="lib-action-delete-btn" class="sidebar-action-button danger">Delete</button>
-        <button id="lib-action-cancel-btn" class="sidebar-action-button tertiary" style="margin-top: 10px;">Cancel</button>
+        <button id="lib-action-cancel-btn" class="sidebar-action-button tertiary"
+          style="margin-top: 10px;">Cancel</button>
       </div>
     </div>
   </div>
 
-    <div id="confirm-settings-dialog-overlay" class="confirm-dialog-overlay" style="display: none;">
-        <div class="confirm-dialog">
-            <p>The AI suggests adding this to your settings. Is this okay?</p>
-            <div id="confirm-settings-dialog-content">
-                </div>
-            <div class="dialog-buttons">
-                <button class="cancel-btn">Decline</button>
-                <button class="confirm-btn">Accept & Delete Packet</button>
-            </div>
-        </div>
+  <div id="confirm-settings-dialog-overlay" class="confirm-dialog-overlay" style="display: none;">
+    <div class="confirm-dialog">
+      <p>The AI suggests adding this to your settings. Is this okay?</p>
+      <div id="confirm-settings-dialog-content">
+      </div>
+      <div class="dialog-buttons">
+        <button class="cancel-btn">Decline</button>
+        <button class="confirm-btn">Accept & Delete Packet</button>
+      </div>
     </div>
-    <script type="module" src="sidebar.js"></script>
+  </div>
+  <script type="module" src="sidebar.js"></script>
 </body>
+
 </html>

@@ -34,11 +34,81 @@ class PacketRuntime {
 
     async start() {
         await ruleManager.addOrUpdatePacketRules(this.instance);
+
+        // Check for Wasm Agents to execute
+        const wasmItem = this.orderedContent.find(item => item.format === 'wasm');
+        if (wasmItem) {
+            // [Compatibility Check]
+            // Default to 'v1' if not specified. Current runtime supports 'v1'.
+            // In the future, this list will grow: ['v1', 'v2', 'v3']
+            const SUPPORTED_WORLDS = ['v1'];
+            const packetWorldVersion = wasmItem.worldVersion || 'v1';
+
+            if (!SUPPORTED_WORLDS.includes(packetWorldVersion)) {
+                logger.warn(this.logPrefix, `Packet requires world '${packetWorldVersion}' but extension supports [${SUPPORTED_WORLDS.join(', ')}].`);
+                // TODO: Show a user-facing notification "Update Extension to run this packet"
+                // For now, we log and skip to prevent crash.
+                return;
+            }
+
+            logger.log(this.logPrefix, 'Found Wasm Packet Module, initializing...', wasmItem);
+            try {
+                // Ensure offscreen is ready
+                await setupOffscreenDocument();
+
+                let agentUrl;
+                let isBlob = false;
+
+                // 1. Try to load from IndexedDB (Embedded Content)
+                if (wasmItem.origin === 'internal' && wasmItem.lrl) {
+                    const cachedContent = await indexedDbStorage.getGeneratedContent(this.instance.instanceId, sanitizeForFileName(wasmItem.lrl));
+                    if (cachedContent && cachedContent[0]?.content) {
+                        logger.log(this.logPrefix, 'Loading Raw Wasm from IndexedDB cache...');
+                        const contentB64 = await arrayBufferToBase64(cachedContent[0].content);
+
+                        // Pass B64 directly to offscreen (JCO is there)
+                        agentUrl = contentB64;
+                        isBlob = false; // It's raw data
+                    } else {
+                        // Extension asset
+                        const response = await fetch(chrome.runtime.getURL(wasmItem.lrl));
+                        const buffer = await response.arrayBuffer();
+                        agentUrl = await arrayBufferToBase64(buffer);
+                    }
+                } else if (wasmItem.url) {
+                    // External URL - fetch it
+                    const response = await fetch(wasmItem.url);
+                    const buffer = await response.arrayBuffer();
+                    agentUrl = await arrayBufferToBase64(buffer);
+                }
+
+                if (agentUrl) {
+                    logger.log(this.logPrefix, 'Transpiling and Executing w/ Universal Loader...');
+                    // Send directly to Offscreen (which now hosts the Compiler)
+                    chrome.runtime.sendMessage({
+                        target: 'offscreen',
+                        type: 'execute_raw_wasm',
+                        data: {
+                            wasmB64: agentUrl,
+                            args: { code: 'init' } // Optional init args
+                        }
+                    }, (response) => {
+                        if (!response?.success) {
+                            logger.error(this.logPrefix, 'Failed to start Wasm Agent:', response?.error);
+                        } else {
+                            logger.log(this.logPrefix, 'Wasm Agent started successfully.');
+                        }
+                    });
+                }
+            } catch (err) {
+                logger.error(this.logPrefix, 'Error executing Wasm packet:', err);
+            }
+        }
     }
 
-   async reconcileTab(tabId, url, details) {
+    async reconcileTab(tabId, url, details) {
         logger.log(this.logPrefix, `Reconciling navigation for tab ${tabId} to url: ${url}`);
-        
+
         const currentContext = await getPacketContext(tabId);
 
         // --- STRICT CONTEXT CHECK ---
@@ -49,21 +119,21 @@ class PacketRuntime {
 
         // Check if the new URL is a defined item in this packet
         const newItemInPacket = packetUtils.isUrlInPacket(url, this.instance, { returnItem: true });
-        
+
         const gracePeriodKey = `grace_period_${tabId}`;
         const graceData = await storage.getSession(gracePeriodKey);
         const gracePeriodStart = graceData ? graceData[gracePeriodKey] : null;
         let inGracePeriod = false;
 
         if (gracePeriodStart) {
-            const GRACE_PERIOD_MS = 1500; 
+            const GRACE_PERIOD_MS = 1500;
             if (Date.now() - gracePeriodStart < GRACE_PERIOD_MS) {
                 inGracePeriod = true;
             } else {
                 await storage.removeSession(gracePeriodKey);
             }
         }
-        
+
         const isRedirect = details.transitionQualifiers?.includes('server_redirect') || details.transitionQualifiers?.includes('client_redirect');
 
         if (newItemInPacket) {
@@ -75,14 +145,14 @@ class PacketRuntime {
                     if (tab.id !== tabId) {
                         const otherContext = await getPacketContext(tab.id);
                         if (otherContext?.instanceId === this.instance.instanceId && otherContext?.canonicalPacketUrl === newItemInPacket.url) {
-                            try { await chrome.tabs.remove(tab.id); } catch (e) {}
-                            break; 
+                            try { await chrome.tabs.remove(tab.id); } catch (e) { }
+                            break;
                         }
                     }
                 }
             }
             await setPacketContext(tabId, this.instance.instanceId, newItemInPacket.url, url);
-            if (inGracePeriod) { await storage.removeSession(gracePeriodKey); } 
+            if (inGracePeriod) { await storage.removeSession(gracePeriodKey); }
 
         } else if (isRedirect) {
             // Case 2: The page redirected. Keep context.
@@ -106,25 +176,25 @@ class PacketRuntime {
             setTimeout(() => storage.removeSession(gracePeriodKey), 1500);
 
             await this._updateBrowserState(tabId, url);
-            
+
             const itemForVisitTimer = this.orderedContent.find(i => i.url === finalContext.canonicalPacketUrl);
             if (itemForVisitTimer && !itemForVisitTimer.interactionBasedCompletion) {
                 startVisitTimer(tabId, this.instance.instanceId, itemForVisitTimer.url, this.logPrefix);
             }
-            
+
             // Handle "Moments" (triggers based on visiting specific pages)
             if (itemForVisitTimer) {
                 let momentTripped = false;
                 // Use either LRL or URL to identify the item for moment checking.
                 const itemIdentifier = itemForVisitTimer.lrl || itemForVisitTimer.url;
-                
+
                 (this.instance.moments || []).forEach((moment, index) => {
                     if (moment.type === 'visit' && moment.sourceUrl === itemIdentifier && this.instance.momentsTripped[index] === 0) {
                         this.instance.momentsTripped[index] = 1;
                         momentTripped = true;
                     }
                 });
-                
+
                 if (momentTripped) {
                     await storage.savePacketInstance(this.instance);
                     if (activeMediaPlayback.instanceId === this.instance.instanceId) {
@@ -132,13 +202,13 @@ class PacketRuntime {
                     }
                     sidebarHandler.notifySidebar('packet_instance_updated', {
                         instance: this.instance,
-                        source: 'moment_tripped' 
+                        source: 'moment_tripped'
                     });
                 }
             }
         }
     }
-    
+
     async openOrFocusContent(targetUrl) {
         // Ensure grouping is active since the user explicitly requested this content
         await tabGroupHandler.reactivateGroup(this.instance.instanceId);
@@ -160,15 +230,15 @@ class PacketRuntime {
             // 2. If not found, prepare to open a new one
             const contentItem = this.orderedContent.find(item => item.url === targetUrl);
             if (!contentItem) throw new Error(`Content item not found for URL: ${targetUrl}`);
-            
+
             let finalUrlToOpen;
             if (contentItem.format === 'pdf' && contentItem.origin === 'internal' && contentItem.lrl) {
                 const cachedContent = await indexedDbStorage.getGeneratedContent(this.instance.instanceId, sanitizeForFileName(contentItem.lrl));
                 if (!cachedContent || !cachedContent[0]?.content) throw new Error(`PDF content for ${contentItem.lrl} is not cached.`);
-                
+
                 // [FIX] Await the async conversion
                 const contentB64 = await arrayBufferToBase64(cachedContent[0].content);
-                
+
                 await setupOffscreenDocument();
                 const offscreenResponse = await chrome.runtime.sendMessage({
                     target: 'offscreen', type: 'create-blob-url-from-buffer',
@@ -189,7 +259,7 @@ class PacketRuntime {
                 canonicalPacketUrl: targetUrl
             };
             await storage.setSession({ [`trusted_intent_${newTab.id}`]: trustedIntent });
-            
+
             return { success: true, tabId: newTab.id };
         } catch (error) {
             return { success: false, error: error.message };
@@ -201,13 +271,13 @@ class PacketRuntime {
     async delete() {
         const browserState = await storage.getPacketBrowserState(this.instance.instanceId);
         if (browserState?.tabGroupId) {
-            await tabGroupHandler.handleRemoveTabGroups({ groupIds: [browserState.tabGroupId] }, () => {});
+            await tabGroupHandler.handleRemoveTabGroups({ groupIds: [browserState.tabGroupId] }, () => { });
         }
         await ruleManager.removePacketRules(this.instance.instanceId);
         if (await cloudStorage.initialize()) {
             for (const item of this.orderedContent) {
                 if (item.origin === 'internal' && item.published && item.url) {
-                    await cloudStorage.deleteFile(item.url).catch(e => {});
+                    await cloudStorage.deleteFile(item.url).catch(e => { });
                 }
             }
         }
