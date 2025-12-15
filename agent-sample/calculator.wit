@@ -1,5 +1,5 @@
 package local:demo;
 
 world calculator {
-  export add: func(a: u32, b: u32) -> u32;
+  export run: func() -> string;
 }
