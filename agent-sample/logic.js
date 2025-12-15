@@ -1,4 +1,4 @@
-export function add(a, b) {
-  console.log("Executing WASM logic...");
-  return a + b;
+export function run() {
+  console.log("Executing WASM logic via Generic Loader...");
+  return "Hello from Wasm!";
 }

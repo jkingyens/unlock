@@ -11,12 +11,6 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@bytecodealliance/componentize-js": "^0.19.3",
-    "@bytecodealliance/jco": "^1.15.4",
-    "@bytecodealliance/preview2-shim": "^0.17.5",
-    "@rollup/plugin-alias": "^6.0.0",
-    "@rollup/plugin-commonjs": "^29.0.0",
-    "@rollup/plugin-node-resolve": "^16.0.3",
-    "rollup": "^4.53.3"
+    "@bytecodealliance/componentize-js": "^0.19.3"
   }
 }
