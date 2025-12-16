@@ -1,5 +1,6 @@
 // ext/background-modules/create-utils.js
 // Contains logic for creating new packet images, including LLM and TTS interactions.
+// REVISED: Updated to await arrayBufferToBase64 for memory safety.
 
 import {
     logger,
@@ -79,7 +80,8 @@ async function getLinksFromHtml(html) {
 
 async function getAudioDurationOffscreen(audioBuffer) {
     await setupOffscreenDocument();
-    const base64String = arrayBufferToBase64(audioBuffer);
+    // [FIX] Await the async conversion
+    const base64String = await arrayBufferToBase64(audioBuffer);
 
     const response = await chrome.runtime.sendMessage({
         type: 'get-audio-duration',
@@ -98,7 +100,8 @@ async function normalizeAudioOffscreen(audioBlob) {
     await setupOffscreenDocument();
     try {
         const arrayBuffer = await audioBlob.arrayBuffer();
-        const base64String = arrayBufferToBase64(arrayBuffer);
+        // [FIX] Await the async conversion
+        const base64String = await arrayBufferToBase64(arrayBuffer);
 
         const response = await chrome.runtime.sendMessage({
             type: 'normalize-audio',
@@ -107,15 +110,18 @@ async function normalizeAudioOffscreen(audioBlob) {
         });
 
         if (response && response.success) {
-            const processedBuffer = base64Decode(response.data.base64);
-            return new Blob([processedBuffer], { type: response.data.type });
+            const processedBuffer = await base64Decode(response.data.base64);
+            return {
+                audioBlob: new Blob([processedBuffer], { type: response.data.type }),
+                duration: response.data.duration
+            };
         } else {
             logger.error('CreateUtils:normalizeAudioOffscreen', 'Offscreen normalization failed.', response?.error);
-            return audioBlob;
+            return { audioBlob, duration: 0 };
         }
     } catch (error) {
         logger.error('CreateUtils:normalizeAudioOffscreen', 'Error sending audio to offscreen doc', error);
-        return audioBlob;
+        return { audioBlob, duration: 0 };
     }
 }
 
@@ -284,26 +290,24 @@ export async function generateDraftPacketFromTab(initiatorTabId) {
         revealableItems.forEach(item => { checkpoints.push({ title: `Visit: ${item.title}`, requiredItems: [{ url: item.url }] }); });
 
         if (audioResponse.success) {
-            const normalizedAudioBlob = await normalizeAudioOffscreen(audioResponse.audioBlob);
+            const { audioBlob: normalizedAudioBlob, duration: audioDuration } = await normalizeAudioOffscreen(audioResponse.audioBlob);
             const audioBuffer = await normalizedAudioBlob.arrayBuffer();
 
             audioItem = {
                 origin: 'internal',
                 format: 'audio',
                 access: 'private',
-                lrl: `/media/summary-audio.mp3`,
+                lrl: `/media/summary-audio.wav`, // Corrected extension
                 title: `${title} Audio Summary`,
-                mimeType: normalizedAudioBlob.type,
+                mimeType: normalizedAudioBlob.type, // Correct mimeType
                 cacheable: true
             };
             
             await indexedDbStorage.saveGeneratedContent(draftId, sanitizeForFileName(audioItem.lrl), [{
-                name: 'audio.mp3',
+                name: 'audio.wav', // Corrected filename
                 content: audioBuffer,
                 contentType: audioItem.mimeType
             }]);
-
-            const audioDuration = await getAudioDurationOffscreen(audioBuffer);
 
             if (audioDuration > 0) {
                 const linkTimestamps = {};
@@ -494,23 +498,23 @@ export async function processCreatePacketRequestFromTab(initiatorTabId) {
         let audioItem = null;
         let moments = [];
         if (audioResponse.success) {
-            const normalizedAudioBlob = await normalizeAudioOffscreen(audioResponse.audioBlob);
+            const { audioBlob: normalizedAudioBlob, duration: audioDuration } = await normalizeAudioOffscreen(audioResponse.audioBlob);
             const audioBuffer = await normalizedAudioBlob.arrayBuffer();
             audioItem = {
                 origin: 'internal',
                 format: 'audio',
                 access: 'private',
-                lrl: `/media/summary-audio.mp3`,
+                lrl: `/media/summary-audio.wav`,
                 title: `${title} Audio Summary`,
                 mimeType: normalizedAudioBlob.type,
                 cacheable: true
             };
             await indexedDbStorage.saveGeneratedContent(imageId, sanitizeForFileName(audioItem.lrl), [{
-                name: 'audio.mp3',
+                name: 'audio.wav',
                 content: audioBuffer,
                 contentType: audioItem.mimeType
             }]);
-            const audioDuration = await getAudioDurationOffscreen(audioBuffer);
+            
             if (audioDuration > 0) {
                 const links = await getLinksFromHtml(finalSummaryHtml);
                 const linkTimestamps = {};

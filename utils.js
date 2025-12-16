@@ -1,9 +1,6 @@
 // ext/utils.js
 // Shared utility functions for the Unlock extension
-// REVISED: This file establishes the core components for the new context management system.
-// The PacketContext is now more explicit, tracking both the canonical packet URL and the
-// current browser URL. The isUrlInPacket function is the sole authority for determining
-// if a browser URL corresponds to a defined packet item, correctly handling pre-signed URLs.
+// REVISED: Fixed memory crash in arrayBufferToBase64 by using asynchronous Blob/FileReader API.
 
 // --- Centralized Configuration ---
 const CONFIG = {
@@ -32,11 +29,11 @@ const CONFIG = {
         apiEndpoint: 'https://api.openai.com/v1/chat/completions'
       },
       {
-        id: 'default_gemini_1_5_pro',
-        name: 'Google Gemini 1.5 Pro (Default)',
+        id: 'default_gemini_2_5_pro',
+        name: 'Google Gemini 2.5 Pro (Default)',
         providerType: 'gemini',
         apiKey: '',
-        modelName: 'gemini-1.5-pro-latest',
+        modelName: 'gemini-2.5-pro',
         apiEndpoint: 'https://generativelanguage.googleapis.com/v1beta/models/'
       },
       {
@@ -93,7 +90,10 @@ const CONFIG = {
     elevenlabsApiKey: ''
   },
   INDEXED_DB: {
-    NAME: 'UnlockDB', VERSION: 1, STORE_GENERATED_CONTENT: 'generatedContent'
+    NAME: 'UnlockDB', 
+    VERSION: 2, // Incremented for CAS schema
+    STORE_GENERATED_CONTENT: 'generatedContent',
+    STORE_CONTENT_BLOBS: 'contentBlobs' // New store for deduplicated binary data
   },
   IMAGE_DIR: 'packet-images/'
 };
@@ -149,6 +149,13 @@ const logger = {
   }
 };
 
+// --- Helper for Content Hashing ---
+async function computeContentHash(buffer) {
+    const hashBuffer = await crypto.subtle.digest('SHA-256', buffer);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
 let dbPromise = null;
 function getDb() {
   if (!dbPromise) {
@@ -158,6 +165,10 @@ function getDb() {
         const db = event.target.result;
         if (!db.objectStoreNames.contains(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT)) {
           db.createObjectStore(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT);
+        }
+        // --- NEW: Create blob store for CAS ---
+        if (!db.objectStoreNames.contains(CONFIG.INDEXED_DB.STORE_CONTENT_BLOBS)) {
+          db.createObjectStore(CONFIG.INDEXED_DB.STORE_CONTENT_BLOBS);
         }
       };
       openRequest.onerror = (event) => {
@@ -177,9 +188,32 @@ const indexedDbStorage = {
     const key = `${imageId}::${pageId}`;
     try {
         const db = await getDb();
-        const tx = db.transaction(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT, 'readwrite');
-        const store = tx.objectStore(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT);
-        const request = store.put(filesArray, key);
+        // Transaction covers both stores
+        const tx = db.transaction([CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT, CONFIG.INDEXED_DB.STORE_CONTENT_BLOBS], 'readwrite');
+        const contentStore = tx.objectStore(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT);
+        const blobStore = tx.objectStore(CONFIG.INDEXED_DB.STORE_CONTENT_BLOBS);
+        
+        const processedFiles = [];
+
+        for (const file of filesArray) {
+            // If file has binary content, hash it and store in blobStore
+            if (file.content) {
+                const hash = await computeContentHash(file.content);
+                // Store the blob keyed by hash. 'put' is safe/idempotent.
+                blobStore.put(file.content, hash);
+
+                // Store a lightweight reference in the main entry
+                processedFiles.push({
+                    ...file,
+                    content: null, // Strip the heavy blob
+                    contentHash: hash // Add reference
+                });
+            } else {
+                processedFiles.push(file);
+            }
+        }
+
+        const request = contentStore.put(processedFiles, key);
         
         await new Promise((resolve, reject) => {
             request.onerror = () => reject(request.error);
@@ -196,13 +230,42 @@ const indexedDbStorage = {
     const key = `${imageId}::${pageId}`;
     try {
         const db = await getDb();
-        const tx = db.transaction(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT, 'readonly');
-        const store = tx.objectStore(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT);
-        const request = store.get(key);
-        return await new Promise((resolve, reject) => {
-             request.onerror = (event) => reject(event.target.error);
+        const tx = db.transaction([CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT, CONFIG.INDEXED_DB.STORE_CONTENT_BLOBS], 'readonly');
+        const contentStore = tx.objectStore(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT);
+        const blobStore = tx.objectStore(CONFIG.INDEXED_DB.STORE_CONTENT_BLOBS);
+        
+        const entry = await new Promise((resolve, reject) => {
+             const request = contentStore.get(key);
              request.onsuccess = (event) => resolve(event.target.result || null);
+             request.onerror = (event) => reject(event.target.error);
         });
+
+        if (!entry) return null;
+
+        // Rehydrate content from blobStore
+        const rehydratedFiles = [];
+        for (const file of entry) {
+            if (file.contentHash && !file.content) {
+                const blobContent = await new Promise((resolve, reject) => {
+                    const req = blobStore.get(file.contentHash);
+                    req.onsuccess = () => resolve(req.result);
+                    req.onerror = () => reject(req.error);
+                });
+                if (blobContent) {
+                    rehydratedFiles.push({
+                        ...file,
+                        content: blobContent
+                    });
+                } else {
+                    logger.warn('IndexedDB', 'Missing blob for hash', file.contentHash);
+                    rehydratedFiles.push(file); // Push without content if missing (shouldn't happen)
+                }
+            } else {
+                rehydratedFiles.push(file);
+            }
+        }
+
+        return rehydratedFiles;
     } catch (error) {
         logger.error('IndexedDB', 'Error getting generated content', { key, error });
         return null;
@@ -219,7 +282,7 @@ const indexedDbStorage = {
                     const cursor = event.target.result;
                     if (cursor) {
                         if (String(cursor.key).startsWith(`${imageId}::`)) {
-                            cursor.delete();
+                            cursor.delete(); // Only deletes the references
                         }
                         cursor.continue();
                     } else { resolve(); }
@@ -227,6 +290,7 @@ const indexedDbStorage = {
                 request.onerror = event => reject(event.target.error);
                  tx.onerror = () => reject(tx.error);
             });
+            // Note: We rely on garbageCollectIndexedDbContent to clean up the actual blobs
             return true;
         } catch (error) {
              logger.error('IndexedDB', 'Error deleting content for image', { imageId, error });
@@ -249,7 +313,7 @@ const indexedDbStorage = {
                        if (currentKey.startsWith(`${originalDraftId}::`)) {
                            const pageId = currentKey.substring(currentKey.indexOf('::') + 2);
                            const newKey = `${finalImageId}::${pageId}`;
-                           const value = cursor.value;
+                           const value = cursor.value; // Value contains refs, so copying is cheap
                            
                            store.add(value, newKey);
                            cursor.delete();
@@ -273,11 +337,14 @@ const indexedDbStorage = {
    async clearAllContent() {
         try {
             const db = await getDb();
-            const tx = db.transaction(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT, 'readwrite');
-            const store = tx.objectStore(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT);
-            const request = store.clear();
+            const tx = db.transaction([CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT, CONFIG.INDEXED_DB.STORE_CONTENT_BLOBS], 'readwrite');
+            const contentStore = tx.objectStore(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT);
+            const blobStore = tx.objectStore(CONFIG.INDEXED_DB.STORE_CONTENT_BLOBS);
+            
+            contentStore.clear();
+            blobStore.clear();
+
             await new Promise((resolve, reject) => {
-                request.onerror = () => reject(request.error);
                 tx.oncomplete = () => resolve();
                 tx.onerror = () => reject(tx.error);
             });
@@ -289,45 +356,76 @@ const indexedDbStorage = {
         }
     },
     async garbageCollectIndexedDbContent() {
-        logger.log('IndexedDB:GC', 'Starting garbage collection for orphaned image content...');
+        logger.log('IndexedDB:GC', 'Starting garbage collection...');
         try {
             const db = await getDb();
             const allImages = await storage.getPacketImages();
             const validImageIds = new Set(Object.keys(allImages));
-            let deletedCount = 0;
+            let deletedEntries = 0;
+            let deletedBlobs = 0;
+            
+            const activeHashes = new Set();
 
-            const tx = db.transaction(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT, 'readwrite');
-            const store = tx.objectStore(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT);
-            const request = store.openCursor();
+            const tx = db.transaction([CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT, CONFIG.INDEXED_DB.STORE_CONTENT_BLOBS], 'readwrite');
+            const contentStore = tx.objectStore(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT);
+            const blobStore = tx.objectStore(CONFIG.INDEXED_DB.STORE_CONTENT_BLOBS);
 
+            // 1. Scan content entries: Delete orphans, collect active hashes
             await new Promise((resolve, reject) => {
+                const request = contentStore.openCursor();
                 request.onsuccess = event => {
                     const cursor = event.target.result;
                     if (cursor) {
                         const currentKey = String(cursor.key);
                         const imageId = currentKey.split('::')[0];
                         
-                        // Only check keys that are not instance caches
                         if (!imageId.startsWith('inst_') && !validImageIds.has(imageId)) {
                             cursor.delete();
-                            deletedCount++;
+                            deletedEntries++;
+                        } else {
+                            // Collect hashes from valid entries
+                            const files = cursor.value;
+                            if (Array.isArray(files)) {
+                                files.forEach(f => {
+                                    if (f.contentHash) activeHashes.add(f.contentHash);
+                                });
+                            }
                         }
                         cursor.continue();
                     } else {
-                        resolve(); // End of cursor
+                        resolve(); 
                     }
                 };
-                request.onerror = event => reject(event.target.error);
+                request.onerror = () => reject(request.error);
+            });
+
+            // 2. Scan blobs: Delete those not in activeHashes
+            await new Promise((resolve, reject) => {
+                const request = blobStore.openKeyCursor();
+                request.onsuccess = event => {
+                    const cursor = event.target.result;
+                    if (cursor) {
+                        if (!activeHashes.has(cursor.key)) {
+                            blobStore.delete(cursor.key);
+                            deletedBlobs++;
+                        }
+                        cursor.continue();
+                    } else {
+                        resolve();
+                    }
+                };
+                request.onerror = () => reject(request.error);
+            });
+
+            await new Promise((resolve, reject) => {
                 tx.oncomplete = () => resolve();
                 tx.onerror = () => reject(tx.error);
             });
             
-            if (deletedCount > 0) {
-                logger.log('IndexedDB:GC', `Garbage collection complete. Removed ${deletedCount} orphaned entries.`);
-            }
+            logger.log('IndexedDB:GC', `GC complete. Removed ${deletedEntries} orphaned entries and ${deletedBlobs} unused blobs.`);
             return true;
         } catch (error) {
-            logger.error('IndexedDB:GC', 'Error during content garbage collection', { error });
+            logger.error('IndexedDB:GC', 'Error during garbage collection', { error });
             return false;
         }
     },
@@ -358,6 +456,8 @@ const indexedDbStorage = {
                 tx.onerror = () => reject(tx.error);
             });
             
+            // We do not need to explicitly clear blobs here; the next GC cycle will pick up
+            // any blobs that were *only* referenced by these instances.
             logger.log('IndexedDB:ClearInstances', `Cleanup complete. Removed ${deletedCount} instance cache entries.`);
             return true;
         } catch (error) {
@@ -525,7 +625,6 @@ const storage = {
       chrome.storage.session.remove(key, () => resolve());
     });
   },
-  // --- START OF FIX: New function to clear all packet data ---
   async clearAllPacketData() {
     logger.log('Storage:clearAllPacketData', 'Clearing all packet images, instances, browser states, and cached content.');
     await Promise.all([
@@ -538,10 +637,112 @@ const storage = {
     ]);
     logger.log('Storage:clearAllPacketData', 'All packet data has been cleared.');
   }
-  // --- END OF FIX ---
 };
 
 const packetUtils = {
+    _expressToRegex: (path) => {
+        const regexString = '^' + path.replace(/\//g, '\\/').replace(/:(\w+)/g, '(?<$1>[^/]+)') + '$';
+        return new RegExp(regexString);
+    },
+
+    renderPacketUrl: (templateUrl, variables) => {
+        if (!templateUrl || typeof templateUrl !== 'string') return templateUrl;
+        if (!variables) return templateUrl;
+        let renderedUrl = templateUrl;
+        for (const key in variables) {
+            const regex = new RegExp(`:${key}`, 'g');
+            renderedUrl = renderedUrl.replace(regex, variables[key]);
+        }
+        return renderedUrl;
+    },
+
+    isUrlInPacket(loadedUrl, instance, options = {}) {
+        if (!loadedUrl || !instance || !Array.isArray(instance.contents)) {
+            return options.returnItem ? null : false;
+        }
+
+        if (loadedUrl.startsWith('chrome-extension://')) {
+            try {
+                const urlObj = new URL(loadedUrl);
+                if (urlObj.pathname.endsWith('/preview.html')) {
+                    const urlInstanceId = urlObj.searchParams.get('instanceId');
+                    const urlLrl = urlObj.searchParams.get('lrl');
+                    
+                    if (urlInstanceId === instance.instanceId && urlLrl) {
+                        const matchedItem = instance.contents.find(item => item.lrl === decodeURIComponent(urlLrl));
+                        if (matchedItem) {
+                            return options.returnItem ? matchedItem : true;
+                        }
+                    }
+                }
+            } catch (e) {
+                logger.warn('isUrlInPacket', 'Could not parse chrome-extension URL', { loadedUrl, error: e });
+            }
+        }
+
+        let decodedLoadedUrl;
+        try {
+            decodedLoadedUrl = decodeURIComponent(loadedUrl);
+        } catch (e) {
+            decodedLoadedUrl = loadedUrl;
+        }
+
+        for (const item of instance.contents) {
+            let decodedItemUrl = item.url ? decodeURIComponent(item.url) : null;
+            if (!decodedItemUrl) continue;
+
+            if (decodedItemUrl) {
+                const renderedItemUrl = this.renderPacketUrl(decodedItemUrl, instance.variables);
+                
+                const isWildcard = renderedItemUrl.includes('*');
+                const urlPattern = isWildcard ? new RegExp('^' + renderedItemUrl.replace(/\*/g, '[^/]+') + '$') : null;
+
+                if ((!isWildcard && renderedItemUrl === decodedLoadedUrl) || (isWildcard && urlPattern.test(decodedLoadedUrl))) {
+                    return options.returnItem ? item : true;
+                }
+                
+                if (item.captures && item.captures.fromPath) {
+                    try {
+                        const itemUrlObject = new URL(item.url);
+                        const loadedUrlObject = new URL(decodedLoadedUrl);
+
+                        if (itemUrlObject.hostname === loadedUrlObject.hostname) {
+                            const regex = this._expressToRegex(item.captures.fromPath);
+                            const match = loadedUrlObject.pathname.match(regex);
+                            if (match) {
+                                if (options.returnItem) {
+                                    return { ...item, capturedParams: match.groups };
+                                }
+                                return true;
+                            }
+                        }
+                    } catch (e) { /* Invalid URL, skip */ }
+                }
+            }
+
+            if (item.origin === 'internal' && item.url) {
+                if (decodedItemUrl === decodedLoadedUrl) {
+                    return options.returnItem ? item : true;
+                }
+                
+                if (item.publishContext) {
+                    try {
+                        const loadedUrlObj = new URL(loadedUrl);
+                        const { publishContext } = item;
+                        let expectedPathname = (publishContext.provider === 'google')
+                            ? `/${publishContext.bucket}/${item.url}`
+                            : `/${item.url}`;
+                        
+                        if (decodeURIComponent(loadedUrlObj.pathname) === decodeURIComponent(expectedPathname)) {
+                            return options.returnItem ? item : true;
+                        }
+                    } catch (e) { /* loadedUrl might not be a valid URL. */ }
+                }
+            }
+        }
+        return options.returnItem ? null : false;
+    },
+  
     _updateCheckpointsOnVisit(instance) {
         if (!instance || !Array.isArray(instance.checkpoints) || !Array.isArray(instance.checkpointsTripped)) {
             return false;
@@ -554,7 +755,8 @@ const packetUtils = {
                 return;
             }
             const isCompleted = checkpoint.requiredItems.every(req => {
-                return req.url && visitedUrlsSet.has(req.url);
+                const identifier = req.url || req.lrl;
+                return visitedUrlsSet.has(identifier);
             });
             if (isCompleted) {
                 instance.checkpointsTripped[index] = 1;
@@ -584,13 +786,21 @@ const packetUtils = {
         if (!Array.isArray(instance.contents)) {
             return { visitedCount: 0, totalCount: 0, progressPercentage: 0 };
         }
-        const trackableItems = instance.contents.filter(item => item.url && item.format === 'html');
+        
+        const trackableItems = instance.contents.filter(item => 
+            item.url || item.format === 'interactive-input'
+        );
+
         const totalCount = trackableItems.length;
         if (totalCount === 0) {
             return { visitedCount: 0, totalCount: 0, progressPercentage: 100 };
         }
         const visitedUrlsSet = new Set(instance.visitedUrls || []);
-        const visitedCount = trackableItems.filter(item => visitedUrlsSet.has(item.url)).length;
+        
+        const visitedCount = trackableItems.filter(item => {
+            return (item.url && visitedUrlsSet.has(item.url)) || 
+                   (item.format === 'interactive-input' && item.lrl && visitedUrlsSet.has(item.lrl));
+        }).length;
         
         return {
             visitedCount: visitedCount,
@@ -605,91 +815,15 @@ const packetUtils = {
         return progressPercentage >= 100;
     },
 
-  isUrlInPacket(loadedUrl, instance, options = {}) {
-    if (!loadedUrl || !instance || !Array.isArray(instance.contents)) {
-        return options.returnItem ? null : false;
-    }
-
-    if (loadedUrl.startsWith('chrome-extension://')) {
-        try {
-            const urlObj = new URL(loadedUrl);
-            if (urlObj.pathname.endsWith('/preview.html')) {
-                const urlInstanceId = urlObj.searchParams.get('instanceId');
-                const urlLrl = urlObj.searchParams.get('lrl');
-                
-                if (urlInstanceId === instance.instanceId && urlLrl) {
-                    const matchedItem = instance.contents.find(item => item.lrl === decodeURIComponent(urlLrl));
-                    if (matchedItem) {
-                        return options.returnItem ? matchedItem : true;
-                    }
-                }
-            }
-        } catch (e) {
-            logger.warn('isUrlInPacket', 'Could not parse chrome-extension URL', { loadedUrl, error: e });
-        }
-    }
-
-    let decodedLoadedUrl;
-    try {
-        decodedLoadedUrl = decodeURIComponent(loadedUrl);
-    } catch (e) {
-        logger.warn('isUrlInPacket', 'Could not decode loadedUrl', { loadedUrl, error: e });
-        decodedLoadedUrl = loadedUrl;
-    }
-
-    for (const item of instance.contents) {
-        let decodedItemUrl;
-        if (item.url) {
-            try {
-                decodedItemUrl = decodeURIComponent(item.url);
-            } catch (e) {
-                logger.warn('isUrlInPacket', 'Could not decode item.url', { itemUrl: item.url, error: e });
-                decodedItemUrl = item.url;
-            }
-        }
-        
-        if (item.origin === 'external' && decodedItemUrl && decodedItemUrl === decodedLoadedUrl) {
-             return options.returnItem ? item : true;
-        }
-
-        if (item.origin === 'internal' && item.url) {
-            if (decodedItemUrl === decodedLoadedUrl) {
-                return options.returnItem ? item : true;
-            }
-            
-            if (item.publishContext) {
-                try {
-                    const loadedUrlObj = new URL(loadedUrl);
-                    const { publishContext } = item;
-                    let expectedPathname = (publishContext.provider === 'google')
-                        ? `/${publishContext.bucket}/${item.url}`
-                        : `/${item.url}`;
-                    
-                    if (decodeURIComponent(loadedUrlObj.pathname) === decodeURIComponent(expectedPathname)) {
-                        return options.returnItem ? item : true;
-                    }
-                } catch (e) { /* loadedUrl might not be a valid URL. */ }
-            }
-        }
-    }
-    return options.returnItem ? null : false;
-  },
-
-  getColorForTopic(title) {
-    const colors = ['grey', 'blue', 'red', 'yellow', 'green', 'pink', 'purple', 'cyan', 'orange'];
-    if (!title) return colors[0];
-    let hash = 0;
-    for (let i = 0; i < title.length; i++) {
-        hash = ((hash << 5) - hash) + title.charCodeAt(i);
-        hash |= 0;
-    }
-    return colors[Math.abs(hash) % colors.length];
-  },
-  
-    async markUrlAsVisited(instance, url) {
+async markUrlAsVisited(instance, url) {
         if (!instance) {
             logger.warn('markUrlAsVisited', 'Packet instance not found');
             return { success: false, error: 'Packet instance not found' };
+        }
+
+        // [NEW] Guard against missing URL
+        if (!url) {
+             return { success: true, notTrackable: true, instance: instance };
         }
 
         const wasCompletedBefore = await this.isPacketInstanceCompleted(instance);
@@ -698,40 +832,67 @@ const packetUtils = {
         if (!foundItem) {
             return { success: true, notTrackable: true, instance: instance };
         }
+        
+        // Prioritize LRL as the canonical identifier for visit tracking if it exists.
+        const canonicalIdentifier = foundItem.lrl || foundItem.url;
 
-        const canonicalUrl = foundItem.url;
-        const alreadyVisited = (instance.visitedUrls || []).includes(canonicalUrl);
+        // [NEW] Double-check we have a valid identifier
+        if (!canonicalIdentifier) {
+             return { success: true, notTrackable: true, instance: instance };
+        }
 
-        if (alreadyVisited) {
+        if ((instance.visitedUrls || []).includes(canonicalIdentifier)) {
             return { success: true, alreadyVisited: true, instance: instance };
         }
         
-        instance.visitedUrls = [...(instance.visitedUrls || []), canonicalUrl];
-        
+        instance.visitedUrls = [...(instance.visitedUrls || []), canonicalIdentifier];
         this._updateCheckpointsOnVisit(instance);
-        
         const justCompleted = !wasCompletedBefore && await this.isPacketInstanceCompleted(instance);
         
         return { success: true, modified: true, instance, justCompleted };
     },
 
-  getDefaultGeneratedPageUrl(instance) {
-    if (!instance?.contents) return null;
-    const page = instance.contents.find(item => item.format === 'html' && item.origin === 'internal');
-    return page ? page.url : null;
-  },
-  getGeneratedPages(instance) {
-      if (!instance?.contents) return [];
-      return instance.contents.filter(item => item.format === 'html' && item.origin === 'internal');
-  }
+    getColorForTopic(title) {
+        const colors = ['grey', 'blue', 'red', 'yellow', 'green', 'pink', 'purple', 'cyan', 'orange'];
+        if (!title) return colors[0];
+        let hash = 0;
+        for (let i = 0; i < title.length; i++) {
+            hash = ((hash << 5) - hash) + title.charCodeAt(i);
+            hash |= 0;
+        }
+        return colors[Math.abs(hash) % colors.length];
+    },
+
+    getDefaultGeneratedPageUrl(instance) {
+        if (!instance?.contents) return null;
+        const page = instance.contents.find(item => item.format === 'html' && item.origin === 'internal');
+        return page ? this.renderPacketUrl(page.url, instance.variables) : null;
+    },
+    getGeneratedPages(instance) {
+        if (!instance?.contents) return [];
+        return instance.contents.filter(item => item.format === 'html' && item.origin === 'internal');
+    }
 };
 
+// --- Hot Cache for Packet Context ---
+const packetContextCache = new Map();
+
 function getPacketContextKey(tabId) { return `${CONFIG.STORAGE_KEYS.PACKET_CONTEXT_PREFIX}${tabId}`; }
+
 async function getPacketContext(tabId) {
+    if (packetContextCache.has(tabId)) {
+        return packetContextCache.get(tabId);
+    }
     const key = getPacketContextKey(tabId);
     const data = await storage.getLocal(key);
-    return data[key] || null;
+    const context = data[key] || null;
+
+    if (context) {
+        packetContextCache.set(tabId, context);
+    }
+    return context;
 }
+
 async function setPacketContext(tabId, instanceId, canonicalPacketUrl, currentBrowserUrl) {
     const context = {
         instanceId,
@@ -739,11 +900,14 @@ async function setPacketContext(tabId, instanceId, canonicalPacketUrl, currentBr
         currentBrowserUrl
     };
     logger.log('Utils:setPacketContext', `Setting context for tabId: ${tabId}`, context);
+    packetContextCache.set(tabId, context);
     await storage.setLocal({ [getPacketContextKey(tabId)]: context });
     return true;
 }
+
 async function clearPacketContext(tabId) {
     logger.log('Utils:clearPacketContext', `Clearing context for tabId: ${tabId}`);
+    packetContextCache.delete(tabId);
     await storage.removeLocal(getPacketContextKey(tabId));
 }
 
@@ -784,15 +948,19 @@ async function shouldShowOverlay() {
 }
 
 function arrayBufferToBase64(buffer) {
-    let binary = '';
-    const bytes = new Uint8Array(buffer);
-    for (let i = 0; i < bytes.byteLength; i++) {
-        binary += String.fromCharCode(bytes[i]);
-    }
-    return btoa(binary);
+    return new Promise((resolve, reject) => {
+        const blob = new Blob([buffer], { type: 'application/octet-stream' });
+        const reader = new FileReader();
+        reader.onload = () => {
+            const dataUrl = reader.result;
+            const base64 = dataUrl.split(',')[1];
+            resolve(base64);
+        };
+        reader.onerror = () => reject(reader.error);
+        reader.readAsDataURL(blob);
+    });
 }
 
-// Replace the old base64Decode function with this new async one.
 async function base64Decode(base64) {
     const dataUrl = `data:application/octet-stream;base64,${base64}`;
     try {
@@ -805,7 +973,9 @@ async function base64Decode(base64) {
 }
 
 function sanitizeForFileName(input) {
-  return (input || '').toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9_.-]/g, '').replace(/-+/g, '-').replace(/^-+|-+$/g, '');
+  // Use encodeURIComponent to ensure uniqueness and prevent collisions (e.g., "file.name" vs "file_name")
+  // while making the string safe for IDB keys.
+  return encodeURIComponent(input || '');
 }
 
 

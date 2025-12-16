@@ -4,7 +4,7 @@
 
 import { domRefs } from './dom-references.js';
 import { logger, storage, base64Decode, shouldUseTabGroups, indexedDbStorage, sanitizeForFileName } from '../utils.js';
-import { showConfirmDialog, showTitlePromptDialog } from './dialog-handler.js';
+import { showConfirmDialog, showInputPromptDialog } from './dialog-handler.js';
 
 // --- Module-specific State & Dependencies ---
 let draftPacket = null;
@@ -364,7 +364,12 @@ async function handleSaveDraftPacket() {
         const originalDraftId = packetToSave.id;
         
         const defaultTitle = packetToSave.title || draftPacket?.sourceContent?.[0]?.title || 'Untitled Packet';
-        const title = await showTitlePromptDialog(Promise.resolve(defaultTitle));
+        const title = await showInputPromptDialog({
+            message: "Enter a title for your new packet:",
+            confirmText: "Save",
+            defaultValuePromise: Promise.resolve(defaultTitle),
+            placeholder: "Packet title..."
+        });
 
         if (!title) {
             showRootViewStatus("Save cancelled.", "info");

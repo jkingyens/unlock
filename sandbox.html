@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html>
+
+<body>
+    <script type="module">
+        // Inlined sandbox.js content to bypass caching issues
+        console.log("[Sandbox] Initialized (Inlined v10 (CSP Fix)) at " + new Date().toISOString() + ". SharedArrayBuffer:", typeof SharedArrayBuffer !== 'undefined', "WebAssembly.promising:", typeof WebAssembly.promising);
+
+        const pendingRequests = new Map();
+
+        function bridgeCall(type, data) {
+            const requestId = crypto.randomUUID();
+            return new Promise((resolve, reject) => {
+                pendingRequests.set(requestId, { resolve, reject });
+                window.parent.postMessage({ type, requestId, ...data }, '*');
+            });
+        }
+
+        // 1. Define Global Bridge (Accessed by the bundled bridge-impl.js)
+        globalThis.JCO_BRIDGE = {
+            ask: async (prompt) => {
+                console.log("[Sandbox] Asking AI:", prompt);
+                try {
+                    const result = await bridgeCall('BRIDGE_AI_REQUEST', { prompt });
+                    return String(result);
+                } catch (e) {
+                    return `Error: ${e.message}`;
+                }
+            },
+            log: (msg) => console.log(`[Sandbox Agent] ${msg}`)
+        };
+
+        window.addEventListener('message', (event) => {
+            const { type, requestId, success, data, payload } = event.data;
+
+            if (type === 'BRIDGE_AI_RESPONSE') {
+                const resolver = pendingRequests.get(requestId);
+                if (resolver) {
+                    resolver.resolve(success ? data : `Error: ${data}`);
+                    pendingRequests.delete(requestId);
+                }
+            }
+
+            if (type === 'EXECUTE_AGENT') {
+                executeAgentCode(payload.code, payload);
+            }
+
+            if (type === 'EXECUTE_AGENT_FROM_URL') {
+                executeAgentFromUrl(payload.url, payload);
+            }
+        });
+
+        async function executeAgentCode(codeString, payload) {
+            try {
+                console.log("[Sandbox] Loading Agent...");
+                const blob = new Blob([codeString], { type: 'text/javascript' });
+                const url = URL.createObjectURL(blob);
+
+                // 2. Import the Bundled Module
+                const agentModule = await import(url);
+
+                // 3. Run
+                if (agentModule.runCode) {
+                    console.log("[Sandbox] Running Agent (Eval Mode)...");
+                    const userScript = payload.args?.code || "return 'No code provided'";
+                    const result = await agentModule.runCode(userScript);
+                    window.parent.postMessage({ type: 'AGENT_EXECUTION_COMPLETE', result }, '*');
+                } else if (agentModule.run) {
+                    console.log("[Sandbox] Running Agent (Standard Mode)...");
+                    const result = await agentModule.run();
+                    window.parent.postMessage({ type: 'AGENT_EXECUTION_COMPLETE', result }, '*');
+                } else {
+                    throw new Error("Agent module does not export 'run' or 'runCode'.");
+                }
+
+                URL.revokeObjectURL(url);
+            } catch (e) {
+                console.error("[Sandbox] Execution Error:", e);
+                window.parent.postMessage({ type: 'AGENT_EXECUTION_COMPLETE', result: `Error: ${e.message}` }, '*');
+            }
+        }
+
+        async function executeAgentFromUrl(url, payload) {
+            try {
+                console.log("[Sandbox] Loading Agent from URL:", url);
+                const agentModule = await import(url);
+
+                if (agentModule.runCode) {
+                    console.log("[Sandbox] Running Agent (Eval Mode)...");
+                    const userScript = payload.args?.code || "return 'No code provided'";
+                    const result = await agentModule.runCode(userScript);
+                    window.parent.postMessage({ type: 'AGENT_EXECUTION_COMPLETE', result }, '*');
+                } else if (agentModule.run) {
+                    console.log("[Sandbox] Running Agent (Standard Mode)...");
+                    const result = await agentModule.run();
+                    window.parent.postMessage({ type: 'AGENT_EXECUTION_COMPLETE', result }, '*');
+                } else {
+                    throw new Error("Agent module does not export 'run' or 'runCode'.");
+                }
+            } catch (e) {
+                console.error("[Sandbox] URL Execution Error:", e);
+                window.parent.postMessage({ type: 'AGENT_EXECUTION_COMPLETE', result: `Error: ${e.message}` }, '*');
+            }
+        }
+
+        window.addEventListener('message', async (event) => {
+            const { type, requestId, success, data, payload } = event.data;
+
+            if (type === 'BRIDGE_AI_RESPONSE') {
+                const resolver = pendingRequests.get(requestId);
+                if (resolver) {
+                    resolver.resolve(success ? data : `Error: ${data}`);
+                    pendingRequests.delete(requestId);
+                }
+            } else if (type === 'EXECUTE_AGENT') {
+                executeAgentCode(payload.code, payload);
+            } else if (type === 'EXECUTE_AGENT_FROM_URL') {
+                executeAgentFromUrl(payload.url, payload);
+            } else if (type === 'EXECUTE_AGENT_FROM_SOURCE') {
+                const { code, shims, wasmFiles } = payload;
+
+                const processedShims = {};
+                if (shims) {
+                    Object.keys(shims).forEach(name => {
+                        let shimCode = shims[name];
+                        Object.keys(shims).forEach(otherName => {
+                            const importRegex = new RegExp(`['"]\\.\\/${otherName}\\.js['"]`, 'g');
+                            const placeholder = `__SHIM_${otherName.toUpperCase()}__`;
+                            shimCode = shimCode.replace(importRegex, `"${placeholder}"`);
+                        });
+                        processedShims[name] = shimCode;
+                    });
+                }
+
+                const shimUrls = {};
+                const createdUrls = [];
+
+                // Handle Wasm Files
+                if (wasmFiles) {
+                    console.log("[Sandbox] Wasm Files received:", Object.keys(wasmFiles));
+                    Object.entries(wasmFiles).forEach(([filename, content]) => {
+                        const blob = new Blob([content], { type: 'application/wasm' });
+                        const url = URL.createObjectURL(blob);
+                        shimUrls[filename] = url; // Store in map for replacement
+                        createdUrls.push(url);
+                        console.log(`[Sandbox] Created Blob for Wasm: ${filename} -> ${url}`);
+                    });
+                }
+
+                if (shims) {
+                    console.log("[Sandbox] Shims received:", Object.keys(shims));
+                }
+
+                let remaining = Object.keys(shims);
+                let stuck = false;
+
+                while (remaining.length > 0 && !stuck) {
+                    const nextBatch = [];
+                    let progress = false;
+
+                    for (const name of remaining) {
+                        let code = shims[name];
+                        const re = /from\s+['"]\.\/([^'"]+)\.js['"]/g;
+                        let match;
+                        let ready = true;
+                        const deps = [];
+                        re.lastIndex = 0;
+                        while ((match = re.exec(code)) !== null) {
+                            const depName = match[1];
+                            if (!shimUrls[depName]) {
+                                if (!shims[depName]) {
+                                    console.warn("Missing dependency for shim:", name, "->", depName);
+                                }
+                                ready = false;
+                            } else {
+                                deps.push(depName);
+                            }
+                        }
+
+                        if (ready) {
+                            console.log(`[Sandbox] Processing shim: ${name}`);
+                            deps.forEach(dep => {
+                                const replRe = new RegExp(`from\\s+['"]\\.\\/${dep}\\.js['"]`, 'g');
+                                code = code.replace(replRe, `from '${shimUrls[dep]}'`);
+                            });
+                            const blob = new Blob([code], { type: 'text/javascript' });
+                            const url = URL.createObjectURL(blob);
+                            shimUrls[name] = url;
+                            createdUrls.push(url);
+                            progress = true;
+                        } else {
+                            nextBatch.push(name);
+                        }
+                    }
+
+                    if (!progress && nextBatch.length > 0) {
+                        console.error("Circular dependency or missing files in shims:", nextBatch);
+                        stuck = true;
+                    }
+                    remaining = nextBatch;
+                }
+
+                let finalAgentCode = code;
+                const camelCase = (str) => str.replace(/-([a-z])/g, (g) => g[1].toUpperCase());
+
+                // Find all imports first, then filter for WASI
+                const importRegex = /import\s*\{([\s\S]+?)\}\s*from\s*['"]([^'"]+)['"]/g;
+                let importMatch;
+                const adapterUrls = [];
+                const neededAdapters = new Map();
+
+                console.log("[Sandbox] Scanning for WASI imports...");
+
+                while ((importMatch = importRegex.exec(code)) !== null) {
+                    const [fullStr, distinctImports, specifier] = importMatch;
+
+                    // Handle Host Capabilities (component:agent/*)
+                    if (specifier.startsWith('component:agent/')) {
+                        console.log(`[Sandbox] Found Host Component import: ${specifier}`);
+                        const parts = specifier.split('/');
+                        const name = parts[1]; // host-capabilities or host-console
+
+                        let adapterCode = '';
+                        if (name === 'host-capabilities') {
+                            adapterCode = `
+                                 export const ask = async (prompt) => {
+                                     return await globalThis.JCO_BRIDGE.ask(prompt);
+                                 };
+                             `;
+                        } else if (name === 'host-console') {
+                            adapterCode = `
+                                 export const log = (msg) => {
+                                     globalThis.JCO_BRIDGE.log(msg);
+                                 };
+                             `;
+                        }
+
+                        if (adapterCode) {
+                            const blob = new Blob([adapterCode], { type: 'text/javascript' });
+                            const url = URL.createObjectURL(blob);
+                            adapterUrls.push(url);
+
+                            // Safer Replacement: Only replace 'from "specifier"' or 'import("specifier")'
+                            // We use split/join or specific regex to avoid breaking strings inside error messages
+
+                            // 1. Static Imports: from "specifier"
+                            finalAgentCode = finalAgentCode.replaceAll(`from '${specifier}'`, `from '${url}'`);
+                            finalAgentCode = finalAgentCode.replaceAll(`from "${specifier}"`, `from '${url}'`);
+
+                            // 2. Dynamic Imports: import("specifier")
+                            finalAgentCode = finalAgentCode.replaceAll(`import('${specifier}')`, `import('${url}')`);
+                            finalAgentCode = finalAgentCode.replaceAll(`import("${specifier}")`, `import('${url}')`);
+
+                            console.log(`[Sandbox] Mocked Host Component ${specifier} -> ${url}`);
+                        }
+                        continue;
+                    }
+
+                    if (!specifier.startsWith('wasi:')) {
+                        continue;
+                    }
+                    console.log(`[Sandbox] Found WASI import: ${specifier} imports: ${distinctImports.replace(/\s+/g, ' ')}`);
+
+                    const specMatch = /^wasi:([^/]+)\/(.+)$/.exec(specifier);
+                    if (!specMatch) {
+                        console.warn("[Sandbox] Skipped unrecognized WASI specifier:", specifier);
+                        continue;
+                    }
+                    const pkg = specMatch[1];
+                    const iface = specMatch[2];
+
+                    if (!neededAdapters.has(specifier)) {
+                        neededAdapters.set(specifier, { pkg, iface, members: new Set() });
+                    }
+
+                    distinctImports.split(',').forEach(part => {
+                        const partTrim = part.trim();
+                        if (partTrim) {
+                            neededAdapters.get(specifier).members.add(partTrim);
+                        }
+                    });
+                }
+
+                if (neededAdapters.size === 0) {
+                    console.warn("[Sandbox] No WASI imports found to adapt! Code sample:", code.substring(0, 500));
+                }
+
+                for (const [specifier, { pkg, iface, members }] of neededAdapters.entries()) {
+                    if (!shimUrls[pkg]) {
+                        console.warn(`[Sandbox] Missing shim for package: ${pkg} (required by ${specifier})`);
+                        continue;
+                    }
+
+                    const resourceName = camelCase(iface);
+                    const shimUrl = shimUrls[pkg];
+                    // Collision Fix: Alias the imported resource to avoid conflict with exported members (e.g. 'poll')
+                    let adapterCode = `import { ${resourceName} as _${resourceName} } from '${shimUrl}';\n`;
+                    members.forEach(member => {
+                        const parts = member.split(/\s+as\s+/);
+                        const localName = parts[0];
+                        // Fix: The adapter must export the name the importer expects (localName), not the alias (exportName)
+                        // If the importer says "import { Error as Error$1 }", it looks for "Error" in the adapter.
+                        adapterCode += `export const ${localName} = _${resourceName}.${localName};\n`;
+                    });
+
+                    console.log(`[Sandbox] Created Adapter for ${specifier}:\n${adapterCode}`);
+                    const blob = new Blob([adapterCode], { type: 'text/javascript' });
+                    const url = URL.createObjectURL(blob);
+                    adapterUrls.push(url);
+
+                    // Safer Replacement for WASI imports too
+                    finalAgentCode = finalAgentCode.replaceAll(`from '${specifier}'`, `from '${url}'`);
+                    finalAgentCode = finalAgentCode.replaceAll(`from "${specifier}"`, `from '${url}'`);
+                    finalAgentCode = finalAgentCode.replaceAll(`import('${specifier}')`, `import('${url}')`);
+                    finalAgentCode = finalAgentCode.replaceAll(`import("${specifier}")`, `import('${url}')`);
+                }
+                createdUrls.push(...adapterUrls);
+
+                // Replace Wasm file references
+                if (wasmFiles) {
+                    Object.keys(wasmFiles).forEach(filename => {
+                        const url = shimUrls[filename];
+                        if (url) {
+                            // Regex to match:
+                            // 1. Quote (single or double)
+                            // 2. Optional ./ or /
+                            // 3. Filename (escaped dots)
+                            // 4. Matching Quote
+                            const escapedFilename = filename.replace(/\./g, '\\.');
+                            const re = new RegExp(`(['"])(\\.?\\/)?${escapedFilename}\\1`, 'g');
+
+                            finalAgentCode = finalAgentCode.replace(re, `'${url}'`);
+                            console.log(`[Sandbox] Replaced Wasm reference: ${filename} -> ${url}`);
+                        }
+                    });
+                }
+
+                if (shims) {
+                    Object.keys(shimUrls).forEach(name => {
+                        const placeholder = `__SHIM_${name.toUpperCase()}__`;
+                        const regex = new RegExp(placeholder, 'g');
+                        finalAgentCode = finalAgentCode.replace(regex, shimUrls[name]);
+                    });
+                }
+                console.log(`[Sandbox] Final Agent Code imports sample:`, finalAgentCode.substring(0, 500));
+
+                const agentBlob = new Blob([finalAgentCode], { type: 'text/javascript' });
+                const agentUrl = URL.createObjectURL(agentBlob);
+                createdUrls.push(agentUrl);
+
+                try {
+                    await executeAgentFromUrl(agentUrl, payload);
+                } finally {
+                    createdUrls.forEach(u => URL.revokeObjectURL(u));
+                }
+            }
+        });
+
+        window.parent.postMessage({ type: 'SANDBOX_READY' }, '*');
+    </script>
+</body>
+
+</html>

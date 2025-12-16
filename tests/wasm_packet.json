@@ -1,0 +1,16 @@
+{
+    "id": "wasm_test_packet",
+    "title": "Wasm Packet Test",
+    "created": "2025-12-09T10:00:00Z",
+    "sourceContent": [
+        {
+            "origin": "internal",
+            "format": "wasm",
+            "lrl": "agents/agent.js",
+            "title": "Wasm Agent Logic",
+            "context": "The active logic for this packet."
+        }
+    ],
+    "checkpoints": [],
+    "moments": []
+}

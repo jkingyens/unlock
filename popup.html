@@ -1,20 +1,28 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Unlock</title>
+  <meta charset="UTF-8"> <title>Unlock</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <link rel="stylesheet" href="popup.css">
 </head>
 <body>
+  <div class="header">
+    <span class="logo">Unlock</span>
+    <div class="header-controls">
+        <button id="settings-btn" title="Settings">⚙️</button>
+    </div>
+  </div>
+
   <div id="create-packet-container" class="create-packet-container">
+    <input type="text" id="title-input" style="display:none;">
     <button id="create-btn">Packetize Page</button>
   </div>
 
-  <div id="onboarding-container" class="onboarding-container hidden">
-    <p>Please configure your LLM and Cloud Storage settings first.</p>
-    <button id="open-sidebar-btn-popup" class="button-secondary">Go to Settings</button> </div>
-  <div id="creation-progress-container" class="hidden">
-     <div id="creation-progress-bar"></div>
+  <div id="status-message" class="status-message"></div>
+  <div id="loading-spinner" class="spinner hidden"></div>
+
+  <div class="footer">
+    <button id="open-sidebar-btn-popup" class="button-secondary">Open Sidebar Explorer</button>
   </div>
 
   <script type="module" src="popup.js"></script>

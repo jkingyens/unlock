@@ -115,20 +115,28 @@ function _parseJsonArticleResponse(contentStr, providerNameForLog) {
         }
 
         let parsedJson = JSON.parse(jsonString);
+
         if (Array.isArray(parsedJson)) { 
-            logger.warn(`LLMService:_parseJsonArticleResponse[${providerNameForLog}]`, `Returned JSON array directly for articles. Wrapping it.`);
-            return { contents: parsedJson };
+            return parsedJson;
         }
+        
+        // --- START OF FIX ---
+        // If the LLM returns a single settings change object, wrap it in an array
+        if (parsedJson.operation === 'add' && parsedJson.path === 'llmModels') {
+            return [parsedJson];
+        }
+        // --- END OF FIX ---
+
         if (parsedJson.title && parsedJson.contentSummary) { // For extract_title_from_html
             return parsedJson;
         }
 
-        if (parsedJson && (Array.isArray(parsedJson.contents) || Array.isArray(parsedJson.podcasts) || Array.isArray(parsedJson.media) || Array.isArray(parsedJson.linkOffsets))) {
+        if (parsedJson && (Array.isArray(parsedJson.contents) || Array.isArray(parsedJson.podcasts) || Array.isArray(parsedJson.media) || Array.isArray(parsedJson.linkOffsets) || Array.isArray(parsedJson.sourceContent))) {
             return parsedJson;
         }
 
-        logger.error(`LLMService:_parseJsonArticleResponse[${providerNameForLog}]`, `Parsed JSON does not contain the expected "contents", "podcasts", "media", or "linkOffsets" array.`, parsedJson);
-        throw new Error(`Parsed JSON is not in the expected format (missing "contents", "podcasts", "media", or "linkOffsets" array).`);
+        logger.error(`LLMService:_parseJsonArticleResponse[${providerNameForLog}]`, `Parsed JSON does not contain the expected "contents", "podcasts", "media", "linkOffsets", or "sourceContent" array.`, parsedJson);
+        throw new Error(`Parsed JSON is not in the expected format (missing "contents", "podcasts", "media", "linkOffsets", or "sourceContent" array).`);
 
     } catch (parseError) {
         logger.error(`LLMService:_parseJsonArticleResponse[${providerNameForLog}]`, `Failed to parse JSON. Content that caused error (first 500 chars): "${contentStr.substring(0,500)}"`, { parseError });
@@ -179,10 +187,7 @@ Your entire response must be a single JSON object as specified.`;
 
 function getSummaryPromptText(context) {
     const { title, allPacketContents } = context;
-    // --- START OF FIX ---
-    // The filter was incorrectly using 'item.type' instead of 'item.origin'.
     const externalArticlesForSynthesis = allPacketContents.filter(item => item.origin === 'external' && item.url);
-    // --- END OF FIX ---
     const articleSynthesisInfo = externalArticlesForSynthesis.map(a => `- ${a.title}: ${a.url} (Context: ${a.context || 'N/A'})`).join('\n');
 
     const originalSourcePage = allPacketContents.find(item => item.context === 'The original source page this packet was created from.');
@@ -344,6 +349,47 @@ function getPacketTitlePromptText(context) {
     return { systemPrompt, userPrompt };
 }
 
+function getCodebasePacketCreationPromptText(context) {
+    const { userPrompt, codebase } = context;
+
+    // --- START OF FIX ---
+    const systemPrompt = `You are an expert software engineer and content creator for a Chrome extension called "Unlock". Your task is to generate a complete Packet JSON object based on a user's prompt and the extension's codebase.
+
+**Core Goal:** Create a step-by-step guide that helps the user accomplish the task in their prompt.
+
+**Analysis Steps:**
+1.  **Deconstruct the Goal:** Break down the user's prompt (e.g., "fetch a grok api key") into a logical sequence of actions.
+2.  **Find Relevant URLs:** If a step involves visiting a website (e.g., a sign-up page, an API keys page), use your knowledge to provide the direct URL.
+3.  **Incorporate Interactive Capture:** If a step requires the user to obtain a piece of information (like an API key, a password, or a specific piece of text), you MUST include an "interactive-input" item for that step.
+4.  **Structure the Packet:**
+    * Create a \`sourceContent\` item for each step in the process.
+    * Use the \`title\` field for the step description (e.g., "Step 1: Navigate to the API Console").
+    * Use the \`context\` field to provide helpful instructions for that step.
+    * For capture steps, use the \`interactive-input\` format. Define the \`output\` object with a clear \`description\` and the correct \`contentType\`.
+
+**Example of an \`interactive-input\` item:**
+\`\`\`json
+{
+  "origin": "internal",
+  "format": "interactive-input",
+  "lrl": "/inputs/capture-api-key",
+  "title": "Step 2: Save Your API Key",
+  "context": "Click to activate, then select the API key on the page or paste it from your clipboard.",
+  "output": {
+    "description": "The user's captured API Key",
+    "contentType": "text/plain"
+  }
+}
+\`\`\`
+
+**Final Output:** Your entire response MUST be a single, valid JSON object representing the complete packet. Do not wrap it in markdown fences or add any other explanatory text.`;
+    // --- END OF FIX ---
+    
+    const fullUserPrompt = `User Prompt: "${userPrompt}"\n\nFull Codebase:\n\n${codebase}`;
+
+    return { systemPrompt, userPrompt: fullUserPrompt };
+}
+
 const llmService = {
     prepareOpenAIPayload(promptType, context, activeModelConfig) {
         let systemPrompt, userPrompt;
@@ -369,6 +415,13 @@ const llmService = {
             ({ systemPrompt, userPrompt } = getCustomPagePromptText(context.prompt, context.context));
         } else if (promptType === 'modify_html_for_completion') {
             ({ systemPrompt, userPrompt } = getModificationPromptText(context.htmlContent));
+        } else if (promptType === 'propose_settings_changes') {
+            systemPrompt = context.system;
+            userPrompt = context.user;
+            responseFormat = { type: "json_object" };
+        } else if (promptType === 'create_packet_from_codebase') {
+            ({ systemPrompt, userPrompt } = getCodebasePacketCreationPromptText(context));
+            responseFormat = { type: "json_object" };
         }
         else { throw new Error(`Invalid promptType for OpenAI: ${promptType}`); }
         
@@ -389,7 +442,7 @@ const llmService = {
         if (promptType === 'custom_page' || promptType === 'modify_html_for_completion') {
             return _cleanFullHtmlOutput(contentStr);
         }
-        if (promptType === 'article_suggestions' || promptType === 'extract_title_from_html' || promptType === 'extract_media') {
+        if (promptType === 'article_suggestions' || promptType === 'extract_title_from_html' || promptType === 'extract_media' || promptType === 'propose_settings_changes' || promptType === 'create_packet_from_codebase') {
             return _parseJsonArticleResponse(contentStr, `OpenAI (${responseData.model || ''})`);
         }
         if (promptType === 'summary_page' || promptType === 'quiz_page') {
@@ -399,7 +452,7 @@ const llmService = {
     },
     prepareGeminiPayload(promptType, context, activeModelConfig) {
         let systemPrompt, userPrompt, promptText;
-        let maxOutputTokensForTask = 8192; // Default high for Gemini
+        let maxOutputTokensForTask = 8192; 
         let generationConfig = { temperature: CONFIG.TEMPERATURE, maxOutputTokens: maxOutputTokensForTask };
         let responseMimeType = "text/plain"; 
         
@@ -422,6 +475,13 @@ const llmService = {
             ({ systemPrompt, userPrompt } = getModificationPromptText(context.htmlContent));
         } else if (promptType === 'generate_packet_title') {
             ({ systemPrompt, userPrompt } = getPacketTitlePromptText(context));
+        } else if (promptType === 'propose_settings_changes') { 
+            systemPrompt = context.system;
+            userPrompt = context.user;
+            responseMimeType = "application/json";
+        } else if (promptType === 'create_packet_from_codebase') {
+            ({ systemPrompt, userPrompt } = getCodebasePacketCreationPromptText(context));
+            responseMimeType = "application/json";
         }
         else { throw new Error(`Invalid promptType for Gemini: ${promptType}`); }
         
@@ -448,7 +508,7 @@ const llmService = {
         if (promptType === 'custom_page' || promptType === 'modify_html_for_completion') {
             return _cleanFullHtmlOutput(contentStr);
         }
-        if (promptType === 'article_suggestions' || promptType === 'extract_title_from_html' || promptType === 'extract_media') return _parseJsonArticleResponse(contentStr, `Gemini (${responseData.model || ''})`);
+        if (promptType === 'article_suggestions' || promptType === 'extract_title_from_html' || promptType === 'extract_media' || promptType === 'propose_settings_changes' || promptType === 'create_packet_from_codebase') return _parseJsonArticleResponse(contentStr, `Gemini (${responseData.model || ''})`);
         else if (promptType === 'summary_page' || promptType === 'quiz_page') return _cleanHtmlOutput(contentStr);
         else if (promptType === 'generate_packet_title') return contentStr.trim().replace(/["']/g, '');
         else throw new Error(`Invalid promptType for Gemini parsing: ${promptType}`);
@@ -474,6 +534,8 @@ const llmService = {
             ({ systemPrompt, userPrompt } = getModificationPromptText(context.htmlContent));
         } else if (promptType === 'generate_packet_title') {
             ({ systemPrompt, userPrompt } = getPacketTitlePromptText(context));
+        } else if (promptType === 'create_packet_from_codebase') {
+            ({ systemPrompt, userPrompt } = getCodebasePacketCreationPromptText(context));
         }
         else { throw new Error(`Invalid promptType for Chrome AI: ${promptType}`); }
         fullPrompt = `${systemPrompt}\n\n${userPrompt}`;
@@ -483,7 +545,7 @@ const llmService = {
         if (promptType === 'custom_page' || promptType === 'modify_html_for_completion') {
             return _cleanFullHtmlOutput(responseString);
         }
-        if (promptType === 'article_suggestions' || promptType === 'extract_title_from_html' || promptType === 'extract_media') return _parseJsonArticleResponse(responseString, 'ChromeAI-Nano');
+        if (promptType === 'article_suggestions' || promptType === 'extract_title_from_html' || promptType === 'extract_media' || promptType === 'create_packet_from_codebase') return _parseJsonArticleResponse(responseString, 'ChromeAI-Nano');
         else if (promptType === 'summary_page' || promptType === 'quiz_page') return _cleanHtmlOutput(responseString);
         else if (promptType === 'generate_packet_title') {
             // The response for a title is a simple string, clean it up.
@@ -532,6 +594,13 @@ const llmService = {
             const { systemPrompt, userPrompt } = getModificationPromptText(context.htmlContent);
             systemPromptText = systemPrompt;
             userMessages = [{role: "user", content: userPrompt }];
+        } else if (promptType === 'propose_settings_changes') { 
+            systemPromptText = context.system;
+            userMessages = [{role: "user", content: context.user }];
+        } else if (promptType === 'create_packet_from_codebase') {
+            const { systemPrompt, userPrompt } = getCodebasePacketCreationPromptText(context);
+            systemPromptText = systemPrompt;
+            userMessages = [{role: "user", content: userPrompt }];
         }
         else { throw new Error(`Invalid promptType for Anthropic: ${promptType}`); }
 
@@ -565,7 +634,7 @@ const llmService = {
         if (promptType === 'custom_page' || promptType === 'modify_html_for_completion') {
             return _cleanFullHtmlOutput(contentStr);
         }
-        if (promptType === 'article_suggestions' || promptType === 'extract_title_from_html' || promptType === 'extract_media') return _parseJsonArticleResponse(contentStr, `Anthropic (${responseData.model || ''})`);
+        if (promptType === 'article_suggestions' || promptType === 'extract_title_from_html' || promptType === 'extract_media' || promptType === 'propose_settings_changes' || promptType === 'create_packet_from_codebase') return _parseJsonArticleResponse(contentStr, `Anthropic (${responseData.model || ''})`);
         else if (promptType === 'summary_page' || promptType === 'quiz_page') return _cleanHtmlOutput(contentStr);
         else throw new Error(`Invalid promptType for Anthropic parsing: ${promptType}`);
     },
@@ -629,7 +698,7 @@ const llmService = {
         getHeaders: (apiKey) => ({
             'x-api-key': apiKey,
             'anthropic-version': '2023-06-01', 
-            'content-type': 'application/json',
+            'Content-Type': 'application/json',
             'anthropic-dangerous-direct-browser-access': 'true' 
         }),
         isLocalApi: false
@@ -657,6 +726,11 @@ const llmService = {
         }
     
         const { id: modelId, name: modelFriendlyName, providerType, apiKey, modelName, apiEndpoint } = activeModelConfig;
+        
+        if (!apiKey && providerType !== 'chrome-ai-gemini-nano') {
+             return { success: false, error: `API key for model '${modelFriendlyName}' is missing. Please check your settings.` };
+        }
+
         const processor = this.LLM_PROCESSORS[providerType];
     
         if (!processor) {
@@ -665,27 +739,65 @@ const llmService = {
             return { success: false, error: errorMsg };
         }
     
+        const startTime = Date.now();
+        let status = 'failed';
+        let logData = {};
+
         try {
             const llmInput = processor.preparePayload(promptType, context, activeModelConfig);
+            
+            const contextCharLength = JSON.stringify(context).length;
+            const promptCharLength = JSON.stringify(llmInput).length;
+            const estimatedInputTokens = Math.round((contextCharLength + promptCharLength) / 4);
+
+            const costPerMillionInputTokens = {
+                'openai': 0.50, 'gemini': 0.50, 'anthropic': 0.25, 'perplexity': 0.20,
+                'deepseek': 0.14, 'grok': 0.10, 'llama': 0.10, 'openai-compatible': 0.10,
+                'chrome-ai-gemini-nano': 0
+            }[providerType] || 0.10; // Default cost
+            const estimatedCost = (estimatedInputTokens / 1000000) * costPerMillionInputTokens;
+
+            logData = {
+                provider: providerType,
+                model: modelName,
+                promptType: promptType,
+                estimatedInputTokens: estimatedInputTokens,
+                estimatedCostUSD: estimatedCost.toFixed(6)
+            };
+
             let llmOutput;
     
             if (processor.isLocalApi) {
-                const languageModelAPI = LanguageModel;
+                // --- FIX STARTS HERE ---
+                // Detect the available API namespace
+                const languageModelAPI = globalThis.LanguageModel || self.ai?.languageModel;
+                
                 if (!languageModelAPI || typeof languageModelAPI.create !== 'function') {
-                    throw new Error('Chrome LanguageModel API (chrome.languageModel.create) is not available. Ensure Chrome is updated and relevant flags (if any) are enabled.');
+                    throw new Error('Chrome LanguageModel API is not available.');
                 }
-                const session = await languageModelAPI.create({});
-                if (typeof session.prompt !== 'function') {
-                    if(typeof session.destroy === 'function') session.destroy();
-                    throw new Error("The created LanguageModel session does not have a 'prompt' method.");
+
+                // Define the mandatory options
+                const options = {
+                    expectedOutputLanguages: ['en'] // Mandatory in Chrome v140+
+                };
+
+                // Create session with options
+                const session = await languageModelAPI.create(options);
+                
+                // Prompt the model
+                // Check for .prompt() vs .generate() compatibility
+                if (typeof session.prompt === 'function') {
+                    llmOutput = await session.prompt(llmInput);
+                } else if (typeof session.generate === 'function') {
+                    llmOutput = await session.generate(llmInput);
+                } else {
+                     throw new Error("Session created but no prompt method found.");
                 }
-                llmOutput = await session.prompt(llmInput);
+
                 if(typeof session.destroy === 'function') session.destroy();
+                // --- FIX ENDS HERE ---
             } else {
                 const effectiveApiUrl = processor.constructApiUrl(apiEndpoint, modelName, apiKey);
-                if (!effectiveApiUrl) {
-                    throw new Error(`Could not construct API URL for provider ${providerType} with endpoint ${apiEndpoint}`);
-                }
                 const headers = { ...processor.getHeaders(apiKey) };
                 if (!headers['Content-Type'] && typeof llmInput === 'object') {
                      headers['Content-Type'] = 'application/json';
@@ -700,9 +812,8 @@ const llmService = {
                 if (!response.ok) {
                     let errorResponseMessage = await response.text();
                     let errorDataForLog = { error: { message: errorResponseMessage } };
-                    try { errorDataForLog = JSON.parse(errorResponseMessage); } catch (e) { /* ignore */ }
+                    try { errorDataForLog = JSON.parse(errorResponseMessage); } catch (e) {}
                     let detailedErrorMsg = errorDataForLog?.error?.message || errorResponseMessage || `HTTP error ${response.status}`;
-                    logger.error('LLMService:callLLM', `LLM API call failed for ${providerType}`, { status: response.status, errorMsg: detailedErrorMsg });
                     throw new Error(detailedErrorMsg);
                 }
     
@@ -710,11 +821,20 @@ const llmService = {
             }
     
             const parsedData = processor.parseResponse(promptType, llmOutput, activeModelConfig);
+            status = 'success';
             return { success: true, data: parsedData };
     
         } catch (error) {
             logger.error('LLMService:callLLM', `Error during LLM API call for ${providerType}`, error);
             return { success: false, error: error.message || 'An unknown error occurred.' };
+        } finally {
+            const duration = (Date.now() - startTime) / 1000;
+            console.log('--- LLM Call Log ---', {
+                ...logData,
+                status: status,
+                durationSeconds: duration.toFixed(2),
+                timestamp: new Date().toISOString()
+            });
         }
     }
 };
