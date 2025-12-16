@@ -16,14 +16,14 @@ export function cacheDomReferences() {
         backBtn: document.getElementById('back-btn'),
         settingsBtn: document.getElementById('settings-btn'),
         sidebarTitle: document.getElementById('sidebar-title'),
-        
+
         // Views
         mainContentArea: document.querySelector('.main-content-area'),
         rootView: document.getElementById('root-view'),
         createView: document.getElementById('create-view'),
         packetDetailView: document.getElementById('packet-detail-view'),
         settingsView: document.getElementById('settings-view'),
-        
+
         // Root View Elements
         tabInbox: document.getElementById('tab-inbox'),
         tabInProgress: document.getElementById('tab-in-progress'),
@@ -50,7 +50,7 @@ export function cacheDomReferences() {
         dropZone: document.getElementById('drop-zone'),
         addCurrentTabBtn: document.getElementById('add-current-tab-btn'),
         createNewPageBtn: document.getElementById('create-new-page-btn'),
-        
+
         // Generate New Page Dialog Refs
         makePageDialog: document.getElementById('make-page-dialog'),
         makePagePromptInput: document.getElementById('make-page-prompt-input'),
@@ -64,7 +64,7 @@ export function cacheDomReferences() {
         llmAddNewModelBtn: document.getElementById('llm-add-new-model-btn'),
         llmModelEditFormSection: document.getElementById('llm-model-edit-form-section'),
         llmEditFormTitle: document.getElementById('llm-edit-form-title'),
-        llmEditModelIdInput: document.getElementById('llm-edit-model-id'), 
+        llmEditModelIdInput: document.getElementById('llm-edit-model-id'),
         llmEditFriendlyNameInput: document.getElementById('llm-edit-friendly-name'),
         llmEditProviderTypeSelect: document.getElementById('llm-edit-provider-type'),
         llmEditApiKeyGroup: document.getElementById('llm-edit-api-key-group'),
@@ -76,7 +76,10 @@ export function cacheDomReferences() {
         llmEditApiEndpointDesc: document.getElementById('llm-edit-api-endpoint-desc'),
         llmEditFormSaveBtn: document.getElementById('llm-edit-form-save-btn'),
         llmEditFormCancelBtn: document.getElementById('llm-edit-form-cancel-btn'),
-        
+
+        // Debug
+        debugAgentResult: document.getElementById('debug-agent-result'), // <--- ADD THIS
+
         // Settings View S3 Refs
         s3ConfigsList: document.getElementById('s3-configs-list'),
         s3AddNewConfigBtn: document.getElementById('s3-add-new-config-btn'),
@@ -111,38 +114,41 @@ export function cacheDomReferences() {
         s3HelpLink: document.getElementById('s3-help-link'),
 
         // Detail View Dynamic Refs
-        detailProgressContainer: null, 
+        detailProgressContainer: null,
         detailActionButtonContainer: null,
         detailCloseGroupBtn: null,
         detailCardsContainer: null,
-        
+
         // Share Dialog Refs
         shareDialog: document.getElementById('share-dialog'),
         shareDialogMessage: document.getElementById('share-dialog-message'),
         shareDialogUrlInput: document.getElementById('share-dialog-url'),
         copyShareLinkBtn: document.getElementById('copy-share-link-btn'),
         closeShareDialogBtn: document.getElementById('close-share-dialog-btn'),
-        
+
         // Import Dialog Refs
         importDialog: document.getElementById('import-dialog'),
         importDialogUrlInput: document.getElementById('import-dialog-url-input'),
         importDialogStatusMessage: document.getElementById('import-dialog-status-message'),
         confirmImportDialogBtn: document.getElementById('confirm-import-dialog-btn'),
         cancelImportDialogBtn: document.getElementById('cancel-import-dialog-btn'),
-        
+        importDropZone: document.getElementById('import-drop-zone'),
+        importFileSelectBtn: document.getElementById('import-file-select-btn'),
+        importFileInput: document.getElementById('import-file-input'),
+
         // Close Group Dialog Refs
         closeGroupDialog: document.getElementById('close-group-dialog'),
-        closeGroupDialogBox: document.querySelector('.close-group-dialog'), 
+        closeGroupDialogBox: document.querySelector('.close-group-dialog'),
         closeGroupDialogMessage: document.getElementById('close-group-dialog-message'),
         confirmCloseGroupBtn: document.getElementById('confirm-close-group-btn'),
         cancelCloseGroupBtn: document.getElementById('cancel-close-group-btn'),
 
-        // Title Prompt Dialog Refs
-        titlePromptDialog: document.getElementById('title-prompt-dialog'),
-        titlePromptMessage: document.getElementById('title-prompt-message'),
-        titlePromptInput: document.getElementById('title-prompt-input'),
-        confirmTitlePromptBtn: document.getElementById('confirm-title-prompt-btn'),
-        cancelTitlePromptBtn: document.getElementById('cancel-title-prompt-btn'),
+        // Input Prompt Dialog Refs
+        inputPromptDialog: document.getElementById('input-prompt-dialog'),
+        inputPromptMessage: document.getElementById('input-prompt-message'),
+        inputPromptInput: document.getElementById('input-prompt-input'),
+        confirmInputPromptBtn: document.getElementById('confirm-input-prompt-btn'),
+        cancelInputPromptBtn: document.getElementById('cancel-input-prompt-btn'),
     });
     logger.log('Sidebar:cacheDomReferences', 'DOM references cached.');
 }

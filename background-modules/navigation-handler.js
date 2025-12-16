@@ -1,8 +1,5 @@
 // ext/background-modules/navigation-handler.js
-// This module now acts as a pure event listener for webNavigation events.
-// It has been refactored to delegate all complex reconciliation logic to the
-// PacketRuntime API, cleaning up its responsibilities.
-// REVISED: The grace period for navigation has been lowered from 250ms to 50ms.
+// REVISED: Exported injectOverlayScripts for use during startup initialization.
 
 import {
     logger,
@@ -20,6 +17,8 @@ import PacketRuntime from './packet-runtime.js';
 import cloudStorage from '../cloud-storage.js';
 
 const pendingVisits = {};
+const navigationQueues = new Map();
+const processingNavigation = new Set();
 
 export function clearPendingVisitTimer(tabId) {
     if (pendingVisits[tabId]?.timerId) {
@@ -28,7 +27,8 @@ export function clearPendingVisitTimer(tabId) {
     }
 }
 
-async function injectOverlayScripts(tabId) {
+// --- EXPORTED for Startup Injection ---
+export async function injectOverlayScripts(tabId) {
     try {
         await chrome.scripting.executeScript({
             target: { tabId: tabId },
@@ -39,7 +39,8 @@ async function injectOverlayScripts(tabId) {
             files: ['overlay.css']
         });
     } catch (e) {
-        // Expected to fail on non-http pages.
+        // Expected to fail on non-http pages or restricted domains
+        // logger.warn('NavigationHandler', `Failed to inject overlay into tab ${tabId}`, e.message);
     }
 }
 
@@ -48,6 +49,7 @@ export async function onBeforeNavigate(details) {
         return;
     }
 
+    // Check for cached content (Previews)
     const instances = await storage.getPacketInstances();
     for (const instanceId in instances) {
         const instance = instances[instanceId];
@@ -82,20 +84,48 @@ export async function onHistoryStateUpdated(details) {
 }
 
 async function processNavigationEvent(tabId, url, details) {
+    if (!navigationQueues.has(tabId)) {
+        navigationQueues.set(tabId, []);
+    }
+    navigationQueues.get(tabId).push({ url, details });
+
+    if (processingNavigation.has(tabId)) {
+        return; 
+    }
+
+    processingNavigation.add(tabId);
+
+    while (navigationQueues.get(tabId) && navigationQueues.get(tabId).length > 0) {
+        const event = navigationQueues.get(tabId).shift();
+        if (event) {
+            try {
+                await doProcessNavigationEvent(tabId, event.url, event.details);
+            } catch (e) {
+                logger.error('NavigationHandler', 'Error processing navigation event from queue', e);
+            }
+        }
+    }
+
+    processingNavigation.delete(tabId);
+    navigationQueues.delete(tabId);
+}
+
+async function doProcessNavigationEvent(tabId, url, details) {
     const logPrefix = `[NavigationHandler Tab ${tabId}]`;
     if (!url || (!url.startsWith('http') && !url.startsWith('chrome-extension://'))) return;
 
     clearPendingVisitTimer(tabId);
+    
+    // Inject scripts on navigation
     await injectOverlayScripts(tabId);
 
     const trustedIntentKey = `trusted_intent_${tabId}`;
-    const sessionData = await storage.getSession(trustedIntentKey);
+    const sessionData = await storage.getSession([trustedIntentKey]);
     const trustedContext = sessionData[trustedIntentKey];
 
     if (trustedContext) {
         logger.log(logPrefix, 'Found trusted intent token. Stamping tab context.');
         await setPacketContext(tabId, trustedContext.instanceId, trustedContext.canonicalPacketUrl, url);
-        // The grace period is now set by the PacketRuntime after it confirms the context.
         await storage.removeSession(trustedIntentKey);
     }
 
@@ -121,13 +151,11 @@ async function processNavigationEvent(tabId, url, details) {
 
     let finalContext = await getPacketContext(tabId);
     let finalInstance = finalContext ? await storage.getPacketInstance(finalContext.instanceId) : null;
-    let isContextOverriddenForMedia = false;
     
     if (activeMediaPlayback.instanceId) {
         if (!finalInstance || finalInstance.instanceId !== activeMediaPlayback.instanceId) {
             finalInstance = activeMediaPlayback.instance;
             finalContext = null; 
-            isContextOverriddenForMedia = true;
         }
     }
 
@@ -160,11 +188,12 @@ export async function startVisitTimer(tabId, instanceId, canonicalPacketUrl, log
 
                 if (visitResult.success && visitResult.modified) {
                     await storage.savePacketInstance(visitResult.instance);
-                    // --- START OF FIX ---
+                    
                     if (activeMediaPlayback.instanceId === instanceId) {
+                        logger.log(logPrefix, 'Syncing Global Media State after visit:', canonicalPacketUrl);
                         activeMediaPlayback.instance = visitResult.instance;
                     }
-                    // --- END OF FIX ---
+
                     sidebarHandler.notifySidebar('packet_instance_updated', { instance: visitResult.instance, source: 'dwell_visit' });
                     await checkAndPromptForCompletion(logPrefix, visitResult, instanceId);
                 }

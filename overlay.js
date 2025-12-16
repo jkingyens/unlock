@@ -1,14 +1,25 @@
 // ext/overlay.js
 
-// --- FIX: Idempotency Check ---
-// This check ensures that the script's logic only runs once per page.
-if (!window.unlockOverlayInitialized) {
-    window.unlockOverlayInitialized = true; // Set a flag to prevent re-execution
+// Wrap in IIFE to prevent "Identifier has already been declared" errors
+(function () {
 
     function initializeUnlockOverlay() {
         // --- Globals ---
         let overlay, playPauseBtn, playIcon, pauseIcon, overlayText, linkMention;
         let isVisible = false;
+
+        // --- Cleanup "Zombie" Elements ---
+        function cleanupZombies() {
+            const oldOverlay = document.getElementById('unlock-media-overlay');
+            if (oldOverlay) {
+                oldOverlay.remove();
+            }
+            
+            const oldFilters = document.getElementById('unlock-svg-filter-container');
+            if (oldFilters) {
+                oldFilters.remove();
+            }
+        }
 
         /**
          * Injects the SVG filter definitions required for the liquid glass effect.
@@ -25,36 +36,32 @@ if (!window.unlockOverlayInitialized) {
         }
 
         /**
-         * Finds existing overlay elements or creates them if they don't exist.
-         * This makes the script work whether it's injected or included directly.
+         * Creates the overlay elements.
          */
         function setupOverlayElements() {
-            overlay = document.getElementById('unlock-media-overlay');
-            if (!overlay) {
-                // Overlay doesn't exist, so we are on an external page. Create it.
-                injectSvgFilters();
-                document.body.insertAdjacentHTML('beforeend', `
-                    <div id="unlock-media-overlay" style="opacity: 0 !important;">
-                        <div class="unlock-overlay-content-wrapper">
-                            <button class="unlock-overlay-play-pause-btn">
-                                <div class="icon play-icon"></div>
-                                <div class="icon pause-icon" style="display: none;"></div>
-                            </button>
-                            <div class="unlock-overlay-bars">
-                                <div class="bar"></div><div class="bar"></div><div class="bar"></div><div class="bar"></div>
-                            </div>
-                            <div class="unlock-overlay-text"></div>
-                        </div>
-                        <div class="unlock-overlay-link-mention">
-                             <div class="icon"></div>
-                             <div class="link-text"></div>
-                        </div>
-                    </div>
-                `);
-                overlay = document.getElementById('unlock-media-overlay');
-            }
+            // We always create fresh because cleanupZombies() ran first.
+            injectSvgFilters();
             
-            // Now that we're sure the overlay exists, grab the rest of the elements.
+            document.body.insertAdjacentHTML('beforeend', `
+                <div id="unlock-media-overlay" style="opacity: 0 !important;">
+                    <div class="unlock-overlay-content-wrapper">
+                        <button class="unlock-overlay-play-pause-btn">
+                            <div class="icon play-icon"></div>
+                            <div class="icon pause-icon" style="display: none;"></div>
+                        </button>
+                        <div class="unlock-overlay-bars">
+                            <div class="bar"></div><div class="bar"></div><div class="bar"></div><div class="bar"></div>
+                        </div>
+                        <div class="unlock-overlay-text"></div>
+                    </div>
+                    <div class="unlock-overlay-link-mention">
+                            <div class="icon"></div>
+                            <div class="link-text"></div>
+                    </div>
+                </div>
+            `);
+            
+            overlay = document.getElementById('unlock-media-overlay');
             playPauseBtn = overlay.querySelector('.unlock-overlay-play-pause-btn');
             playIcon = overlay.querySelector('.play-icon');
             pauseIcon = overlay.querySelector('.pause-icon');
@@ -73,6 +80,7 @@ if (!window.unlockOverlayInitialized) {
             if (state.animate === false) {
                 setTimeout(() => overlay.classList.remove('no-transition'), 50);
             }
+            // Clear any inline opacity left over from initialization
             if (overlay.style.opacity !== '') overlay.style.opacity = '';
 
             const isPlaying = state.isPlaying;
@@ -96,57 +104,81 @@ if (!window.unlockOverlayInitialized) {
         }
 
         // --- Main Execution ---
+        
+        // 1. Clean up any artifacts from previous extension lifecycles
+        cleanupZombies();
+
+        // 2. Create fresh elements
         setupOverlayElements();
 
+        // 3. Bind Events
         playPauseBtn.addEventListener('click', (e) => {
             e.stopPropagation();
-            chrome.runtime.sendMessage({ action: 'request_playback_action', data: { intent: 'toggle' } });
+            try {
+                chrome.runtime.sendMessage({ action: 'request_playback_action', data: { intent: 'toggle' } });
+            } catch (error) {
+                // Extension context invalidated, suppress error
+            }
         });
         
         linkMention.addEventListener('click', (e) => {
             e.stopPropagation();
             const urlToOpen = linkMention.dataset.url;
             if (urlToOpen) {
-                chrome.runtime.sendMessage({ action: 'open_content_from_overlay', data: { url: urlToOpen } });
+                try {
+                    chrome.runtime.sendMessage({ action: 'open_content_from_overlay', data: { url: urlToOpen } });
+                } catch (error) {
+                    // Extension context invalidated, suppress error
+                }
             }
         });
 
-        chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-            if (message.action === 'update_overlay_state' || message.action === 'sync_overlay_state') {
-                syncState(message.data);
-            }
-            return true;
-        });
+        // 4. Setup Communication
+        // Use try-catch for adding listener in case 'chrome.runtime' is gone
+        try {
+            chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+                if (message.action === 'update_overlay_state' || message.action === 'sync_overlay_state') {
+                    syncState(message.data);
+                }
+                return true;
+            });
+        } catch (e) { /* ignore */ }
         
-        // --- START OF FIX: Proactive State Synchronization ---
-        // This listener ensures that if the overlay missed messages while the tab was
-        // inactive (or during a refresh), it gets the correct state as soon as the
-        // user focuses the tab again.
         document.addEventListener('visibilitychange', () => {
             if (document.visibilityState === 'visible') {
-                chrome.runtime.sendMessage({ action: 'get_playback_state' }, (state) => {
-                    // Check for runtime errors, which can happen if the background script is restarting
-                    if (!chrome.runtime.lastError && state) {
-                        syncState(state);
+                try {
+                    if (chrome.runtime && chrome.runtime.id) {
+                        chrome.runtime.sendMessage({ action: 'get_playback_state' }, (state) => {
+                            if (!chrome.runtime.lastError && state) {
+                                syncState(state);
+                            }
+                        });
+                    }
+                } catch (error) {
+                    // Context invalidated, ignore.
+                }
+            }
+        });
+
+        // 5. Initial State Fetch
+        try {
+            if (chrome.runtime && chrome.runtime.id) {
+                chrome.runtime.sendMessage({ action: 'get_playback_state' }, (initialState) => {
+                    if (!chrome.runtime.lastError && initialState) {
+                        syncState(initialState);
                     }
                 });
             }
-        });
-        // --- END OF FIX ---
-
-        // Also fetch the initial state when the script first loads
-        chrome.runtime.sendMessage({ action: 'get_playback_state' }, (initialState) => {
-            if (!chrome.runtime.lastError && initialState) {
-                syncState(initialState);
-            }
-        });
+        } catch (error) {
+            // Context invalidated, ignore.
+        }
     }
 
     // --- Entry Point ---
-    // If the DOM is already loaded, run immediately. Otherwise, wait.
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', initializeUnlockOverlay);
     } else {
         initializeUnlockOverlay();
     }
-}
+
+})();

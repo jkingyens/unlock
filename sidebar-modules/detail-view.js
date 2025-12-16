@@ -1,7 +1,6 @@
 // ext/sidebar-modules/detail-view.js
-// Manages the packet detail view, including rendering content cards and progress.
-// REVISED: The card click handler now immediately adds an 'opening' class to prevent
-// rapid clicks from creating duplicate tabs, fixing a critical race condition.
+// REVISED: Added URL decoding to updateCardVisibility to ensure robust matching between
+// packet JSON URLs and browser-reported visited URLs.
 
 import { domRefs } from './dom-references.js';
 import { logger, storage, packetUtils, indexedDbStorage, sanitizeForFileName } from '../utils.js';
@@ -10,12 +9,12 @@ import { logger, storage, packetUtils, indexedDbStorage, sanitizeForFileName } f
 let isDisplayingPacketContent = false;
 let queuedDisplayRequest = null;
 const audioDataCache = new Map();
-let saveStateDebounceTimer = null; // Timer for debounced state saving
-let currentPlayingUrl = null; // Track which media item is active in this view
+let saveStateDebounceTimer = null;
+let currentPlayingUrl = null;
 let sendMessageToBackground;
 let navigateTo;
 let openUrl;
-
+let showRootViewStatus;
 
 /**
  * Injects dependencies from the main sidebar module.
@@ -25,6 +24,49 @@ export function init(dependencies) {
     sendMessageToBackground = dependencies.sendMessageToBackground;
     navigateTo = dependencies.navigateTo;
     openUrl = dependencies.openUrl;
+    showRootViewStatus = dependencies.showRootViewStatus;
+
+    chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+        if (message.action === 'data_captured_from_content') {
+            handleDataCaptured(message.data);
+        }
+    });
+}
+
+async function handleDataCaptured(data) {
+    const listeningCard = document.querySelector('.card.listening-for-input');
+    if (!listeningCard) {
+        return;
+    }
+
+    const instanceId = listeningCard.closest('#detail-cards-container')?.dataset.instanceId;
+    const lrl = listeningCard.dataset.lrl;
+
+    if (instanceId && lrl) {
+        const instance = await storage.getPacketInstance(instanceId);
+        const contentItem = instance.contents.find(item => item.lrl === lrl);
+
+        if (contentItem) {
+            listeningCard.classList.remove('listening-for-input');
+            listeningCard.classList.add('visited');
+
+            await sendMessageToBackground({
+                action: 'save_packet_output',
+                data: {
+                    instanceId: instanceId,
+                    lrl: lrl,
+                    capturedData: data.payload,
+                    outputDescription: contentItem.output.description,
+                    outputContentType: contentItem.output.contentType
+                }
+            });
+
+            sendMessageToBackground({
+                action: 'deactivate_selector_tool',
+                data: { sourceUrl: contentItem.sourceUrl }
+            });
+        }
+    }
 }
 
 
@@ -45,7 +87,6 @@ export function updatePlaybackUI(state, instance) {
 
     currentPlayingUrl = state.isPlaying ? state.url : null;
 
-    // Update play/pause icon on all media cards
     const allMediaCards = domRefs.packetDetailView.querySelectorAll('.card.media');
     allMediaCards.forEach(card => {
         const cardUrl = card.dataset.url;
@@ -53,7 +94,6 @@ export function updatePlaybackUI(state, instance) {
         card.classList.toggle('playing', isPlayingThisCard);
     });
 
-    // Update waveform for the active track
     if (state.url) {
         redrawAllVisibleWaveforms(state, instance);
     }
@@ -68,18 +108,10 @@ function requestDebouncedStateSave(instance) {
             logger.log("DetailView:Debounce", "Saving packet instance state after delay.", { id: instance.instanceId });
             await storage.savePacketInstance(instance);
         }
-    }, 1500); // 1.5 second delay
+    }, 1500);
 }
 
-// --- START OF FIX: Waveform Performance Optimization ---
 
-/**
- * Calculates the bar heights for a waveform from audio samples.
- * This is the expensive operation that should only be run once per audio track.
- * @param {Float32Array} audioSamples - The raw audio sample data.
- * @param {number} canvasWidth - The width of the canvas to calculate for.
- * @returns {number[]} An array of bar heights normalized from 0 to 1.
- */
 function calculateWaveformBars(audioSamples, canvasWidth) {
     const barWidth = 2;
     const barGap = 1;
@@ -102,12 +134,6 @@ function calculateWaveformBars(audioSamples, canvasWidth) {
 }
 
 
-/**
- * Draws a waveform on a canvas using pre-calculated bar heights.
- * This is the cheap operation that runs on every time update.
- * @param {HTMLCanvasElement} canvas - The canvas element to draw on.
- * @param {object} options - Drawing options.
- */
 function drawWaveform(canvas, options) {
     const { barHeights, accentColor, playedColor, currentTime, audioDuration } = options;
     const dpr = window.devicePixelRatio || 1;
@@ -138,12 +164,11 @@ function drawWaveform(canvas, options) {
         ctx.fillRect(i * (barWidth + barGap), y, barWidth, barHeight);
     }
 }
-// --- END OF FIX ---
 
 
 function drawLinkMarkers(markerContainer, options) {
     const { moments, audioDuration, visitedUrlsSet, linkMarkersEnabled } = options;
-    markerContainer.innerHTML = ''; // Clear existing markers
+    markerContainer.innerHTML = '';
 
     if (!moments || moments.length === 0) {
         return;
@@ -155,24 +180,21 @@ function drawLinkMarkers(markerContainer, options) {
         }
         const marker = document.createElement('div');
         marker.className = 'waveform-link-marker';
-        
+
         const percentage = (moment.timestamp / audioDuration) * 100;
         marker.style.left = `${percentage}%`;
 
-        // This part needs adaptation if we want to show 'visited' markers
-        // based on the moments system. For now, it's simplified.
         markerContainer.appendChild(marker);
     });
 }
 
 
-// --- Function to redraw waveforms on state update ---
 async function redrawAllVisibleWaveforms(playbackState = {}, instance) {
     if (!instance || !domRefs.packetDetailView) return;
 
     const mediaCards = domRefs.packetDetailView.querySelectorAll('.card.media');
     if (mediaCards.length === 0) return;
-    
+
     const settings = await storage.getSettings();
     const colorOptions = {
         accentColor: getComputedStyle(domRefs.packetDetailView).getPropertyValue('--packet-color-accent').trim(),
@@ -188,17 +210,17 @@ async function redrawAllVisibleWaveforms(playbackState = {}, instance) {
         const markerContainer = card.querySelector('.waveform-marker-container');
         const contentItem = instance.contents.find(item => item.url === url);
         const audioCacheKey = `${instance.instanceId}::${url}`;
-        
+
         const cachedAudioData = audioDataCache.get(audioCacheKey);
-        if (!cachedAudioData || !cachedAudioData.barHeights) continue; // Check for barHeights
-        
+        if (!cachedAudioData || !cachedAudioData.barHeights) continue;
+
         const { barHeights, duration: cachedDuration } = cachedAudioData;
 
         if (canvas && contentItem && barHeights) {
             const isTheActiveTrack = playbackState.url === url;
             const currentTime = isTheActiveTrack ? (playbackState.currentTime || 0) : (contentItem.currentTime || 0);
             const audioDuration = isTheActiveTrack && playbackState.duration > 0 ? playbackState.duration : cachedDuration;
-            
+
             drawWaveform(canvas, {
                 ...colorOptions,
                 barHeights,
@@ -207,7 +229,7 @@ async function redrawAllVisibleWaveforms(playbackState = {}, instance) {
             });
 
             const relevantMoments = (instance.moments || []).filter(m => m.sourceUrl === lrl);
-            
+
             drawLinkMarkers(markerContainer, {
                 ...colorOptions,
                 moments: relevantMoments,
@@ -236,7 +258,7 @@ export async function redrawSingleWaveform(lrl) {
     try {
         const indexedDbKey = sanitizeForFileName(lrl);
         const audioContent = await indexedDbStorage.getGeneratedContent(instanceId, indexedDbKey);
-        
+
         if (audioContent && audioContent[0]?.content) {
             const audioContext = new (window.AudioContext || window.webkitAudioContext)();
             const audioData = audioContent[0].content;
@@ -266,7 +288,7 @@ export function updateSingleCardToCached(lrl) {
             const downloadIcon = cardIconContainer.querySelector('.download-icon');
             if (downloadIcon) downloadIcon.remove();
             card.classList.add('clickable');
-            
+
             const instanceId = card.closest('#detail-cards-container').dataset.instanceId;
             const url = card.dataset.url;
             card.addEventListener('click', (e) => {
@@ -304,27 +326,29 @@ export async function displayPacketContent(instance, browserState, canonicalPack
     }
 
     const currentState = await sendMessageToBackground({ action: 'get_playback_state' });
-    
+
     try {
         const isAlreadyRendered = container.querySelector(`#detail-cards-container[data-instance-id="${instance.instanceId}"]`);
         const { progressPercentage, visitedCount, totalCount } = packetUtils.calculateInstanceProgress(instance);
 
         if (isAlreadyRendered) {
-            updateCardVisibility(instance);
+            await updateCardVisibility(instance, browserState);
             updateActiveCardHighlight(canonicalPacketUrl);
-            
+
             const progressBar = domRefs.detailProgressContainer?.querySelector('.progress-bar');
             if (progressBar) progressBar.style.width = `${progressPercentage}%`;
-            
+
             const progressBarContainer = domRefs.detailProgressContainer?.querySelector('.progress-bar-container');
             if (progressBarContainer) progressBarContainer.title = `${visitedCount}/${totalCount} - ${progressPercentage}% Complete`;
-            
+
             const oldActionButtonContainer = document.getElementById('detail-action-button-container');
             const newActionButtonContainer = await createActionButtons(instance, browserState);
             if (oldActionButtonContainer) {
                 oldActionButtonContainer.replaceWith(newActionButtonContainer);
             }
-            
+
+            renderOutputsSection(instance, domRefs.detailCardsContainer);
+
             await redrawAllVisibleWaveforms(currentState, instance);
 
         } else {
@@ -342,10 +366,12 @@ export async function displayPacketContent(instance, browserState, canonicalPack
             cardsWrapper.dataset.instanceId = instance.instanceId;
             fragment.appendChild(cardsWrapper);
 
+            renderOutputsSection(instance, cardsWrapper);
+
             container.innerHTML = '';
             container.appendChild(fragment);
             updatePlaybackUI(currentState, instance);
-            
+
             const mediaCards = container.querySelectorAll('.card.media');
             for (const mediaCard of mediaCards) {
                 const url = mediaCard.dataset.url;
@@ -356,26 +382,25 @@ export async function displayPacketContent(instance, browserState, canonicalPack
                 if (lrl && canvas && waveformContainer) {
                     const indexedDbKey = sanitizeForFileName(lrl);
                     const audioContent = await indexedDbStorage.getGeneratedContent(instance.instanceId, indexedDbKey);
-                    
+
                     if (audioContent && audioContent[0]?.content) {
                         try {
                             const audioData = audioContent[0].content;
                             const audioContext = new (window.AudioContext || window.webkitAudioContext)();
                             const decodedData = await audioContext.decodeAudioData(audioData.slice(0));
-                            
+
                             const barHeights = calculateWaveformBars(decodedData.getChannelData(0), canvas.clientWidth);
                             audioDataCache.set(`${instance.instanceId}::${url}`, {
                                 barHeights: barHeights,
                                 duration: decodedData.duration
                             });
-                            
+
                             redrawAllVisibleWaveforms(currentState, instance);
 
                         } catch (err) {
                             logger.error("DetailView", "Failed to draw initial waveform post-render", err);
                         }
                     } else {
-                        // Media is not cached, show placeholder.
                         waveformContainer.classList.add('needs-download');
                     }
                 }
@@ -391,35 +416,96 @@ export async function displayPacketContent(instance, browserState, canonicalPack
     }
 }
 
-
-/**
- * A lightweight function to update only the visibility and visited status of cards.
- * Avoids a full re-render.
- * @param {object} instance - The latest packet instance data.
- */
-export function updateCardVisibility(instance) {
+export async function updateCardVisibility(instance, browserState) {
     if (!domRefs.detailCardsContainer || !instance) return;
-    
-    const visitedUrlsSet = new Set(instance.visitedUrls || []);
+
+    const isCompleted = await packetUtils.isPacketInstanceCompleted(instance);
+
+    let openTabUrls = new Set();
+    if (browserState?.tabGroupId && chrome?.tabs) {
+        try {
+            const tabsInGroup = await chrome.tabs.query({ groupId: browserState.tabGroupId });
+            tabsInGroup.forEach(tab => openTabUrls.add(tab.url));
+        } catch (e) {
+            // It's possible for the tab group to be gone, which is fine.
+        }
+    }
+
+    // --- START OF FIX: Normalized URL Matching ---
+    const visitedUrlsSet = new Set();
+    (instance.visitedUrls || []).forEach(url => {
+        visitedUrlsSet.add(url);
+        try { visitedUrlsSet.add(decodeURIComponent(url)); } catch (e) { }
+    });
 
     domRefs.detailCardsContainer.querySelectorAll('.card').forEach(card => {
-        const cardUrl = card.dataset.url;
-        const isVisited = cardUrl && visitedUrlsSet.has(cardUrl);
+        let cardUrl = card.dataset.url;
+        const cardLrl = card.dataset.lrl;
+
+        let isVisited = false;
+
+        // Check raw and decoded URL
+        if (cardUrl) {
+            isVisited = visitedUrlsSet.has(cardUrl);
+            if (!isVisited) {
+                try { isVisited = visitedUrlsSet.has(decodeURIComponent(cardUrl)); } catch (e) { }
+            }
+        }
+
+        if (!isVisited && cardLrl) {
+            isVisited = visitedUrlsSet.has(cardLrl);
+        }
+
         card.classList.toggle('visited', isVisited);
+        // --- END OF FIX ---
+
+        if (isCompleted) {
+            card.dataset.completed = 'true';
+        } else {
+            delete card.dataset.completed;
+        }
 
         const momentIndices = card.dataset.momentIndices ? JSON.parse(card.dataset.momentIndices) : [];
         if (momentIndices.length > 0) {
-            const isRevealed = momentIndices.some(index => instance.momentsTripped && instance.momentsTripped[index] === 1);
-            
+            const isRevealedByMoment = momentIndices.some(index => instance.momentsTripped && instance.momentsTripped[index] === 1);
+            const isOpenInTab = cardUrl && openTabUrls.has(cardUrl);
+
+            const isRevealed = isRevealedByMoment || isVisited || isOpenInTab;
+
             const wasHidden = card.classList.contains('hidden-by-rule');
-            if (isRevealed && wasHidden) {
-                logger.log('CardLogger:Reveal', `Revealing card: "${card.querySelector('.card-title')?.textContent.trim()}"`, {
-                    momentIndices: momentIndices,
-                    momentsTrippedState: instance.momentsTripped
-                });
-            }
-            
             card.classList.toggle('hidden-by-rule', !isRevealed);
+
+            if (card.dataset.format === 'interactive-input') {
+                if (isCompleted) {
+                    card.classList.remove('drop-zone-active', 'clickable', 'listening-for-input');
+                    card.style.opacity = '0.6';
+                    const cardUrlEl = card.querySelector('.card-url');
+                    if (cardUrlEl) cardUrlEl.textContent = "Input disabled (Packet Completed)";
+                } else if (isRevealed) {
+                    card.style.opacity = '1.0';
+                    card.classList.add('drop-zone-active', 'clickable');
+
+                    if (wasHidden && !card.classList.contains('listening-for-input')) {
+                        const cardUrlEl = card.querySelector('.card-url');
+                        if (cardUrlEl) cardUrlEl.textContent = "Click to Activate Input Capture";
+                    }
+
+                    if (wasHidden) {
+                        const contentItem = instance.contents.find(item => item.lrl === cardLrl);
+                        if (contentItem) {
+                            attachInteractiveCardHandlers(card, contentItem, instance);
+                        }
+                    }
+                } else {
+                    card.style.opacity = '0.7';
+                    card.classList.remove('drop-zone-active', 'listening-for-input');
+                }
+            }
+        } else if (card.dataset.format === 'interactive-input' && isCompleted) {
+            card.classList.remove('drop-zone-active', 'clickable', 'listening-for-input');
+            card.style.opacity = '0.6';
+            const cardUrlEl = card.querySelector('.card-url');
+            if (cardUrlEl) cardUrlEl.textContent = "Input disabled (Packet Completed)";
         }
     });
 }
@@ -476,7 +562,7 @@ async function createActionButtons(instance, browserState) {
 async function createCardsSection(instance) {
     const cardsWrapper = document.createElement('div');
     cardsWrapper.id = 'detail-cards-container';
-    
+
     if (instance.contents && instance.contents.length > 0) {
         const cardPromises = instance.contents.map(item => createContentCard(item, instance));
         const cards = await Promise.all(cardPromises);
@@ -491,29 +577,80 @@ async function createCardsSection(instance) {
     return cardsWrapper;
 }
 
+async function renderOutputsSection(instance, container) {
+    const existingHeader = container.querySelector('.outputs-header');
+    if (existingHeader) existingHeader.remove();
+
+    const existingCards = container.querySelectorAll('.output-card');
+    existingCards.forEach(card => card.remove());
+
+    const isCompleted = await packetUtils.isPacketInstanceCompleted(instance);
+    if (isCompleted && instance.packetOutputs && instance.packetOutputs.length > 0) {
+        const outputsHeader = document.createElement('h3');
+        outputsHeader.className = 'outputs-header';
+        outputsHeader.textContent = 'Collected Outputs';
+        container.appendChild(outputsHeader);
+
+        instance.packetOutputs.forEach(output => {
+            container.appendChild(createOutputCard(output));
+        });
+    }
+}
+
+function linkify(text) {
+    const urlRegex = /(\b(https?|ftp|file):\/\/[-A-Z0-9+&@#\/%?=~_|!:,.;]*[-A-Z0-9+&@#\/%=~_|])/ig;
+    return text.replace(urlRegex, (url) => `<a href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>`);
+}
+
+function createOutputCard(outputItem) {
+    const card = document.createElement('div');
+    card.className = 'card output-card';
+
+    let iconHTML = '📝'; // Default for text
+    let capturedDataHTML = '';
+
+    if (outputItem.outputContentType.startsWith('image') || (outputItem.capturedData && (outputItem.capturedData.startsWith('http') || outputItem.capturedData.startsWith('data:image')))) {
+        iconHTML = '🖼️';
+        capturedDataHTML = `<img src="${outputItem.capturedData}" class="output-image-preview" alt="Captured image">`;
+    } else {
+        capturedDataHTML = `<p class="output-text-data">${linkify(outputItem.capturedData)}</p>`;
+    }
+
+    card.innerHTML = `
+        <div class="card-icon">${iconHTML}</div>
+        <div class="card-text">
+            <div class="card-title">${outputItem.outputDescription}</div>
+            <div class="card-url">Captured Data:</div>
+            ${capturedDataHTML}
+        </div>`;
+    return card;
+}
+
+
 async function createContentCard(contentItem, instance) {
-    if (!contentItem || !contentItem.format) return null;
+    if (!contentItem) return null;
 
     const card = document.createElement('div');
     card.className = 'card';
-    const { url, lrl, title = 'Untitled', context = '', format, origin, cacheable } = contentItem;
+    const { url, lrl, title = 'Untitled', context = '', format = 'unknown', origin, cacheable, output, sourceUrl } = contentItem;
+    card.dataset.format = format;
 
     if (url) card.dataset.url = url;
     if (lrl) card.dataset.lrl = lrl;
 
     let isClickable = (origin === 'external') || (origin === 'internal' && (contentItem.published || cacheable));
-    
+
     if (format === 'html') {
-        let iconHTML = origin === 'external' ? '🔗' : '📄';
+        let iconHTML = origin === 'external' ? '🌐' : '📄';
         let displayUrl = '';
         if (origin === 'external') {
             try { displayUrl = new URL(url).hostname.replace(/^www\./, ''); } catch (e) { displayUrl = url || '(URL missing)'; }
         } else {
             displayUrl = isClickable ? title : '(Not Published)';
         }
-        
+
         card.innerHTML = `<div class="card-icon">${iconHTML}</div><div class="card-text"><div class="card-title">${title}</div><div class="card-url">${displayUrl}</div>${context ? `<div class="card-relevance">${context}</div>` : ''}</div>`;
-    
+
     } else if (format === 'audio') {
         card.classList.add('media');
         card.innerHTML = `
@@ -525,7 +662,7 @@ async function createContentCard(contentItem, instance) {
     } else if (format === 'pdf') {
         let iconHTML = '📄';
         let displayUrl = title;
-        
+
         card.innerHTML = `
             <div class="card-icon-container" style="display: flex; align-items: center; padding-left: 12px;">
                  <div class="download-icon" style="display: none;"></div>
@@ -535,7 +672,7 @@ async function createContentCard(contentItem, instance) {
                 <div class="card-title">${title}</div>
                 <div class="card-url">${displayUrl}</div>
             </div>`;
-        
+
         const iconContainer = card.querySelector('.card-icon-container');
         const indexedDbKey = sanitizeForFileName(lrl);
         const cachedContent = await indexedDbStorage.getGeneratedContent(instance.instanceId, indexedDbKey);
@@ -544,50 +681,67 @@ async function createContentCard(contentItem, instance) {
             iconContainer.classList.add('needs-download');
             iconContainer.querySelector('.download-icon').style.display = 'block';
         }
+    } else if (format === 'interactive-input') {
+        // --- NEW: Set initial CTA text ---
+        card.innerHTML = `
+            <div class="card-icon interactive-icon">
+                <span class="indicator-light"></span>
+                📥
+            </div>
+            <div class="card-text">
+                <div class="card-title">${title}</div>
+                <div class="card-url">Click to Activate Input Capture</div>
+                <button class="paste-from-clipboard-btn">Paste from Clipboard</button>
+            </div>`;
+        isClickable = true;
+    } else if (format === 'wasm') {
+        let iconHTML = '🤖';
+        card.innerHTML = `<div class="card-icon">${iconHTML}</div><div class="card-text"><div class="card-title">${title}</div><div class="card-url">Background Agent</div></div>`;
+        card.style.opacity = '1.0';
+        isClickable = false; // Wasm agents run automatically, not clickable by user
+    } else {
+        card.innerHTML = `<div class="card-icon">❓</div><div class="card-text"><div class="card-title">${title}</div><div class="card-url">Unknown item type: ${format}</div></div>`;
+        card.style.opacity = '0.6';
+        isClickable = false;
     }
-    
+
     if (!isClickable) {
         card.style.opacity = '0.7';
     }
 
     const visitedUrlsSet = new Set(instance.visitedUrls || []);
-    const isVisited = url && visitedUrlsSet.has(url);
+    const isVisited = (url && visitedUrlsSet.has(url)) || (lrl && visitedUrlsSet.has(lrl));
 
     if (isVisited) {
         card.classList.add('visited');
     }
-    
-    if (!instance.sourceContent) {
-        instance.sourceContent = instance.contents; // Fallback for older instances
-    }
 
-    const imageItem = instance.sourceContent.find(item => {
-        if (origin === 'external') {
-            return item.url === url;
-        } else { // 'internal'
-            return item.lrl === lrl;
-        }
-    }) || contentItem;
-    if (!imageItem) {
-        logger.error("DetailView", "Could not find matching image item for instance item", { contentItem });
-        return card; // Return a partially rendered card to prevent a crash
-    }
-    
     const momentIndices = Array.isArray(contentItem.revealedByMoments) ? contentItem.revealedByMoments : [];
-
     if (momentIndices.length > 0) {
         card.dataset.momentIndices = JSON.stringify(momentIndices);
-        const isRevealed = momentIndices.some(index => instance.momentsTripped && instance.momentsTripped[index] === 1);
+        const isRevealedByMoment = momentIndices.some(index => instance.momentsTripped && instance.momentsTripped[index] === 1);
+        const isRevealed = isRevealedByMoment || isVisited;
+
         if (!isRevealed) {
             card.classList.add('hidden-by-rule');
         }
+
+        if (isRevealed && format === 'interactive-input') {
+            card.style.opacity = '1.0';
+            card.classList.add('drop-zone-active', 'clickable');
+            attachInteractiveCardHandlers(card, contentItem, instance);
+        }
+    } else if (format === 'interactive-input') {
+        card.classList.add('drop-zone-active');
+        attachInteractiveCardHandlers(card, contentItem, instance);
     }
+
 
     if (isClickable) {
         card.classList.add('clickable');
         if (format === 'audio') {
             playMediaInCard(card, contentItem, instance);
-        } else {
+        } else if (format !== 'interactive-input') {
             card.addEventListener('click', async (e) => {
                 if (card.classList.contains('opening')) return;
 
@@ -601,12 +755,13 @@ async function createContentCard(contentItem, instance) {
                     });
                     iconContainer.classList.remove('loading');
                 }
-                
+
                 card.classList.add('opening');
                 setTimeout(() => card.classList.remove('opening'), 2000);
 
                 if (typeof openUrl === 'function') {
-                    openUrl(url, instance.instanceId);
+                    const urlToOpen = packetUtils.renderPacketUrl(url, instance.variables);
+                    openUrl(urlToOpen, instance.instanceId);
                 }
             });
         }
@@ -614,6 +769,7 @@ async function createContentCard(contentItem, instance) {
 
     return card;
 }
+
 
 // --- UI Updates ---
 
@@ -627,14 +783,14 @@ export function updateActiveCardHighlight(canonicalPacketUrl) {
         try {
             if (cardUrl) cardUrl = decodeURIComponent(cardUrl);
         } catch (e) { /* ignore invalid url */ }
-        
+
         let packetUrl = canonicalPacketUrl;
         try {
             if (packetUrl) packetUrl = decodeURIComponent(packetUrl);
         } catch (e) { /* ignore invalid url */ }
 
         const isActive = (packetUrl && cardUrl === packetUrl);
-        
+
         card.classList.toggle('active', isActive);
         if (isActive) {
             activeCardElement = card;
@@ -653,13 +809,13 @@ function handleCloseTabGroup(tabGroupId) {
         action: 'request_playback_action',
         data: { intent: 'stop' }
     });
-    
+
     clearCurrentDetailView();
 
     if (typeof navigateTo === 'function') {
         navigateTo('root');
     }
-    
+
     sendMessageToBackground({
         action: 'remove_tab_groups',
         data: { groupIds: [tabGroupId] }
@@ -690,7 +846,7 @@ async function playMediaInCard(card, contentItem, instance) {
                 action: 'ensure_media_is_cached',
                 data: { instanceId: instance.instanceId, url: contentItem.url, lrl: contentItem.lrl }
             });
-            return; // Don't try to play yet, wait for cache to populate.
+            return;
         }
 
         const isThisCardPlaying = currentPlayingUrl === contentItem.url;
@@ -707,9 +863,164 @@ async function playMediaInCard(card, contentItem, instance) {
                     intent: 'play',
                     instanceId: instance.instanceId,
                     url: contentItem.url,
-                    lrl: contentItem.lrl // Pass the LRL for DB lookup
+                    lrl: contentItem.lrl
                 }
             });
         }
     });
+}
+
+function attachInteractiveCardHandlers(card, contentItem, instance) {
+    if (card.dataset.handlersAttached === 'true') return;
+    card.dataset.handlersAttached = 'true';
+
+    const { output, sourceUrl } = contentItem;
+    const cardUrlEl = card.querySelector('.card-url');
+
+    const pasteButton = card.querySelector('.paste-from-clipboard-btn');
+
+    const saveData = async (capturedData) => {
+        if (card.dataset.completed === 'true') return;
+
+        // --- NEW: Only process data if active ---
+        if (!card.classList.contains('listening-for-input')) {
+            showRootViewStatus('Click card to activate before input.', 'error');
+            return;
+        }
+
+        card.classList.remove('listening-for-input', 'drag-over');
+        card.classList.add('visited');
+
+        await sendMessageToBackground({
+            action: 'save_packet_output',
+            data: {
+                instanceId: instance.instanceId,
+                lrl: contentItem.lrl,
+                capturedData: capturedData,
+                outputDescription: output.description,
+                outputContentType: output.contentType
+            }
+        });
+
+        sendMessageToBackground({ action: 'deactivate_selector_tool_global' });
+    };
+
+    if (pasteButton) {
+        pasteButton.addEventListener('click', async (event) => {
+            event.stopPropagation();
+            if (card.dataset.completed === 'true') return;
+
+            // --- NEW: Paste Guard ---
+            if (!card.classList.contains('listening-for-input')) {
+                if (!card.classList.contains('listening-for-input')) {
+                    showRootViewStatus('Click the card to activate input first.', 'error');
+                    return;
+                }
+            }
+
+            try {
+                const clipboardItems = await navigator.clipboard.read();
+                let found = false;
+                for (const item of clipboardItems) {
+                    if (item.types.includes('image/png') || item.types.includes('image/jpeg')) {
+                        const imageType = item.types.includes('image/png') ? 'image/png' : 'image/jpeg';
+                        const blob = await item.getType(imageType);
+
+                        const reader = new FileReader();
+                        reader.onloadend = () => {
+                            saveData(reader.result);
+                        };
+                        reader.readAsDataURL(blob);
+                        found = true;
+                        break;
+                    } else if (item.types.includes('text/plain')) {
+                        const blob = await item.getType('text/plain');
+                        const text = await blob.text();
+                        if (text && text.trim() !== '') {
+                            saveData(text.trim());
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+                if (!found) {
+                    showRootViewStatus('No compatible content (text or image) found on clipboard.', 'error');
+                }
+            } catch (error) {
+                logger.error("DetailView", "Failed to read from clipboard", error);
+                showRootViewStatus('Could not read from clipboard. Permission may be missing or denied.', 'error');
+            }
+        });
+    }
+
+    card.addEventListener('click', () => {
+        if (card.dataset.completed === 'true') return;
+
+        const wasActive = card.classList.contains('listening-for-input');
+
+        // --- NEW: Mutual Exclusivity and Visual Reset ---
+        document.querySelectorAll('.card.listening-for-input').forEach(otherCard => {
+            if (otherCard !== card) {
+                otherCard.classList.remove('listening-for-input');
+                // Reset text of other cards
+                const otherUrlEl = otherCard.querySelector('.card-url');
+                if (otherUrlEl) otherUrlEl.textContent = "Click to Activate Input Capture";
+            }
+        });
+
+        // Toggle state
+        if (wasActive) {
+            card.classList.remove('listening-for-input');
+            if (cardUrlEl) cardUrlEl.textContent = "Click to Activate Input Capture";
+            sendMessageToBackground({ action: 'deactivate_selector_tool_global' });
+        } else {
+            card.classList.add('listening-for-input');
+            if (cardUrlEl) cardUrlEl.textContent = "Listening... Drag & Drop or Paste here";
+
+            const toolType = output.contentType.startsWith('image') ? 'image' : 'text';
+            sendMessageToBackground({
+                action: 'activate_selector_tool',
+                data: { sourceUrl, toolType, instanceId: instance.instanceId }
+            });
+        }
+    });
+
+    card.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        // Only show drag styling if active
+        if (card.classList.contains('listening-for-input')) {
+            card.classList.add('drag-over');
+        }
+    });
+
+    card.addEventListener('dragleave', () => { card.classList.remove('drag-over'); });
+
+    card.addEventListener('drop', async (e) => {
+        e.preventDefault();
+        if (card.dataset.completed === 'true') return;
+
+        // --- NEW: Drop Guard ---
+        if (!card.classList.contains('listening-for-input')) {
+            return;
+        }
+
+        // Check for file drops first (e.g. images dragged from desktop)
+        if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+            const file = e.dataTransfer.files[0];
+            if (file.type.startsWith('image/')) {
+                const reader = new FileReader();
+                reader.onloadend = () => saveData(reader.result); // Saves as DataURL
+                reader.readAsDataURL(file);
+                return;
+            }
+        }
+        // Fallback to checking for text/uri-list (e.g. images dragged from web pages)
+        const droppedData = e.dataTransfer.getData('text/uri-list') || e.dataTransfer.getData('text/plain');
+        if (droppedData) {
+            saveData(droppedData);
+        }
+    });
+
+    const toolType = output.contentType.startsWith('image') ? 'image' : 'text';
+    // Initial state text handled in createContentCard
 }

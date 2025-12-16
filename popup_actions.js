@@ -1,6 +1,6 @@
 // ext/popup_actions.js - Action handlers for the popup (Global Side Panel Mode)
 
-import { logger, storage, isSidePanelAvailable } from './utils.js';
+import { logger, storage, isSidePanelAvailable, packetUtils } from './utils.js';
 
 // --- Helper: sendMessageToBackground ---
 function sendMessageToBackground(message) {
@@ -47,28 +47,11 @@ function getCurrentTabs() {
 // --- Action Handlers ---
 
 async function handleCreatePacket() {
-    const statusMessage = document.getElementById('status-message'); // This might not exist in your current popup, which is fine
+    const statusMessage = document.getElementById('status-message'); 
     const createBtn = document.getElementById('create-btn');
 
-    // Pre-checks remain the same
-    const storageEnabled = await storage.isCloudStorageEnabled();
-    const activeModelConfig = await storage.getActiveModelConfig();
-    let modelConfigSufficient = false;
-    if (activeModelConfig) {
-        if (activeModelConfig.providerType === 'chrome-ai-gemini-nano') {
-            modelConfigSufficient = true;
-        } else if (activeModelConfig.apiKey && activeModelConfig.apiEndpoint) {
-            modelConfigSufficient = true;
-        }
-    }
-    if (!modelConfigSufficient || !storageEnabled) {
-        // This part of your code handles showing an onboarding message, which is correct.
-        return;
-    }
-
     try {
-
-        handleOpenSidebar();
+        await handleOpenSidebar();
         // The sender tab ID will be automatically available in the background script
         sendMessageToBackground({
             action: 'initiate_packet_creation_from_tab'
@@ -124,9 +107,86 @@ async function handleOpenSidebar() {
     }
 }
 
+// --- Missing Handlers Implemented Below ---
+
+async function handleDeleteSelected() {
+    const selectedCheckboxes = document.querySelectorAll('.packet-checkbox:checked');
+    const packetIds = Array.from(selectedCheckboxes).map(cb => cb.dataset.packetId);
+
+    if (packetIds.length === 0) return;
+
+    const confirmed = confirm(`Are you sure you want to delete ${packetIds.length} packet(s)?`);
+    if (!confirmed) return;
+
+    try {
+        await sendMessageToBackground({ 
+            action: 'delete_packets', 
+            data: { packetIds: packetIds } 
+        });
+        // Trigger a reload of the packet list in the UI
+        // Since we can't circular import 'loadPackets' easily, we dispatch a custom event
+        document.dispatchEvent(new CustomEvent('packets-deleted'));
+    } catch (error) {
+        logger.error('PopupActions', 'Error deleting packets', error);
+    }
+}
+
+async function handleOpenContentUrl(packetId, url) {
+    try {
+        const instance = await storage.getPacketInstance(packetId);
+        if (instance) {
+            await sendMessageToBackground({
+                action: 'open_content',
+                data: { instance, url }
+            });
+        }
+    } catch (error) {
+        logger.error('PopupActions', 'Error opening content URL', error);
+    }
+}
+
+async function handleOpenNextExternalContent(packetId) {
+    try {
+        const instance = await storage.getPacketInstance(packetId);
+        if (!instance) return;
+
+        const visitedSet = new Set(instance.visitedUrls || []);
+        const nextItem = instance.contents.find(item => 
+            item.type === 'external' && item.url && !visitedSet.has(item.url)
+        );
+
+        if (nextItem) {
+            await sendMessageToBackground({
+                action: 'open_content',
+                data: { instance, url: nextItem.url }
+            });
+        } else {
+            alert("All external content in this packet has been visited!");
+        }
+    } catch (error) {
+        logger.error('PopupActions', 'Error opening next external content', error);
+    }
+}
+
+async function handleRepublishPage(packetId, pageId) {
+    // This logic is more specific to the sidebar's detailed capabilities.
+    // For the popup, we might just open the sidebar to handle complex tasks.
+    await handleOpenSidebar();
+}
+
+async function handleGeneratePageForPacket(packetId) {
+    // Complex generation tasks are best handled in the sidebar.
+    await handleOpenSidebar();
+}
+
 export {
     handleCreatePacket,
     handleOpenSidebar,
     getCurrentTabs, 
-    sendMessageToBackground 
+    sendMessageToBackground,
+    handleDeleteSelected,
+    handleOpenContentUrl,
+    handleOpenNextExternalContent,
+    handleRepublishPage,
+    handleGeneratePageForPacket
 };

@@ -2,8 +2,9 @@
   "manifest_version": 3,
   "name": "Unlock",
   "version": "1.97",
-  "description": "Unlock the web",
+  "description": "Unlock your browser",
   "action": {
+    "default_popup": "popup.html",
     "default_icon": {
       "16": "images/icon16.png",
       "48": "images/icon48.png",
@@ -20,7 +21,8 @@
     "alarms",
     "offscreen",
     "activeTab",
-    "scripting"
+    "scripting",
+    "clipboardRead"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -36,17 +38,39 @@
     "service_worker": "background.js",
     "type": "module"
   },
+  "sandbox": {
+    "pages": [
+      "sandbox.html"
+    ]
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'",
+    "sandbox": "sandbox allow-scripts; script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval' 'unsafe-inline' blob:; object-src 'self'; connect-src * data: blob:"
+  },
   "web_accessible_resources": [
     {
       "resources": [
         "overlay.js",
         "overlay.css",
         "preview.html",
-        "page_interceptor.js"
+        "page_interceptor.js",
+        "selector.js",
+        "selector.css",
+        "agents/*"
       ],
       "matches": [
         "<all_urls>"
       ]
+    },
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "resources": [
+        "**/*",
+        "*"
+      ],
+      "use_dynamic_url": false
     }
   ],
   "side_panel": {

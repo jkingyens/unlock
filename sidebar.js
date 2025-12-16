@@ -1,9 +1,5 @@
 // ext/sidebar.js (Global Side Panel - Orchestrator)
-// REVISED: The packet_instance_deleted message handler is now more robust,
-// ensuring it correctly clears internal state and navigates to the root view
-// if the currently active packet is the one being deleted.
-// REVISED: The sidebar will now remain on the packet detail view if that packet's
-// media is playing, even when the user navigates to a tab outside the packet.
+// REVISED: Implemented "smart merge" in playback_state_updated to prevent stale audio state from overwriting visited URLs.
 
 import { logger, storage, packetUtils, applyThemeMode, CONFIG } from './utils.js';
 import { domRefs, cacheDomReferences } from './sidebar-modules/dom-references.js';
@@ -17,12 +13,17 @@ import * as settingsView from './sidebar-modules/settings-view.js';
 let currentView = 'root';
 let currentInstanceId = null;
 let currentInstanceData = null;
-let currentPacketUrl = null; // The canonical packet URL from the packet definition
+let currentPacketUrl = null; 
 let isNavigating = false;
 let nextNavigationRequest = null;
 const PENDING_VIEW_KEY = 'pendingSidebarView';
 let isOpeningPacketItem = false;
-let activeMediaInstanceId = null; // NEW: Tracks the ID of the packet with active media
+let activeMediaInstanceId = null;
+let backgroundPort = null; 
+
+// --- NEW: State Cache for Optimization ---
+let lastMomentsTrippedJson = '';
+let lastVisitedUrlsJson = ''; 
 
 function resetSidebarState() {
     currentView = 'root';
@@ -32,7 +33,8 @@ function resetSidebarState() {
     isNavigating = false;
     nextNavigationRequest = null;
     isOpeningPacketItem = false;
-    // Note: activeMediaInstanceId is NOT reset here intentionally
+    lastMomentsTrippedJson = ''; 
+    lastVisitedUrlsJson = ''; 
     logger.log('Sidebar', 'Internal state has been reset.');
 }
 
@@ -44,7 +46,6 @@ async function initialize() {
     await applyThemeMode();
     cacheDomReferences();
 
-    // Inject dependencies into each module
     const dependencies = { navigateTo, showRootViewStatus, sendMessageToBackground, showSettingsStatus, showConfetti, openUrl };
     dialogHandler.init(dependencies);
     rootView.init(dependencies);
@@ -52,7 +53,6 @@ async function initialize() {
     createView.init(dependencies);
     settingsView.init(dependencies);
 
-    // Setup event listeners from each module
     dialogHandler.setupDialogListeners();
     rootView.setupRootViewListeners();
     createView.setupCreateViewListeners();
@@ -85,12 +85,13 @@ async function initialize() {
 }
 
 function setupGlobalListeners() {
-    chrome.runtime.onMessage.addListener(handleBackgroundMessage);
+    connectToBackground();
+
     domRefs.backBtn?.addEventListener('click', () => {
         if (currentView === 'create') {
             createView.handleDiscardDraftPacket();
         } else {
-            resetSidebarState(); // Explicitly reset state before navigating
+            resetSidebarState(); 
             navigateTo('root');
         }
     });
@@ -105,19 +106,27 @@ function setupGlobalListeners() {
     });
 }
 
-
-// --- Navigation & View Management ---
+function connectToBackground() {
+    try {
+        backgroundPort = chrome.runtime.connect({ name: 'sidebar' });
+        backgroundPort.onMessage.addListener(handleBackgroundMessage);
+        backgroundPort.onDisconnect.addListener(() => {
+            logger.log('Sidebar', 'Disconnected from background. Attempting reconnect in 1s...');
+            backgroundPort = null;
+            setTimeout(connectToBackground, 1000);
+        });
+    } catch (e) {
+        logger.error('Sidebar', 'Connection failed', e);
+    }
+}
 
 export async function navigateTo(viewName, instanceId = null, data = null) {
-    // --- START OF FIX: Logic for tab group synchronization ---
-    // If we are navigating away from a detail view, tell the background to collapse the group.
     if (currentView === 'packet-detail' && currentInstanceId && (viewName !== 'packet-detail' || currentInstanceId !== instanceId)) {
         sendMessageToBackground({
             action: 'collapse_tab_group_for_instance',
             data: { instanceId: currentInstanceId }
-        }).catch(e => logger.warn('Sidebar', 'Failed to send collapse message', e));
+        }).catch(e => logger.warn('Sidebar', 'Failed to send collapse message (service worker may be waking up).', e.message));
     }
-    // --- END OF FIX ---
 
     if (viewName === 'root') {
         resetSidebarState();
@@ -146,10 +155,13 @@ export async function navigateTo(viewName, instanceId = null, data = null) {
         switch(viewName) {
             case 'packet-detail':
                 const instanceData = await storage.getPacketInstance(instanceId);
-
                 if (!instanceData) throw new Error(`Packet instance ${instanceId} not found.`);
 
                 const browserState = await storage.getPacketBrowserState(instanceId);
+
+                if (!currentPacketUrl && browserState?.lastActiveUrl) {
+                    currentPacketUrl = browserState.lastActiveUrl;
+                }
 
                 currentView = 'packet-detail';
                 currentInstanceId = instanceData.instanceId;
@@ -159,13 +171,10 @@ export async function navigateTo(viewName, instanceId = null, data = null) {
 
                 await detailView.displayPacketContent(instanceData, browserState, currentPacketUrl);
                 
-                // --- START OF FIX: Logic for tab group synchronization ---
-                // If we are navigating to a detail view, tell the background to expand the group.
                 sendMessageToBackground({
                     action: 'expand_tab_group_for_instance',
                     data: { instanceId: currentInstanceId }
-                }).catch(e => logger.warn('Sidebar', 'Failed to send expand message', e));
-                // --- END OF FIX ---
+                }).catch(e => logger.warn('Sidebar', 'Failed to send expand message (service worker may be waking up).', e.message));
                 break;
             case 'create':
                 currentView = 'create';
@@ -181,7 +190,7 @@ export async function navigateTo(viewName, instanceId = null, data = null) {
                 await settingsView.prepareSettingsView();
                 break;
             default: // root
-                currentView = 'root'; // State is already reset, just update the view name
+                currentView = 'root'; 
                 domRefs.rootView.classList.remove('hidden');
                 await rootView.displayRootNavigation();
                 break;
@@ -190,7 +199,7 @@ export async function navigateTo(viewName, instanceId = null, data = null) {
     } catch (error) {
         logger.error('Sidebar:navigateTo', `Error navigating to ${viewName}:`, error);
         showRootViewStatus(`Error loading view: ${error.message}`, 'error');
-        navigateTo('root'); // Fallback to root
+        navigateTo('root');
     } finally {
         isNavigating = false;
         if (nextNavigationRequest) {
@@ -201,19 +210,12 @@ export async function navigateTo(viewName, instanceId = null, data = null) {
     }
 }
 
-// --- State & Context Updates ---
-
 async function updateSidebarContext(contextData) {
     if (currentView === 'create' || isNavigating) return;
 
     const newInstanceId = contextData?.instanceId ?? null;
     const newPacketUrl = contextData?.packetUrl ?? null;
     let newInstanceData = contextData?.instance ?? null;
-
-    if (newInstanceId === null && currentView === 'packet-detail' && currentInstanceId === activeMediaInstanceId) {
-        logger.log('Sidebar:updateSidebarContext', 'Ignoring context change to null because active media packet is being viewed.');
-        return;
-    }
 
     if (isOpeningPacketItem && newInstanceId === null) {
         logger.log('Sidebar:updateSidebarContext', 'Ignoring transient null context due to navigation lock.');
@@ -224,11 +226,11 @@ async function updateSidebarContext(contextData) {
         currentInstanceId = newInstanceId;
         currentInstanceData = newInstanceData;
         currentPacketUrl = newPacketUrl;
+        
         if (currentInstanceId) {
             navigateTo('packet-detail', currentInstanceId);
-        } else if (currentView !== 'root') {
-            navigateTo('root');
         }
+
     } else if (currentView === 'packet-detail' && newInstanceId !== null) {
         if (!newInstanceData) {
             logger.warn('Sidebar:updateSidebarContext', `Received null instance data for current instance ID ${newInstanceId}. Navigating to root.`);
@@ -247,7 +249,20 @@ async function updateSidebarContext(contextData) {
 async function openUrl(url, instanceId) {
     if (!url || !instanceId) return;
 
-    const instanceToOpen = currentInstanceData;
+    let instanceToOpen = currentInstanceData;
+
+    // [FIX START] Recover instance data if global state is mismatched/null
+    // This handles cases where the user switches tabs (clearing global state)
+    // but clicks a link in the still-visible sidebar.
+    if (!instanceToOpen || instanceToOpen.instanceId !== instanceId) {
+        try {
+            instanceToOpen = await storage.getPacketInstance(instanceId);
+        } catch (error) {
+            logger.warn("Sidebar", "Failed to recover instance for openUrl", error);
+        }
+    }
+    // [FIX END]
+
     if (!instanceToOpen || instanceToOpen.instanceId !== instanceId) {
         logger.error("Sidebar", "Mismatch or missing instance data for openUrl", { instanceId, currentInstanceData });
         return;
@@ -264,8 +279,6 @@ async function openUrl(url, instanceId) {
         isOpeningPacketItem = false;
     });
 }
-
-// --- Communication ---
 
 export function sendMessageToBackground(message) {
     return new Promise((resolve, reject) => {
@@ -289,6 +302,17 @@ async function handleBackgroundMessage(message) {
     const { action, data } = message;
 
     switch (action) {
+        case 'deactivate_all_interactive_cards':
+            document.querySelectorAll('.card.listening-for-input').forEach(card => {
+                card.classList.remove('listening-for-input');
+            });
+            break;
+        case 'remote_agent_result':
+            if (currentView === 'settings') {
+                settingsView.displayAgentResult(data.result);
+                showSettingsStatus('Agent execution successful!', 'success');
+            }
+            break;
         case 'draft_packet_created':
             if (data.draft) {
                 dialogHandler.hideCreateSourceDialog();
@@ -318,11 +342,36 @@ async function handleBackgroundMessage(message) {
             } else if (activeMediaInstanceId === data.instanceId) {
                 activeMediaInstanceId = null;
             }
+            if (currentView === 'packet-detail' && currentInstanceId === data.instanceId && data.instance != null) {
 
-            if (currentView === 'packet-detail' && currentInstanceId === data.instanceId) {
-                currentInstanceData = data.instance;
+                if (!data.instance) {
+                    return; // Skip update if no instance data is provided
+                }
+                
+                // --- SMART MERGE: Prefer local state for visited status ---
+                if (!currentInstanceData) {
+                    currentInstanceData = data.instance;
+                } else {
+                    // Only merge moments (which audio player controls)
+                    // Ignore visitedUrls from audio player (which might be stale)
+                    currentInstanceData.momentsTripped = data.instance.momentsTripped;
+                }
+
+                if (!currentInstanceData) {
+                    return;
+                }
+                
                 detailView.updatePlaybackUI(data, currentInstanceData);
-                detailView.updateCardVisibility(currentInstanceData);
+                
+                const newMomentsJson = JSON.stringify(currentInstanceData.momentsTripped || []);
+                const newVisitedJson = JSON.stringify(currentInstanceData.visitedUrls || []); 
+
+                if (newMomentsJson !== lastMomentsTrippedJson || newVisitedJson !== lastVisitedUrlsJson) {
+                    lastMomentsTrippedJson = newMomentsJson;
+                    lastVisitedUrlsJson = newVisitedJson; 
+                    detailView.updateCardVisibility(currentInstanceData);
+                }
+
                 if (data.lastTrippedMoment?.url) {
                     const cardToAnimate = domRefs.packetDetailView.querySelector(`.card[data-url="${data.lastTrippedMoment.url}"]`);
                     if (cardToAnimate && !cardToAnimate.classList.contains('link-mentioned')) {
@@ -370,6 +419,9 @@ async function handleBackgroundMessage(message) {
             if (currentView === 'root') {
                 rootView.updateInstanceRowUI(data.instance);
             } else if (currentView === 'packet-detail' && currentInstanceId === data.instance.instanceId) {
+                // Ensure local state is updated with authoritative source
+                currentInstanceData = data.instance; 
+                
                 storage.getPacketBrowserState(data.instance.instanceId).then(browserState => {
                     detailView.displayPacketContent(data.instance, browserState, currentPacketUrl);
                 });
@@ -420,8 +472,11 @@ function showStatusMessage(element, message, type = 'info', autoClear = true) {
     element.className = 'status-message';
     if (type === 'error') element.classList.add('error-message');
     if (type === 'success') element.classList.add('success-message');
+
+    element.style.display = 'block'; 
     element.style.visibility = 'visible';
     element.style.opacity = '1';
+
     if (autoClear) {
         setTimeout(() => {
             if (element.textContent === message) clearStatusMessage(element);
