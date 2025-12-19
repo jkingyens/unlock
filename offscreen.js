@@ -1,4 +1,5 @@
 // ext/offscreen.js
+import Tesseract from './lib/tesseract.esm.min.js';
 
 if (typeof window.unlockOffscreenInitialized === 'undefined') {
     window.unlockOffscreenInitialized = true;
@@ -333,6 +334,31 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
                     processNode(doc.body); context.plainText = context.plainText.replace(/\s+/g, ' ').trim(); sendResponse({ success: true, data: { plainText: context.plainText, linkMappings: context.linkMappings } });
                 } catch (error) { sendResponse({ success: false, error: error.message }); } return false;
             case 'control-audio': handleAudioControl(request.data).then(sendResponse); return true;
+            case 'crop_image':
+                (async () => {
+                    const { dataUrl, rect, devicePixelRatio } = request.data;
+                    const img = new Image();
+                    img.onload = () => {
+                        const canvas = document.createElement('canvas');
+                        // Use the provided rect which is in CSS pixels, but the screenshot is in device pixels
+                        const scale = devicePixelRatio || 1;
+                        canvas.width = rect.width * scale;
+                        canvas.height = rect.height * scale;
+                        const ctx = canvas.getContext('2d');
+                        ctx.drawImage(
+                            img,
+                            rect.x * scale, rect.y * scale, rect.width * scale, rect.height * scale,
+                            0, 0, rect.width * scale, rect.height * scale
+                        );
+                        const croppedDataUrl = canvas.toDataURL('image/png');
+                        sendResponse({ success: true, croppedDataUrl });
+                    };
+                    img.onerror = (err) => {
+                        sendResponse({ success: false, error: 'Failed to load image for cropping' });
+                    };
+                    img.src = dataUrl;
+                })();
+                return true;
             case 'parse-html-for-text':
             case 'parse-html-for-text-with-markers':
             case 'parse-html-for-links':
@@ -348,6 +374,37 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
                         const reader = new readability.Readability(doc); const article = reader.parse(); sendResponse({ success: true, data: article ? article.textContent : "" });
                     }
                 } catch (error) { sendResponse({ success: false, error: error.message }); } return false;
+            case 'process_image_to_text':
+                if (request.data && request.data.base64) {
+                    (async () => {
+                        try {
+                            console.log('[Offscreen-OCR] Starting OCR processing...');
+                            console.log('[Offscreen-OCR] Tesseract version:', Tesseract.version);
+
+                            const result = await Tesseract.recognize(
+                                request.data.base64,
+                                'eng',
+                                {
+                                    logger: m => console.log('[Offscreen-OCR-Progress]', m.status, m.progress),
+                                    workerPath: chrome.runtime.getURL('lib/worker.min.js'),
+                                    corePath: chrome.runtime.getURL('lib/tesseract-core.wasm.js'),
+                                    workerBlobURL: false,
+                                }
+                            );
+                            console.log('[Offscreen-OCR] OCR Success:', result.data.text.substring(0, 50) + '...');
+                            sendResponse({ success: true, text: result.data.text });
+                        } catch (error) {
+                            console.error('[Offscreen-OCR] Error:', error);
+                            // Ensure error is a string
+                            const errorMessage = error ? (error.message || error.toString()) : "Unknown OCR Error";
+                            sendResponse({ success: false, error: errorMessage });
+                        }
+                    })();
+                    return true;
+                } else {
+                    sendResponse({ success: false, error: 'No image data provided.' });
+                    return false;
+                }
             case 'normalize-audio':
                 if (request.data && request.data.base64) {
                     normalizeAudioAndGetDuration(base64ToAb(request.data.base64)).then(result => {

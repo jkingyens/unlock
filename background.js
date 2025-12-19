@@ -1,11 +1,4 @@
-// ext/background.js - Main service worker entry point (Global Side Panel Mode)
-// This file is now refactored to delegate lifecycle and state management
-// to the new PacketRuntime API. Its role is simplified to initialization,
-// event listening, and dispatching tasks to the appropriate runtime instance.
-// FIX: Added a chrome.tabGroups.onUpdated listener to robustly enforce the
-// canonical tab order when tabs are manually reordered.
-// FIX: Added chrome.sidePanel.setPanelBehavior to ensure sidebar opens on icon click.
-// FIX: Added chrome.tabGroups.onRemoved to handle manual group deletion by user.
+// ext/background.js
 // REVISED: Removed legacy keep-alive alarm. Added waitForRestoration to prevent state desync on service worker wakeup.
 
 import {
@@ -219,14 +212,12 @@ export async function setMediaPlaybackState(newState, options = {}) {
 // --- Initialization and Event Listeners ---
 
 async function initializeExtension() {
-    // --- START OF FIX: Enable Side Panel on Action Click ---
     if (chrome.sidePanel && typeof chrome.sidePanel.setPanelBehavior === 'function') {
         await chrome.sidePanel.setPanelBehavior({
             openPanelOnActionClick: true
         })
             .catch((error) => logger.warn('Background:init', 'Failed to set panel behavior', error));
     }
-    // --- END OF FIX ---
 
     await storage.getSettings();
 
@@ -289,8 +280,8 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
     let instance = context ? await storage.getPacketInstance(context.instanceId) : null;
     let packetUrl = context ? context.canonicalPacketUrl : null;
 
-    if (activeMediaPlayback.instance && (!instance || instance.instanceId !== activeMediaPlayback.instanceId)) {
-        instance = activeMediaPlayback.instance;
+    if (!instance && activeMediaPlayback.instanceId) {
+        instance = await storage.getPacketInstance(activeMediaPlayback.instanceId);
         packetUrl = null;
     }
 
@@ -351,7 +342,6 @@ chrome.tabs.onMoved.addListener(async (tabId, moveInfo) => {
     } catch (e) { }
 });
 
-// --- START OF FIX: Add robust listener for all group changes ---
 if (chrome.tabGroups) {
     chrome.tabGroups.onUpdated.addListener(async (group) => {
         if (group.title && group.title.startsWith(GROUP_TITLE_PREFIX)) {
@@ -359,12 +349,10 @@ if (chrome.tabGroups) {
         }
     });
 
-    // --- NEW: Handle manual group removal ---
     chrome.tabGroups.onRemoved.addListener((group) => {
         tabGroupHandler.handleTabGroupRemoved(group.id);
     });
 }
-// --- END OF FIX ---
 
 chrome.webNavigation.onBeforeNavigate.addListener(onBeforeNavigate);
 chrome.webNavigation.onCommitted.addListener(onCommitted);
