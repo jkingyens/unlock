@@ -32,11 +32,11 @@ export async function injectOverlayScripts(tabId) {
     try {
         await chrome.scripting.executeScript({
             target: { tabId: tabId },
-            files: ['overlay.js']
+            files: ['overlay.js', 'selector.js']
         });
         await chrome.scripting.insertCSS({
             target: { tabId: tabId },
-            files: ['overlay.css']
+            files: ['overlay.css', 'selector.css']
         });
     } catch (e) {
         // Expected to fail on non-http pages or restricted domains
@@ -90,7 +90,7 @@ async function processNavigationEvent(tabId, url, details) {
     navigationQueues.get(tabId).push({ url, details });
 
     if (processingNavigation.has(tabId)) {
-        return; 
+        return;
     }
 
     processingNavigation.add(tabId);
@@ -115,7 +115,7 @@ async function doProcessNavigationEvent(tabId, url, details) {
     if (!url || (!url.startsWith('http') && !url.startsWith('chrome-extension://'))) return;
 
     clearPendingVisitTimer(tabId);
-    
+
     // Inject scripts on navigation
     await injectOverlayScripts(tabId);
 
@@ -151,11 +151,11 @@ async function doProcessNavigationEvent(tabId, url, details) {
 
     let finalContext = await getPacketContext(tabId);
     let finalInstance = finalContext ? await storage.getPacketInstance(finalContext.instanceId) : null;
-    
+
     if (activeMediaPlayback.instanceId) {
         if (!finalInstance || finalInstance.instanceId !== activeMediaPlayback.instanceId) {
             finalInstance = activeMediaPlayback.instance;
-            finalContext = null; 
+            finalContext = null;
         }
     }
 
@@ -177,7 +177,7 @@ export async function startVisitTimer(tabId, instanceId, canonicalPacketUrl, log
     const visitThresholdMs = (settings.visitThresholdSeconds ?? 5) * 1000;
 
     const visitTimer = setTimeout(async () => {
-        delete pendingVisits[tabId]; 
+        delete pendingVisits[tabId];
         try {
             const tab = await chrome.tabs.get(tabId);
             if (tab && tab.active) {
@@ -188,7 +188,7 @@ export async function startVisitTimer(tabId, instanceId, canonicalPacketUrl, log
 
                 if (visitResult.success && visitResult.modified) {
                     await storage.savePacketInstance(visitResult.instance);
-                    
+
                     if (activeMediaPlayback.instanceId === instanceId) {
                         logger.log(logPrefix, 'Syncing Global Media State after visit:', canonicalPacketUrl);
                         activeMediaPlayback.instance = visitResult.instance;
@@ -218,10 +218,10 @@ export async function checkAndPromptForCompletion(logPrefix, visitResult, instan
         if (!instanceData || instanceData.completionAcknowledged) {
             return;
         }
-        
+
         if (sidebarHandler.isSidePanelAvailable()) {
             sidebarHandler.notifySidebar('show_confetti', { title: instanceData.title || '', instanceId: instanceId });
-            
+
             if (await shouldUseTabGroups()) {
                 const browserState = await storage.getPacketBrowserState(instanceId);
                 if (browserState?.tabGroupId) {

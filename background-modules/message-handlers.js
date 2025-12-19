@@ -643,18 +643,41 @@ const actionHandlers = {
     'save_packet_output': handleSavePacketOutput,
     'activate_selector_tool': async (data, sender, sendResponse) => {
         const { toolType, sourceUrl } = data;
-        const allTabs = await chrome.tabs.query({ url: sourceUrl });
-        let targetTab = allTabs.length > 0 ? allTabs[0] : null;
+        let targetTabId = null;
 
-        if (targetTab) {
+        if (sourceUrl) {
+            const allTabs = await chrome.tabs.query({ url: sourceUrl });
+            if (allTabs.length > 0) {
+                targetTabId = allTabs[0].id;
+            }
+        }
+
+        if (!targetTabId) {
+            const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+            if (activeTab) {
+                targetTabId = activeTab.id;
+            }
+        }
+
+        if (targetTabId) {
             try {
-                await chrome.tabs.sendMessage(targetTab.id, { action: 'activate_selector_tool', data: { toolType } });
+                // Ensure selector scripts are injected before sending message
+                await chrome.scripting.executeScript({
+                    target: { tabId: targetTabId },
+                    files: ['selector.js']
+                }).catch(() => { });
+                await chrome.scripting.insertCSS({
+                    target: { tabId: targetTabId },
+                    files: ['selector.css']
+                }).catch(() => { });
+
+                await chrome.tabs.sendMessage(targetTabId, { action: 'activate_selector_tool', data: data });
                 sendResponse({ success: true });
             } catch (e) {
                 sendResponse({ success: false, error: 'Tab not ready to receive message.' });
             }
         } else {
-            sendResponse({ success: false, error: 'Could not find the target tab.' });
+            sendResponse({ success: false, error: 'Could not find a suitable tab.' });
         }
     },
     'deactivate_selector_tool': async (data, sender, sendResponse) => {
@@ -668,11 +691,35 @@ const actionHandlers = {
         sendResponse({ success: true });
     },
     'deactivate_selector_tool_global': async (data, sender, sendResponse) => {
+        logger.log('BG:DeactivateGlobal', 'Starting deactivation via injection...');
         const allTabs = await chrome.tabs.query({});
+        logger.log('BG:DeactivateGlobal', `Found ${allTabs.length} tabs.`);
+
         for (const tab of allTabs) {
+            // Skip restricted URLs
+            if (!tab.url || (!tab.url.startsWith('http') && !tab.url.startsWith('file'))) continue;
+
             try {
-                await chrome.tabs.sendMessage(tab.id, { action: 'deactivate_selector_tool' });
-            } catch (e) { /* Tab might not be ready or have the content script */ }
+                // Direct injection cleanup - works even if previous script is dead
+                await chrome.scripting.executeScript({
+                    target: { tabId: tab.id },
+                    func: () => {
+                        const existingOverlay = document.getElementById('unlock-selector-overlay');
+                        if (existingOverlay) existingOverlay.remove();
+                        const existingCanvas = document.getElementById('unlock-region-canvas');
+                        if (existingCanvas) existingCanvas.remove();
+                        document.body.classList.remove('unlock-tool-active', 'unlock-text-tool-active', 'unlock-image-tool-active', 'unlock-region-tool-active');
+                    }
+                }).catch(e => {
+                    // logger.warn('BG:DeactivateGlobal', `Injection failed for tab ${tab.id}: ${e.message}`);
+                });
+
+                // Also send message just in case the script needs to reset internal state (activeTool variable)
+                chrome.tabs.sendMessage(tab.id, { action: 'deactivate_selector_tool' }).catch(() => { });
+
+            } catch (e) {
+                // Ignore errors
+            }
         }
         sidebarHandler.notifySidebar('deactivate_all_interactive_cards');
         sendResponse({ success: true });
@@ -680,6 +727,76 @@ const actionHandlers = {
     'content_script_data_captured': (data, sender, sendResponse) => {
         sidebarHandler.notifySidebar('data_captured_from_content', data);
         sendResponse({ success: true });
+    },
+    'region_captured_from_content': async (data, sender, sendResponse) => {
+        logger.log('BG:RegionCapture', 'Received region capture request', data);
+        const { rect, devicePixelRatio } = data;
+        const tabId = sender.tab.id;
+
+        try {
+            // 1. Capture the full visible tab
+            logger.log('BG:RegionCapture', 'Capturing visible tab...');
+            const dataUrl = await chrome.tabs.captureVisibleTab(sender.tab.windowId, { format: 'png' });
+
+            if (!dataUrl) {
+                logger.error('BG:RegionCapture', 'captureVisibleTab returned null/undefined');
+                throw new Error('Screenshot failed');
+            }
+            logger.log('BG:RegionCapture', 'Tab captured. Length:', dataUrl.length);
+
+            // 2. Send to offscreen for cropping
+            logger.log('BG:RegionCapture', 'Ensuring offscreen document...');
+            await ensureOffscreenDocument();
+
+            logger.log('BG:RegionCapture', 'Sending crop_image to offscreen...');
+            const cropResponse = await chrome.runtime.sendMessage({
+                target: 'offscreen',
+                type: 'crop_image',
+                data: {
+                    dataUrl: dataUrl,
+                    rect: rect,
+                    devicePixelRatio: devicePixelRatio
+                }
+            });
+
+            logger.log('BG:RegionCapture', 'Offscreen response:', cropResponse);
+
+            if (cropResponse && cropResponse.success) {
+                // Check if intent is OCR
+                if (data.intent === 'ocr_text_capture') {
+                    logger.log('BG:RegionCapture', 'Intent is OCR, processing image...');
+                    const ocrResponse = await chrome.runtime.sendMessage({
+                        target: 'offscreen',
+                        type: 'process_image_to_text',
+                        data: { base64: cropResponse.croppedDataUrl }
+                    });
+
+                    if (ocrResponse && ocrResponse.success) {
+                        logger.log('BG:RegionCapture', 'OCR successful, notifying sidebar with Text...');
+                        sidebarHandler.notifySidebar('data_captured_from_content', {
+                            type: 'text/plain',
+                            payload: ocrResponse.text
+                        });
+                    } else {
+                        logger.error('BG:RegionCapture', 'OCR failed:', ocrResponse?.error);
+                        // Fallback? Or just error. Let's just error for now.
+                    }
+                } else {
+                    // 3. Notify sidebar with the cropped image
+                    logger.log('BG:RegionCapture', 'Notifying sidebar with cropped image...');
+                    sidebarHandler.notifySidebar('data_captured_from_content', {
+                        type: 'image/png',
+                        payload: cropResponse.croppedDataUrl
+                    });
+                }
+            } else {
+                logger.error('MessageHandler', 'Cropping failed in offscreen', cropResponse?.error);
+            }
+            sendResponse({ success: true });
+        } catch (error) {
+            logger.error('MessageHandler', 'Error in region capture process', error);
+            sendResponse({ success: false, error: error.message });
+        }
     },
     'prepare_in_packet_navigation': async (data, sender, sendResponse) => {
         const tabId = sender.tab?.id;

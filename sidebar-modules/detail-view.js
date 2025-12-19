@@ -26,14 +26,9 @@ export function init(dependencies) {
     openUrl = dependencies.openUrl;
     showRootViewStatus = dependencies.showRootViewStatus;
 
-    chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-        if (message.action === 'data_captured_from_content') {
-            handleDataCaptured(message.data);
-        }
-    });
 }
 
-async function handleDataCaptured(data) {
+export async function handleDataCaptured(data) {
     const listeningCard = document.querySelector('.card.listening-for-input');
     if (!listeningCard) {
         return;
@@ -62,9 +57,12 @@ async function handleDataCaptured(data) {
             });
 
             sendMessageToBackground({
-                action: 'deactivate_selector_tool',
-                data: { sourceUrl: contentItem.sourceUrl }
+                action: 'deactivate_selector_tool_global'
             });
+
+            if (typeof showRootViewStatus === 'function') {
+                showRootViewStatus('Content captured successfully!', 'success');
+            }
         }
     }
 }
@@ -584,8 +582,8 @@ async function renderOutputsSection(instance, container) {
     const existingCards = container.querySelectorAll('.output-card');
     existingCards.forEach(card => card.remove());
 
-    const isCompleted = await packetUtils.isPacketInstanceCompleted(instance);
-    if (isCompleted && instance.packetOutputs && instance.packetOutputs.length > 0) {
+    // Always show collected outputs if they exist, regardless of packet completion status
+    if (instance.packetOutputs && instance.packetOutputs.length > 0) {
         const outputsHeader = document.createElement('h3');
         outputsHeader.className = 'outputs-header';
         outputsHeader.textContent = 'Collected Outputs';
@@ -691,7 +689,6 @@ async function createContentCard(contentItem, instance) {
             <div class="card-text">
                 <div class="card-title">${title}</div>
                 <div class="card-url">Click to Activate Input Capture</div>
-                <button class="paste-from-clipboard-btn">Paste from Clipboard</button>
             </div>`;
         isClickable = true;
     } else if (format === 'wasm') {
@@ -877,8 +874,6 @@ function attachInteractiveCardHandlers(card, contentItem, instance) {
     const { output, sourceUrl } = contentItem;
     const cardUrlEl = card.querySelector('.card-url');
 
-    const pasteButton = card.querySelector('.paste-from-clipboard-btn');
-
     const saveData = async (capturedData) => {
         if (card.dataset.completed === 'true') return;
 
@@ -905,54 +900,6 @@ function attachInteractiveCardHandlers(card, contentItem, instance) {
         sendMessageToBackground({ action: 'deactivate_selector_tool_global' });
     };
 
-    if (pasteButton) {
-        pasteButton.addEventListener('click', async (event) => {
-            event.stopPropagation();
-            if (card.dataset.completed === 'true') return;
-
-            // --- NEW: Paste Guard ---
-            if (!card.classList.contains('listening-for-input')) {
-                if (!card.classList.contains('listening-for-input')) {
-                    showRootViewStatus('Click the card to activate input first.', 'error');
-                    return;
-                }
-            }
-
-            try {
-                const clipboardItems = await navigator.clipboard.read();
-                let found = false;
-                for (const item of clipboardItems) {
-                    if (item.types.includes('image/png') || item.types.includes('image/jpeg')) {
-                        const imageType = item.types.includes('image/png') ? 'image/png' : 'image/jpeg';
-                        const blob = await item.getType(imageType);
-
-                        const reader = new FileReader();
-                        reader.onloadend = () => {
-                            saveData(reader.result);
-                        };
-                        reader.readAsDataURL(blob);
-                        found = true;
-                        break;
-                    } else if (item.types.includes('text/plain')) {
-                        const blob = await item.getType('text/plain');
-                        const text = await blob.text();
-                        if (text && text.trim() !== '') {
-                            saveData(text.trim());
-                            found = true;
-                            break;
-                        }
-                    }
-                }
-                if (!found) {
-                    showRootViewStatus('No compatible content (text or image) found on clipboard.', 'error');
-                }
-            } catch (error) {
-                logger.error("DetailView", "Failed to read from clipboard", error);
-                showRootViewStatus('Could not read from clipboard. Permission may be missing or denied.', 'error');
-            }
-        });
-    }
-
     card.addEventListener('click', () => {
         if (card.dataset.completed === 'true') return;
 
@@ -975,12 +922,24 @@ function attachInteractiveCardHandlers(card, contentItem, instance) {
             sendMessageToBackground({ action: 'deactivate_selector_tool_global' });
         } else {
             card.classList.add('listening-for-input');
-            if (cardUrlEl) cardUrlEl.textContent = "Listening... Drag & Drop or Paste here";
+            if (cardUrlEl) cardUrlEl.textContent = "Listening... Drag & Drop";
 
-            const toolType = output.contentType.startsWith('image') ? 'image' : 'text';
+            let toolType = 'region';
+            // Default to OCR for interactive inputs, unless explicitly image
+            let intent = 'ocr_text_capture';
+
+            // Explicitly log for debugging
+            logger.log('DetailView:CardClick', 'Activating tool with output content type:', output.contentType);
+
+            if (output.contentType && output.contentType.includes('image')) {
+                intent = 'image_capture';
+            }
+
+            logger.log('DetailView:CardClick', 'Determined intent:', intent);
+
             sendMessageToBackground({
                 action: 'activate_selector_tool',
-                data: { sourceUrl, toolType, instanceId: instance.instanceId }
+                data: { sourceUrl, toolType, instanceId: instance.instanceId, intent }
             });
         }
     });
@@ -1021,6 +980,6 @@ function attachInteractiveCardHandlers(card, contentItem, instance) {
         }
     });
 
-    const toolType = output.contentType.startsWith('image') ? 'image' : 'text';
+    const toolType = output.contentType.startsWith('image') ? 'region' : 'text';
     // Initial state text handled in createContentCard
 }

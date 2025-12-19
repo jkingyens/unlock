@@ -1,5 +1,4 @@
 // ext/background-modules/packet-runtime.js
-// REVISED: Strictly manages tabs with valid packet context (no auto-adoption).
 // REVISED: Updated to await arrayBufferToBase64 for memory safety when opening PDFs.
 
 import {
@@ -109,12 +108,11 @@ class PacketRuntime {
 
     async reconcileTab(tabId, url, details) {
         logger.log(this.logPrefix, `Reconciling navigation for tab ${tabId} to url: ${url}`);
+
         const currentContext = await getPacketContext(tabId);
 
         // --- STRICT CONTEXT CHECK ---
         // If the tab is not already associated with this packet instance, ignore it.
-        // We do not auto-adopt tabs based on URL matches. Context must be established
-        // explicitly (e.g., via sidebar opening or trusted intent).
         if (!currentContext || currentContext.instanceId !== this.instance.instanceId) {
             return;
         }
@@ -135,13 +133,13 @@ class PacketRuntime {
                 await storage.removeSession(gracePeriodKey);
             }
         }
+
         const isRedirect = details.transitionQualifiers?.includes('server_redirect') || details.transitionQualifiers?.includes('client_redirect');
 
         if (newItemInPacket) {
             // Case 1: User navigated to another valid item within the packet.
-            // Update the canonical URL in the context.
             if (newItemInPacket.url !== currentContext.canonicalPacketUrl) {
-                // Optional: Check for duplicates in other tabs and squash them if necessary
+                // Check for duplicates in other tabs and squash them if necessary
                 const allTabs = await chrome.tabs.query({});
                 for (const tab of allTabs) {
                     if (tab.id !== tabId) {
@@ -157,14 +155,12 @@ class PacketRuntime {
             if (inGracePeriod) { await storage.removeSession(gracePeriodKey); }
 
         } else if (isRedirect) {
-            // Case 2: The page redirected (e.g., SSO login, shortlink). 
-            // Keep the context alive but update the browser URL tracking.
+            // Case 2: The page redirected. Keep context.
             logger.log(this.logPrefix, `Redirect detected for tab ${tabId}. Preserving context.`);
             await setPacketContext(tabId, currentContext.instanceId, currentContext.canonicalPacketUrl, url);
 
         } else if (!inGracePeriod) {
-            // Case 3: The user navigated to a URL that is NOT in the packet, and it wasn't a redirect.
-            // They have "left" the packet experience. Clear the context.
+            // Case 3: User left the packet.
             logger.log(this.logPrefix, `Tab ${tabId} navigated outside the packet. Clearing context.`);
             await clearPacketContext(tabId);
             if (await shouldUseTabGroups()) {
@@ -172,10 +168,10 @@ class PacketRuntime {
             }
         }
 
-        // If we still have a valid context after the checks above, ensure state is consistent
+        // If we still have a valid context, ensure state is consistent
         const finalContext = await getPacketContext(tabId);
         if (finalContext) {
-            // Refresh grace period for subsequent fast navigations (like immediate redirects)
+            // Refresh grace period for subsequent fast navigations
             await storage.setSession({ [gracePeriodKey]: Date.now() });
             setTimeout(() => storage.removeSession(gracePeriodKey), 1500);
 
@@ -257,8 +253,6 @@ class PacketRuntime {
             }
 
             // 3. Create the tab and set the "Trusted Intent"
-            // This is the crucial step that allows the new tab to acquire context
-            // even though we disabled auto-adoption in reconcileTab.
             const newTab = await chrome.tabs.create({ url: finalUrlToOpen, active: true });
             const trustedIntent = {
                 instanceId: this.instance.instanceId,

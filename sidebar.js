@@ -13,17 +13,17 @@ import * as settingsView from './sidebar-modules/settings-view.js';
 let currentView = 'root';
 let currentInstanceId = null;
 let currentInstanceData = null;
-let currentPacketUrl = null; 
+let currentPacketUrl = null;
 let isNavigating = false;
 let nextNavigationRequest = null;
 const PENDING_VIEW_KEY = 'pendingSidebarView';
 let isOpeningPacketItem = false;
 let activeMediaInstanceId = null;
-let backgroundPort = null; 
+let backgroundPort = null;
 
 // --- NEW: State Cache for Optimization ---
 let lastMomentsTrippedJson = '';
-let lastVisitedUrlsJson = ''; 
+let lastVisitedUrlsJson = '';
 
 function resetSidebarState() {
     currentView = 'root';
@@ -33,8 +33,8 @@ function resetSidebarState() {
     isNavigating = false;
     nextNavigationRequest = null;
     isOpeningPacketItem = false;
-    lastMomentsTrippedJson = ''; 
-    lastVisitedUrlsJson = ''; 
+    lastMomentsTrippedJson = '';
+    lastVisitedUrlsJson = '';
     logger.log('Sidebar', 'Internal state has been reset.');
 }
 
@@ -91,7 +91,7 @@ function setupGlobalListeners() {
         if (currentView === 'create') {
             createView.handleDiscardDraftPacket();
         } else {
-            resetSidebarState(); 
+            resetSidebarState();
             navigateTo('root');
         }
     });
@@ -152,7 +152,7 @@ export async function navigateTo(viewName, instanceId = null, data = null) {
     let newSidebarTitle = 'My Packets';
 
     try {
-        switch(viewName) {
+        switch (viewName) {
             case 'packet-detail':
                 const instanceData = await storage.getPacketInstance(instanceId);
                 if (!instanceData) throw new Error(`Packet instance ${instanceId} not found.`);
@@ -170,7 +170,7 @@ export async function navigateTo(viewName, instanceId = null, data = null) {
                 domRefs.packetDetailView.classList.remove('hidden');
 
                 await detailView.displayPacketContent(instanceData, browserState, currentPacketUrl);
-                
+
                 sendMessageToBackground({
                     action: 'expand_tab_group_for_instance',
                     data: { instanceId: currentInstanceId }
@@ -190,7 +190,7 @@ export async function navigateTo(viewName, instanceId = null, data = null) {
                 await settingsView.prepareSettingsView();
                 break;
             default: // root
-                currentView = 'root'; 
+                currentView = 'root';
                 domRefs.rootView.classList.remove('hidden');
                 await rootView.displayRootNavigation();
                 break;
@@ -226,7 +226,7 @@ async function updateSidebarContext(contextData) {
         currentInstanceId = newInstanceId;
         currentInstanceData = newInstanceData;
         currentPacketUrl = newPacketUrl;
-        
+
         if (currentInstanceId) {
             navigateTo('packet-detail', currentInstanceId);
         }
@@ -289,7 +289,7 @@ export function sendMessageToBackground(message) {
                 if (!err.message?.includes("Could not establish connection")) {
                     reject(new Error(`Background error: ${err.message}`));
                 } else {
-                    resolve({ success: false, error: "Connection error."});
+                    resolve({ success: false, error: "Connection error." });
                 }
             } else {
                 resolve(response);
@@ -305,7 +305,12 @@ async function handleBackgroundMessage(message) {
         case 'deactivate_all_interactive_cards':
             document.querySelectorAll('.card.listening-for-input').forEach(card => {
                 card.classList.remove('listening-for-input');
+                const urlEl = card.querySelector('.card-url');
+                if (urlEl) urlEl.textContent = "Click to Activate Input Capture";
             });
+            break;
+        case 'data_captured_from_content':
+            detailView.handleDataCaptured(data);
             break;
         case 'remote_agent_result':
             if (currentView === 'settings') {
@@ -333,7 +338,7 @@ async function handleBackgroundMessage(message) {
             break;
         case 'packet_creation_progress':
             if (currentView === 'root') {
-                 rootView.renderOrUpdateImageStencil(data);
+                rootView.renderOrUpdateImageStencil(data);
             }
             break;
         case 'playback_state_updated':
@@ -347,7 +352,7 @@ async function handleBackgroundMessage(message) {
                 if (!data.instance) {
                     return; // Skip update if no instance data is provided
                 }
-                
+
                 // --- SMART MERGE: Prefer local state for visited status ---
                 if (!currentInstanceData) {
                     currentInstanceData = data.instance;
@@ -360,15 +365,15 @@ async function handleBackgroundMessage(message) {
                 if (!currentInstanceData) {
                     return;
                 }
-                
+
                 detailView.updatePlaybackUI(data, currentInstanceData);
-                
+
                 const newMomentsJson = JSON.stringify(currentInstanceData.momentsTripped || []);
-                const newVisitedJson = JSON.stringify(currentInstanceData.visitedUrls || []); 
+                const newVisitedJson = JSON.stringify(currentInstanceData.visitedUrls || []);
 
                 if (newMomentsJson !== lastMomentsTrippedJson || newVisitedJson !== lastVisitedUrlsJson) {
                     lastMomentsTrippedJson = newMomentsJson;
-                    lastVisitedUrlsJson = newVisitedJson; 
+                    lastVisitedUrlsJson = newVisitedJson;
                     detailView.updateCardVisibility(currentInstanceData);
                 }
 
@@ -420,8 +425,8 @@ async function handleBackgroundMessage(message) {
                 rootView.updateInstanceRowUI(data.instance);
             } else if (currentView === 'packet-detail' && currentInstanceId === data.instance.instanceId) {
                 // Ensure local state is updated with authoritative source
-                currentInstanceData = data.instance; 
-                
+                currentInstanceData = data.instance;
+
                 storage.getPacketBrowserState(data.instance.instanceId).then(browserState => {
                     detailView.displayPacketContent(data.instance, browserState, currentPacketUrl);
                 });
@@ -473,7 +478,7 @@ function showStatusMessage(element, message, type = 'info', autoClear = true) {
     if (type === 'error') element.classList.add('error-message');
     if (type === 'success') element.classList.add('success-message');
 
-    element.style.display = 'block'; 
+    element.style.display = 'block';
     element.style.visibility = 'visible';
     element.style.opacity = '1';
 
