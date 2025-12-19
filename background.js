@@ -61,9 +61,9 @@ async function hasOffscreenDocument() {
 }
 
 export async function setupOffscreenDocument() {
-    // FORCE FRESH: If one exists, kill it to ensure we run latest code.
+    // [FIX] Reuse existing offscreen document to preserve state (playback, etc.)
     if (await hasOffscreenDocument()) {
-        await chrome.offscreen.closeDocument();
+        return;
     }
 
     if (creatingOffscreenDocument) {
@@ -179,7 +179,7 @@ export async function notifyUIsOfStateChange(options = {}) {
         if (!activeTab || !activeTab.id) return;
 
         const lightweightStateForOverlay = {
-            isVisible: !isSidebarOpen && !!activeMediaPlayback.url,
+            isVisible: !isSidebarOpen && !!activeMediaPlayback.url && activeMediaPlayback.isPlaying,
             isPlaying: activeMediaPlayback.isPlaying,
             title: activeMediaPlayback.title,
             lastTrippedMoment: activeMediaPlayback.lastTrippedMoment,

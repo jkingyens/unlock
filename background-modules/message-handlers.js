@@ -839,6 +839,22 @@ const actionHandlers = {
         sendResponse({ success: true });
     },
     'sidebar_closed': async (data, sender, sendResponse) => {
+        // [FIX] Force sync media state to prevent race conditions where "Pause" hasn't fully propagated yet
+        if (activeMediaPlayback.url) {
+            try {
+                const status = await controlAudioInOffscreen('get_current_time', { url: activeMediaPlayback.url });
+                if (status.success && typeof status.isPlaying === 'boolean') {
+                    if (activeMediaPlayback.isPlaying !== status.isPlaying) {
+                        logger.log('SidebarClosed', 'Detected stale media state, syncing...', { old: activeMediaPlayback.isPlaying, new: status.isPlaying });
+                        // We use setMediaPlaybackState to ensure it persists and activeMediaPlayback is updated
+                        await setMediaPlaybackState({ isPlaying: status.isPlaying, currentTime: status.currentTime });
+                    }
+                }
+            } catch (e) {
+                logger.warn('SidebarClosed', 'Failed to sync media state', e);
+            }
+        }
+
         await storage.setSession({ isSidebarOpen: false });
         notifyOffscreenSidebarState(false);
         await notifyUIsOfStateChange({ isSidebarOpen: false, animate: true });
@@ -873,7 +889,7 @@ const actionHandlers = {
         sendResponse({
             ...activeMediaPlayback,
             momentsTripped: activeMediaPlayback.instance?.momentsTripped || [],
-            isVisible: !!activeMediaPlayback.url && !isSidebarOpen && overlayEnabled,
+            isVisible: !!activeMediaPlayback.url && !isSidebarOpen && overlayEnabled && activeMediaPlayback.isPlaying,
             animate: false
         });
     },
