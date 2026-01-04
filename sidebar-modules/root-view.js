@@ -79,7 +79,7 @@ export function setupRootViewListeners() {
 async function handleCreateButtonClick() {
     try {
         const choice = await showCreateSourceDialog();
-        
+
         if (choice === 'blank') {
             hideCreateSourceDialog();
             navigateTo('create');
@@ -100,7 +100,7 @@ async function handleCreateButtonClick() {
         }
     } catch (error) {
         logger.error("RootView", "Error in create button logic", error);
-        if (error) { 
+        if (error) {
             showRootViewStatus(`Error: ${error.message}`, 'error');
         }
     }
@@ -112,27 +112,33 @@ async function handleCreateButtonClick() {
 export async function displayRootNavigation() {
     const { inboxList, inProgressList, completedList } = domRefs;
     if (!inboxList || !inProgressList || !completedList) return;
-    
-    inboxList.innerHTML = '';
-    inProgressList.innerHTML = '';
-    completedList.innerHTML = '';
 
+    // [DEBUG] Explicit loading state
+    const loadingHTML = `<tr><td colspan="3" class="empty-state">Loading packets...</td></tr>`;
+    inboxList.innerHTML = loadingHTML;
+    inProgressList.innerHTML = loadingHTML;
+    completedList.innerHTML = loadingHTML;
 
     try {
-        const [imagesMap, instancesMap] = await Promise.all([
-            storage.getPacketImages(),
-            storage.getPacketInstances()
+        const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('Storage timeout')), 5000));
+
+        const [imagesMap, instancesMap] = await Promise.race([
+            Promise.all([
+                storage.getPacketImages(),
+                storage.getPacketInstances()
+            ]),
+            timeout
         ]);
 
         const images = Object.values(imagesMap);
         const instances = Object.values(instancesMap);
-        
+
         const sortFn = (a, b) => {
             const dateA = new Date(a.created || a.instantiated || 0).getTime();
             const dateB = new Date(b.created || b.instantiated || 0).getTime();
             return dateB - dateA;
         };
-        
+
         const inProgressItems = [];
         const completedItems = [];
 
@@ -147,21 +153,35 @@ export async function displayRootNavigation() {
                 inProgressItems.push(inst);
             }
         }
-        
-        renderImageList(images.sort(sortFn));
-        renderInstanceList(inProgressItems.sort(sortFn), domRefs.inProgressList, "No packets Started.");
-        renderInstanceList(completedItems.sort(sortFn), domRefs.completedList, "No completed packets yet.");
-        
+
+        try { renderImageList(images.sort(sortFn)); } catch (e) {
+            logger.error('RootView', 'Error rendering inbox', e);
+            checkAndRenderEmptyState(domRefs.inboxList, `Error: ${e.message}`);
+        }
+
+        try { renderInstanceList(inProgressItems.sort(sortFn), domRefs.inProgressList, "No packets Started."); } catch (e) {
+            logger.error('RootView', 'Error rendering in-progress', e);
+            checkAndRenderEmptyState(domRefs.inProgressList, `Error: ${e.message}`);
+        }
+
+        try { renderInstanceList(completedItems.sort(sortFn), domRefs.completedList, "No completed packets yet."); } catch (e) {
+            logger.error('RootView', 'Error rendering completed', e);
+            checkAndRenderEmptyState(domRefs.completedList, `Error: ${e.message}`);
+        }
+
         inProgressImageStencils.forEach(renderOrUpdateImageStencil);
         inProgressInstanceStencils.forEach(renderOrUpdateInstanceStencil);
 
         updateActionButtonsVisibility();
     } catch (error) {
-        logger.error('RootView', 'Error loading data in root view', error);
-        const errorHTML = `<tr><td colspan="3" class="empty-state">Error loading.</td></tr>`;
-        inboxList.innerHTML = errorHTML;
-        inProgressList.innerHTML = errorHTML;
-        completedList.innerHTML = errorHTML;
+        logger.error('RootView', 'Critical error loading data in root view', error);
+        const errorHTML = `<tr><td colspan="3" class="empty-state">Critical Error: ${error.message}</td></tr>`;
+
+        // Only overwrite if they are still loading (don't overwrite partial successes if we can avoid it, 
+        // though strictly speaking if the main fetch failed, they are all failed).
+        if (inboxList.innerHTML.includes('Loading')) inboxList.innerHTML = errorHTML;
+        if (inProgressList.innerHTML.includes('Loading')) inProgressList.innerHTML = errorHTML;
+        if (completedList.innerHTML.includes('Loading')) completedList.innerHTML = errorHTML;
     }
 }
 
@@ -226,7 +246,7 @@ function createInstanceRow(instance) {
         <div class="progress-bar-container" title="${visitedCount}/${totalCount} - ${progressPercentage}% Complete">
             <div class="progress-bar" style="width: ${progressPercentage}%; background-color: ${colorHex};"></div>
         </div>`;
-    
+
     row.append(checkboxCell, nameCell, progressCell);
 
     setupInstanceContextMenu(row, instance);
@@ -241,7 +261,7 @@ function createInstanceRow(instance) {
     } else {
         row.title = "Click to view packet details";
     }
-    
+
     return row;
 }
 
@@ -297,7 +317,7 @@ function switchListTab(tabName) {
     domRefs.tabInbox?.classList.toggle('active', tabName === 'library');
     domRefs.tabInProgress?.classList.toggle('active', tabName === 'in-progress');
     domRefs.tabCompleted?.classList.toggle('active', tabName === 'completed');
-    
+
     domRefs.contentInbox?.classList.toggle('active', tabName === 'library');
     domRefs.tabContentInProgress?.classList.toggle('active', tabName === 'in-progress');
     domRefs.tabContentCompleted?.classList.toggle('active', tabName === 'completed');
@@ -311,11 +331,11 @@ async function handleStartPacket(imageId) {
     try {
         const image = await storage.getPacketImage(imageId);
         if (!image) throw new Error("Packet not found in library.");
-        
+
         const tempInstanceId = `inst_${Date.now()}_${Math.random().toString(36).substring(2, 10)}`;
-        
+
         inProgressInstanceStencils.set(tempInstanceId, { imageId: imageId, instanceId: tempInstanceId, title: image.title });
-        
+
         renderOrUpdateInstanceStencil({
             instanceId: tempInstanceId,
             title: image.title,
@@ -323,7 +343,7 @@ async function handleStartPacket(imageId) {
             text: "Preparing..."
         });
         switchListTab('in-progress');
-        
+
         await sendMessageToBackground({
             action: 'instantiate_packet',
             data: { imageId, instanceId: tempInstanceId }
@@ -364,7 +384,7 @@ async function handleDeletePacketImage(imageId) {
         removeImageRow(imageId);
 
         const response = await sendMessageToBackground({ action: 'delete_packet_image', data: { imageId } });
-        
+
         if (response && response.success) {
             showRootViewStatus(`Packet "${title}" deleted.`, 'success');
         } else {
@@ -461,12 +481,12 @@ async function handleDeleteSelectedInstances(instanceIdsFromContextMenu = null) 
     try {
         // 4. Send message to background
         const response = await sendMessageToBackground({ action: 'delete_packets', data: { packetIds: selectedIds } });
-        
+
         if (response && !response.success) {
-             throw new Error(response.error || 'Unknown error');
+            throw new Error(response.error || 'Unknown error');
         }
         // Success message is handled by the 'packet_deletion_complete' listener in sidebar.js
-        
+
     } catch (error) {
         // 5. Revert on failure: Reload list to show items again
         showRootViewStatus(`Delete Error: ${error.message}`, 'error');
@@ -485,7 +505,7 @@ function setupInstanceContextMenu(row, instance) {
         menu.style.left = `${e.clientX + 2}px`;
 
         addMenuItem(menu, 'View Details', () => navigateTo('packet-detail', instance.instanceId));
-        
+
         if (await shouldUseTabGroups()) {
             const browserState = await storage.getPacketBrowserState(instance.instanceId);
             addMenuItem(menu, 'Reorder Tabs', () => {
@@ -493,7 +513,7 @@ function setupInstanceContextMenu(row, instance) {
                 sendMessageToBackground({ action: 'reorder_packet_tabs', data: { packetId: instance.instanceId } });
             }, '', !browserState?.tabGroupId || !instance.contents || instance.contents.length <= 1);
         }
-        
+
         addDivider(menu);
 
         addMenuItem(menu, 'Delete Packet', () => {
@@ -556,7 +576,7 @@ async function updateActionButtonsVisibility() {
     if (!domRefs.sidebarDeleteBtn) return;
     const selectedIds = getSelectedInstanceIds();
     const anySelected = selectedIds.length > 0;
-    
+
     domRefs.sidebarDeleteBtn.style.display = (anySelected) ? 'inline-block' : 'none';
     domRefs.showImportDialogBtn.style.display = (activeListTab === 'library' || !anySelected) ? 'inline-block' : 'none';
 }
@@ -567,11 +587,23 @@ function checkAndRenderEmptyState(listElement, emptyMessage) {
     const hasStencils = listElement.querySelector('tr.stencil-packet');
     const emptyStateRow = listElement.querySelector('tr > td.empty-state');
 
-    if (!hasRows && !hasStencils && !emptyStateRow) {
-        const colSpan = listElement.closest('table').querySelectorAll('thead th').length || 1;
-        listElement.innerHTML = `<tr><td colspan="${colSpan}" class="empty-state">${emptyMessage}</td></tr>`;
-    } else if ((hasRows || hasStencils) && emptyStateRow) {
-        emptyStateRow.parentElement.remove();
+    if (hasRows || hasStencils) {
+        if (emptyStateRow) {
+            emptyStateRow.parentElement.remove();
+        }
+    } else {
+        if (emptyStateRow) {
+            // Update existing row (e.g. from "Loading..." to "No packets")
+            emptyStateRow.textContent = emptyMessage;
+        } else {
+            const colSpan = listElement.closest('table').querySelectorAll('thead th').length || 1;
+            // Use insertAdjacenHTML to avoid wiping listeners on parent if any (though innerHTML on tbody is usually safe for listeners on rows)
+            // But innerHTML is just safer/cleaner for "wipe and replace" if empty. 
+            // Here we are APPENDING if it doesn't exist.
+            const row = document.createElement('tr');
+            row.innerHTML = `<td colspan="${colSpan}" class="empty-state">${emptyMessage}</td>`;
+            listElement.appendChild(row);
+        }
     }
 }
 
@@ -600,7 +632,7 @@ export function renderOrUpdateImageStencil(data) {
     if (!row) {
         const emptyStateRow = listElement.querySelector('tr > td.empty-state');
         if (emptyStateRow) emptyStateRow.parentElement.remove();
-        
+
         row = document.createElement('tr');
         row.dataset.imageId = imageId;
         row.classList.add('stencil-packet');
@@ -618,7 +650,7 @@ export function renderOrUpdateImageStencil(data) {
                 <div class="progress-bar" style="width: 5%;"></div>
             </div>
         `;
-        
+
         listElement.prepend(row);
     }
 
@@ -643,7 +675,7 @@ export function renderOrUpdateInstanceStencil(data) {
     if (!row) {
         const emptyStateRow = listElement.querySelector('tr > td.empty-state');
         if (emptyStateRow) emptyStateRow.parentElement.remove();
-        
+
         row = document.createElement('tr');
         row.dataset.instanceId = instanceId;
         row.classList.add('stencil-packet');
@@ -666,7 +698,7 @@ export function renderOrUpdateInstanceStencil(data) {
         `;
         listElement.prepend(row);
     }
-    
+
     const progressTextElement = row.querySelector('.creation-stage-text');
     const progressBarElement = row.querySelector('.progress-bar');
     const progressBarContainer = row.querySelector('.progress-bar-container');

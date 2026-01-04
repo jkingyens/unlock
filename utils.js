@@ -4,107 +4,107 @@
 
 // --- Centralized Configuration ---
 const CONFIG = {
-  DEBUG: true, // Set to false for production
-  TEMPERATURE: 0.2, // LLM Temperature
-  DEFAULT_PRESIGNED_URL_EXPIRATION_SECONDS: 3600, // 1 hour
-  PRESIGNED_URL_CACHE_EXPIRY_BUFFER_MS: 60000, // 1 minute
-  STORAGE_KEYS: {
-    PACKET_IMAGES: 'packetImages',       // Stores PacketImage objects (map)
-    PACKET_INSTANCES: 'packetInstances', // Stores PacketInstance objects (map)
-    PACKET_BROWSER_STATES: 'packetBrowserStates', // Stores PacketBrowserState objects (map)
-    SETTINGS: 'settings',
-    PENDING_VIEW_KEY: 'pendingSidebarView',
-    PACKET_CONTEXT_PREFIX: 'packetContext_', // Stores { instanceId, canonicalPacketUrl, currentBrowserUrl } for a tab
-    ACTIVE_MEDIA_KEY: 'activeMediaPlaybackState'
-  },
-  DEFAULT_SETTINGS: {
-    selectedModelId: 'default_openai_gpt4o',
-    llmModels: [
-      {
-        id: 'default_openai_gpt4o',
-        name: 'OpenAI GPT-4o (Default)',
-        providerType: 'openai',
-        apiKey: '',
-        modelName: 'gpt-4o',
-        apiEndpoint: 'https://api.openai.com/v1/chat/completions'
-      },
-      {
-        id: 'default_gemini_2_5_pro',
-        name: 'Google Gemini 2.5 Pro (Default)',
-        providerType: 'gemini',
-        apiKey: '',
-        modelName: 'gemini-2.5-pro',
-        apiEndpoint: 'https://generativelanguage.googleapis.com/v1beta/models/'
-      },
-      {
-        id: 'default_perplexity_sonar_medium',
-        name: 'Perplexity Sonar Medium (Default)',
-        providerType: 'perplexity',
-        apiKey: '',
-        modelName: 'sonar-medium-online',
-        apiEndpoint: 'https://api.perplexity.ai/chat/completions'
-      },
-      {
-        id: 'default_meta_llama',
-        name: 'Meta Llama (Default)',
-        providerType: 'llama',
-        apiKey: '',
-        modelName: 'Llama-4-Maverick-17B-128E-Instruct-FP8',
-        apiEndpoint: 'https://api.llama.com/v1/chat/completions'
-      },
-      {
-        id: 'default_deepseek_chat',
-        name: 'DeepSeek (Chat - Default)',
-        providerType: 'deepseek',
-        apiKey: '',
-        modelName: 'deepseek-chat',
-        apiEndpoint: 'https://api.deepseek.com/chat/completions'
-      },
-      {
-        id: 'default_anthropic_claude3_haiku',
-        name: 'Anthropic Claude 3 Haiku (Default)',
-        providerType: 'anthropic',
-        apiKey: '',
-        modelName: 'claude-3-haiku-20240307',
-        apiEndpoint: 'https://api.anthropic.com/v1/messages'
-      },
-      {
-        id: 'default_grok_mini',
-        name: 'Grok (Mini - xAI) (Default)',
-        providerType: 'grok',
-        apiKey: '',
-        modelName: 'grok-3-mini-fast-latest',
-        apiEndpoint: 'https://api.x.ai/v1/chat/completions'
-      }
-    ],
-    activeStorageId: null,
-    storageConfigs: [],
-    themePreference: 'auto',
-    confettiEnabled: true,
-    tabGroupsEnabled: true,
-    mediaOverlayEnabled: true,
-    preferAudio: true,
-    waveformLinkMarkersEnabled: true,
-    visitThresholdSeconds: 2,
-    quickCopyEnabled: true,
-    elevenlabsApiKey: ''
-  },
-  INDEXED_DB: {
-    NAME: 'UnlockDB', 
-    VERSION: 2, // Incremented for CAS schema
-    STORE_GENERATED_CONTENT: 'generatedContent',
-    STORE_CONTENT_BLOBS: 'contentBlobs' // New store for deduplicated binary data
-  },
-  IMAGE_DIR: 'packet-images/'
+    DEBUG: true, // Set to false for production
+    TEMPERATURE: 0.2, // LLM Temperature
+    DEFAULT_PRESIGNED_URL_EXPIRATION_SECONDS: 3600, // 1 hour
+    PRESIGNED_URL_CACHE_EXPIRY_BUFFER_MS: 60000, // 1 minute
+    STORAGE_KEYS: {
+        PACKET_IMAGES: 'packetImages',       // Stores PacketImage objects (map)
+        PACKET_INSTANCES: 'packetInstances', // Stores PacketInstance objects (map)
+        PACKET_BROWSER_STATES: 'packetBrowserStates', // Stores PacketBrowserState objects (map)
+        SETTINGS: 'settings',
+        PENDING_VIEW_KEY: 'pendingSidebarView',
+        PACKET_CONTEXT_PREFIX: 'packetContext_', // Stores { instanceId, canonicalPacketUrl, currentBrowserUrl } for a tab
+        ACTIVE_MEDIA_KEY: 'activeMediaPlaybackState'
+    },
+    DEFAULT_SETTINGS: {
+        selectedModelId: 'default_openai_gpt4o',
+        llmModels: [
+            {
+                id: 'default_openai_gpt4o',
+                name: 'OpenAI GPT-4o (Default)',
+                providerType: 'openai',
+                apiKey: '',
+                modelName: 'gpt-4o',
+                apiEndpoint: 'https://api.openai.com/v1/chat/completions'
+            },
+            {
+                id: 'default_gemini_2_5_pro',
+                name: 'Google Gemini 2.5 Pro (Default)',
+                providerType: 'gemini',
+                apiKey: '',
+                modelName: 'gemini-2.5-pro',
+                apiEndpoint: 'https://generativelanguage.googleapis.com/v1beta/models/'
+            },
+            {
+                id: 'default_perplexity_sonar_medium',
+                name: 'Perplexity Sonar Medium (Default)',
+                providerType: 'perplexity',
+                apiKey: '',
+                modelName: 'sonar-medium-online',
+                apiEndpoint: 'https://api.perplexity.ai/chat/completions'
+            },
+            {
+                id: 'default_meta_llama',
+                name: 'Meta Llama (Default)',
+                providerType: 'llama',
+                apiKey: '',
+                modelName: 'Llama-4-Maverick-17B-128E-Instruct-FP8',
+                apiEndpoint: 'https://api.llama.com/v1/chat/completions'
+            },
+            {
+                id: 'default_deepseek_chat',
+                name: 'DeepSeek (Chat - Default)',
+                providerType: 'deepseek',
+                apiKey: '',
+                modelName: 'deepseek-chat',
+                apiEndpoint: 'https://api.deepseek.com/chat/completions'
+            },
+            {
+                id: 'default_anthropic_claude3_haiku',
+                name: 'Anthropic Claude 3 Haiku (Default)',
+                providerType: 'anthropic',
+                apiKey: '',
+                modelName: 'claude-3-haiku-20240307',
+                apiEndpoint: 'https://api.anthropic.com/v1/messages'
+            },
+            {
+                id: 'default_grok_mini',
+                name: 'Grok (Mini - xAI) (Default)',
+                providerType: 'grok',
+                apiKey: '',
+                modelName: 'grok-3-mini-fast-latest',
+                apiEndpoint: 'https://api.x.ai/v1/chat/completions'
+            }
+        ],
+        activeStorageId: null,
+        storageConfigs: [],
+        themePreference: 'auto',
+        confettiEnabled: true,
+        tabGroupsEnabled: true,
+        mediaOverlayEnabled: true,
+        preferAudio: true,
+        waveformLinkMarkersEnabled: true,
+        visitThresholdSeconds: 2,
+        quickCopyEnabled: true,
+        elevenlabsApiKey: ''
+    },
+    INDEXED_DB: {
+        NAME: 'UnlockDB',
+        VERSION: 2, // Incremented for CAS schema
+        STORE_GENERATED_CONTENT: 'generatedContent',
+        STORE_CONTENT_BLOBS: 'contentBlobs' // New store for deduplicated binary data
+    },
+    IMAGE_DIR: 'packet-images/'
 };
 
 export const GROUP_TITLE_PREFIX = "PKT-";
 
 export const MPI_PARAMS = {
-  MARKER: 'MPI',
-  INSTANCE_ID: 'instanceId',
-  PAGE_ID: 'pageId',
-  EVENT_NAME: 'eventName'
+    MARKER: 'MPI',
+    INSTANCE_ID: 'instanceId',
+    PAGE_ID: 'pageId',
+    EVENT_NAME: 'eventName'
 };
 
 export function getIdentifierForGroupTitle(instanceId) {
@@ -126,27 +126,27 @@ export function getInstanceIdFromGroupTitle(title) {
 }
 
 const logger = {
-  log(component, message, data) {
-    if (CONFIG.DEBUG) {
-      if (typeof data !== 'undefined') {
-           console.log(`[Unlock ${component}] ${message}`, data);
-      } else {
-           console.log(`[Unlock ${component}] ${message}`);
-      }
+    log(component, message, data) {
+        if (CONFIG.DEBUG) {
+            if (typeof data !== 'undefined') {
+                console.log(`[Unlock ${component}] ${message}`, data);
+            } else {
+                console.log(`[Unlock ${component}] ${message}`);
+            }
+        }
+    },
+    warn(component, message, data) {
+        if (CONFIG.DEBUG) {
+            if (typeof data !== 'undefined') {
+                console.warn(`[Unlock ${component} Warning] ${message}`, data);
+            } else {
+                console.warn(`[Unlock ${component} Warning] ${message}`);
+            }
+        }
+    },
+    error(component, message, error) {
+        console.error(`[Unlock ${component} Error] ${message}`, error);
     }
-  },
-  warn(component, message, data) {
-    if (CONFIG.DEBUG) {
-       if (typeof data !== 'undefined') {
-           console.warn(`[Unlock ${component} Warning] ${message}`, data);
-       } else {
-            console.warn(`[Unlock ${component} Warning] ${message}`);
-       }
-    }
-  },
-  error(component, message, error) {
-    console.error(`[Unlock ${component} Error] ${message}`, error);
-  }
 };
 
 // --- Helper for Content Hashing ---
@@ -158,120 +158,120 @@ async function computeContentHash(buffer) {
 
 let dbPromise = null;
 function getDb() {
-  if (!dbPromise) {
-    dbPromise = new Promise((resolve, reject) => {
-      const openRequest = indexedDB.open(CONFIG.INDEXED_DB.NAME, CONFIG.INDEXED_DB.VERSION);
-      openRequest.onupgradeneeded = (event) => {
-        const db = event.target.result;
-        if (!db.objectStoreNames.contains(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT)) {
-          db.createObjectStore(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT);
-        }
-        // --- NEW: Create blob store for CAS ---
-        if (!db.objectStoreNames.contains(CONFIG.INDEXED_DB.STORE_CONTENT_BLOBS)) {
-          db.createObjectStore(CONFIG.INDEXED_DB.STORE_CONTENT_BLOBS);
-        }
-      };
-      openRequest.onerror = (event) => {
-        logger.error('IndexedDB', 'Database error', event.target.error);
-        dbPromise = null; reject(event.target.error);
-      };
-      openRequest.onsuccess = (event) => {
-        resolve(event.target.result);
-      };
-    });
-  }
-  return dbPromise;
+    if (!dbPromise) {
+        dbPromise = new Promise((resolve, reject) => {
+            const openRequest = indexedDB.open(CONFIG.INDEXED_DB.NAME, CONFIG.INDEXED_DB.VERSION);
+            openRequest.onupgradeneeded = (event) => {
+                const db = event.target.result;
+                if (!db.objectStoreNames.contains(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT)) {
+                    db.createObjectStore(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT);
+                }
+                // --- NEW: Create blob store for CAS ---
+                if (!db.objectStoreNames.contains(CONFIG.INDEXED_DB.STORE_CONTENT_BLOBS)) {
+                    db.createObjectStore(CONFIG.INDEXED_DB.STORE_CONTENT_BLOBS);
+                }
+            };
+            openRequest.onerror = (event) => {
+                logger.error('IndexedDB', 'Database error', event.target.error);
+                dbPromise = null; reject(event.target.error);
+            };
+            openRequest.onsuccess = (event) => {
+                resolve(event.target.result);
+            };
+        });
+    }
+    return dbPromise;
 }
 
 const indexedDbStorage = {
-   async saveGeneratedContent(imageId, pageId, filesArray) {
-    const key = `${imageId}::${pageId}`;
-    try {
-        const db = await getDb();
-        // Transaction covers both stores
-        const tx = db.transaction([CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT, CONFIG.INDEXED_DB.STORE_CONTENT_BLOBS], 'readwrite');
-        const contentStore = tx.objectStore(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT);
-        const blobStore = tx.objectStore(CONFIG.INDEXED_DB.STORE_CONTENT_BLOBS);
-        
-        const processedFiles = [];
+    async saveGeneratedContent(imageId, pageId, filesArray) {
+        const key = `${imageId}::${pageId}`;
+        try {
+            const db = await getDb();
+            // Transaction covers both stores
+            const tx = db.transaction([CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT, CONFIG.INDEXED_DB.STORE_CONTENT_BLOBS], 'readwrite');
+            const contentStore = tx.objectStore(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT);
+            const blobStore = tx.objectStore(CONFIG.INDEXED_DB.STORE_CONTENT_BLOBS);
 
-        for (const file of filesArray) {
-            // If file has binary content, hash it and store in blobStore
-            if (file.content) {
-                const hash = await computeContentHash(file.content);
-                // Store the blob keyed by hash. 'put' is safe/idempotent.
-                blobStore.put(file.content, hash);
+            const processedFiles = [];
 
-                // Store a lightweight reference in the main entry
-                processedFiles.push({
-                    ...file,
-                    content: null, // Strip the heavy blob
-                    contentHash: hash // Add reference
-                });
-            } else {
-                processedFiles.push(file);
-            }
-        }
+            for (const file of filesArray) {
+                // If file has binary content, hash it and store in blobStore
+                if (file.content) {
+                    const hash = await computeContentHash(file.content);
+                    // Store the blob keyed by hash. 'put' is safe/idempotent.
+                    blobStore.put(file.content, hash);
 
-        const request = contentStore.put(processedFiles, key);
-        
-        await new Promise((resolve, reject) => {
-            request.onerror = () => reject(request.error);
-            tx.oncomplete = () => resolve();
-            tx.onerror = () => reject(tx.error);
-        });
-        return true;
-    } catch (error) {
-        logger.error('IndexedDB', 'Error saving generated content', { key, error });
-        return false;
-    }
-   },
-   async getGeneratedContent(imageId, pageId) {
-    const key = `${imageId}::${pageId}`;
-    try {
-        const db = await getDb();
-        const tx = db.transaction([CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT, CONFIG.INDEXED_DB.STORE_CONTENT_BLOBS], 'readonly');
-        const contentStore = tx.objectStore(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT);
-        const blobStore = tx.objectStore(CONFIG.INDEXED_DB.STORE_CONTENT_BLOBS);
-        
-        const entry = await new Promise((resolve, reject) => {
-             const request = contentStore.get(key);
-             request.onsuccess = (event) => resolve(event.target.result || null);
-             request.onerror = (event) => reject(event.target.error);
-        });
-
-        if (!entry) return null;
-
-        // Rehydrate content from blobStore
-        const rehydratedFiles = [];
-        for (const file of entry) {
-            if (file.contentHash && !file.content) {
-                const blobContent = await new Promise((resolve, reject) => {
-                    const req = blobStore.get(file.contentHash);
-                    req.onsuccess = () => resolve(req.result);
-                    req.onerror = () => reject(req.error);
-                });
-                if (blobContent) {
-                    rehydratedFiles.push({
+                    // Store a lightweight reference in the main entry
+                    processedFiles.push({
                         ...file,
-                        content: blobContent
+                        content: null, // Strip the heavy blob
+                        contentHash: hash // Add reference
                     });
                 } else {
-                    logger.warn('IndexedDB', 'Missing blob for hash', file.contentHash);
-                    rehydratedFiles.push(file); // Push without content if missing (shouldn't happen)
+                    processedFiles.push(file);
                 }
-            } else {
-                rehydratedFiles.push(file);
             }
-        }
 
-        return rehydratedFiles;
-    } catch (error) {
-        logger.error('IndexedDB', 'Error getting generated content', { key, error });
-        return null;
-    }
-  },
-   async deleteGeneratedContentForImage(imageId) {
+            const request = contentStore.put(processedFiles, key);
+
+            await new Promise((resolve, reject) => {
+                request.onerror = () => reject(request.error);
+                tx.oncomplete = () => resolve();
+                tx.onerror = () => reject(tx.error);
+            });
+            return true;
+        } catch (error) {
+            logger.error('IndexedDB', 'Error saving generated content', { key, error });
+            return false;
+        }
+    },
+    async getGeneratedContent(imageId, pageId) {
+        const key = `${imageId}::${pageId}`;
+        try {
+            const db = await getDb();
+            const tx = db.transaction([CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT, CONFIG.INDEXED_DB.STORE_CONTENT_BLOBS], 'readonly');
+            const contentStore = tx.objectStore(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT);
+            const blobStore = tx.objectStore(CONFIG.INDEXED_DB.STORE_CONTENT_BLOBS);
+
+            const entry = await new Promise((resolve, reject) => {
+                const request = contentStore.get(key);
+                request.onsuccess = (event) => resolve(event.target.result || null);
+                request.onerror = (event) => reject(event.target.error);
+            });
+
+            if (!entry) return null;
+
+            // Rehydrate content from blobStore
+            const rehydratedFiles = [];
+            for (const file of entry) {
+                if (file.contentHash && !file.content) {
+                    const blobContent = await new Promise((resolve, reject) => {
+                        const req = blobStore.get(file.contentHash);
+                        req.onsuccess = () => resolve(req.result);
+                        req.onerror = () => reject(req.error);
+                    });
+                    if (blobContent) {
+                        rehydratedFiles.push({
+                            ...file,
+                            content: blobContent
+                        });
+                    } else {
+                        logger.warn('IndexedDB', 'Missing blob for hash', file.contentHash);
+                        rehydratedFiles.push(file); // Push without content if missing (shouldn't happen)
+                    }
+                } else {
+                    rehydratedFiles.push(file);
+                }
+            }
+
+            return rehydratedFiles;
+        } catch (error) {
+            logger.error('IndexedDB', 'Error getting generated content', { key, error });
+            return null;
+        }
+    },
+    async deleteGeneratedContentForImage(imageId) {
         try {
             const db = await getDb();
             const tx = db.transaction(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT, 'readwrite');
@@ -288,59 +288,59 @@ const indexedDbStorage = {
                     } else { resolve(); }
                 };
                 request.onerror = event => reject(event.target.error);
-                 tx.onerror = () => reject(tx.error);
+                tx.onerror = () => reject(tx.error);
             });
             // Note: We rely on garbageCollectIndexedDbContent to clean up the actual blobs
             return true;
         } catch (error) {
-             logger.error('IndexedDB', 'Error deleting content for image', { imageId, error });
-             return false;
+            logger.error('IndexedDB', 'Error deleting content for image', { imageId, error });
+            return false;
         }
-   },
-   async transferDraftContent(originalDraftId, finalImageId) {
-       try {
-           const db = await getDb();
-           const tx = db.transaction(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT, 'readwrite');
-           const store = tx.objectStore(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT);
-           
-           await new Promise((resolve, reject) => {
-               const request = store.openCursor();
+    },
+    async transferDraftContent(originalDraftId, finalImageId) {
+        try {
+            const db = await getDb();
+            const tx = db.transaction(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT, 'readwrite');
+            const store = tx.objectStore(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT);
 
-               request.onsuccess = event => {
-                   const cursor = event.target.result;
-                   if (cursor) {
-                       const currentKey = String(cursor.key);
-                       if (currentKey.startsWith(`${originalDraftId}::`)) {
-                           const pageId = currentKey.substring(currentKey.indexOf('::') + 2);
-                           const newKey = `${finalImageId}::${pageId}`;
-                           const value = cursor.value; // Value contains refs, so copying is cheap
-                           
-                           store.add(value, newKey);
-                           cursor.delete();
-                       }
-                       cursor.continue();
-                   }
-               };
-               
-               request.onerror = () => reject(request.error);
-               tx.oncomplete = () => resolve();
-               tx.onerror = () => reject(tx.error);
-           });
+            await new Promise((resolve, reject) => {
+                const request = store.openCursor();
 
-           logger.log('IndexedDB', `Successfully transferred content from ${originalDraftId} to ${finalImageId}`);
-           return true;
-       } catch (error) {
-           logger.error('IndexedDB', 'Error transferring draft content', { originalDraftId, finalImageId, error });
-           return false;
-       }
-   },
-   async clearAllContent() {
+                request.onsuccess = event => {
+                    const cursor = event.target.result;
+                    if (cursor) {
+                        const currentKey = String(cursor.key);
+                        if (currentKey.startsWith(`${originalDraftId}::`)) {
+                            const pageId = currentKey.substring(currentKey.indexOf('::') + 2);
+                            const newKey = `${finalImageId}::${pageId}`;
+                            const value = cursor.value; // Value contains refs, so copying is cheap
+
+                            store.add(value, newKey);
+                            cursor.delete();
+                        }
+                        cursor.continue();
+                    }
+                };
+
+                request.onerror = () => reject(request.error);
+                tx.oncomplete = () => resolve();
+                tx.onerror = () => reject(tx.error);
+            });
+
+            logger.log('IndexedDB', `Successfully transferred content from ${originalDraftId} to ${finalImageId}`);
+            return true;
+        } catch (error) {
+            logger.error('IndexedDB', 'Error transferring draft content', { originalDraftId, finalImageId, error });
+            return false;
+        }
+    },
+    async clearAllContent() {
         try {
             const db = await getDb();
             const tx = db.transaction([CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT, CONFIG.INDEXED_DB.STORE_CONTENT_BLOBS], 'readwrite');
             const contentStore = tx.objectStore(CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT);
             const blobStore = tx.objectStore(CONFIG.INDEXED_DB.STORE_CONTENT_BLOBS);
-            
+
             contentStore.clear();
             blobStore.clear();
 
@@ -363,7 +363,7 @@ const indexedDbStorage = {
             const validImageIds = new Set(Object.keys(allImages));
             let deletedEntries = 0;
             let deletedBlobs = 0;
-            
+
             const activeHashes = new Set();
 
             const tx = db.transaction([CONFIG.INDEXED_DB.STORE_GENERATED_CONTENT, CONFIG.INDEXED_DB.STORE_CONTENT_BLOBS], 'readwrite');
@@ -378,7 +378,7 @@ const indexedDbStorage = {
                     if (cursor) {
                         const currentKey = String(cursor.key);
                         const imageId = currentKey.split('::')[0];
-                        
+
                         if (!imageId.startsWith('inst_') && !validImageIds.has(imageId)) {
                             cursor.delete();
                             deletedEntries++;
@@ -393,7 +393,7 @@ const indexedDbStorage = {
                         }
                         cursor.continue();
                     } else {
-                        resolve(); 
+                        resolve();
                     }
                 };
                 request.onerror = () => reject(request.error);
@@ -421,7 +421,7 @@ const indexedDbStorage = {
                 tx.oncomplete = () => resolve();
                 tx.onerror = () => reject(tx.error);
             });
-            
+
             logger.log('IndexedDB:GC', `GC complete. Removed ${deletedEntries} orphaned entries and ${deletedBlobs} unused blobs.`);
             return true;
         } catch (error) {
@@ -455,7 +455,7 @@ const indexedDbStorage = {
                 tx.oncomplete = () => resolve();
                 tx.onerror = () => reject(tx.error);
             });
-            
+
             // We do not need to explicitly clear blobs here; the next GC cycle will pick up
             // any blobs that were *only* referenced by these instances.
             logger.log('IndexedDB:ClearInstances', `Cleanup complete. Removed ${deletedCount} instance cache entries.`);
@@ -493,150 +493,150 @@ const indexedDbStorage = {
 };
 
 const storage = {
-  async getLocal(key) {
-    return new Promise((resolve, reject) => {
-      chrome.storage.local.get(key, (result) => {
-        if (chrome.runtime.lastError) reject(chrome.runtime.lastError); else resolve(result);
-      });
-    });
-  },
-  async setLocal(data) {
-    return new Promise((resolve, reject) => {
-      chrome.storage.local.set(data, () => {
-        if (chrome.runtime.lastError) reject(chrome.runtime.lastError); else resolve();
-      });
-    });
-  },
-  async removeLocal(key) {
-    return new Promise((resolve, reject) => {
-      chrome.storage.local.remove(key, () => { if (chrome.runtime.lastError) reject(chrome.runtime.lastError); else resolve(); });
-    });
-  },
-  async getPacketImages() {
-    const data = await this.getLocal(CONFIG.STORAGE_KEYS.PACKET_IMAGES);
-    return data[CONFIG.STORAGE_KEYS.PACKET_IMAGES] || {};
-  },
-  async getPacketImage(imageId) {
-      const images = await this.getPacketImages();
-      return images[imageId] || null;
-  },
-  async savePacketImage(image) {
-      const images = await this.getPacketImages();
-      images[image.id] = image;
-      await this.setLocal({ [CONFIG.STORAGE_KEYS.PACKET_IMAGES]: images });
-      return true;
-  },
-  async deletePacketImage(imageId) {
-       const images = await this.getPacketImages();
-       if (images[imageId]) {
-           delete images[imageId];
-           await this.setLocal({ [CONFIG.STORAGE_KEYS.PACKET_IMAGES]: images });
-           return true;
-       }
-       return false;
-  },
-  async getPacketInstances() {
-    const data = await this.getLocal(CONFIG.STORAGE_KEYS.PACKET_INSTANCES);
-    return data[CONFIG.STORAGE_KEYS.PACKET_INSTANCES] || {};
-  },
-  async getPacketInstance(instanceId) {
-      const instances = await this.getPacketInstances();
-      return instances[instanceId] || null;
-  },
-  async savePacketInstance(instance) {
-      const instances = await this.getPacketInstances();
-      instances[instance.instanceId] = instance;
-      await this.setLocal({ [CONFIG.STORAGE_KEYS.PACKET_INSTANCES]: instances });
-      return true;
-  },
-  async deletePacketInstance(instanceId) {
-       const instances = await this.getPacketInstances();
-       if (instances[instanceId]) {
-           delete instances[instanceId];
-           await this.setLocal({ [CONFIG.STORAGE_KEYS.PACKET_INSTANCES]: instances });
-           return true;
-       }
-       return false;
-  },
+    async getLocal(key) {
+        return new Promise((resolve, reject) => {
+            chrome.storage.local.get(key, (result) => {
+                if (chrome.runtime.lastError) reject(chrome.runtime.lastError); else resolve(result);
+            });
+        });
+    },
+    async setLocal(data) {
+        return new Promise((resolve, reject) => {
+            chrome.storage.local.set(data, () => {
+                if (chrome.runtime.lastError) reject(chrome.runtime.lastError); else resolve();
+            });
+        });
+    },
+    async removeLocal(key) {
+        return new Promise((resolve, reject) => {
+            chrome.storage.local.remove(key, () => { if (chrome.runtime.lastError) reject(chrome.runtime.lastError); else resolve(); });
+        });
+    },
+    async getPacketImages() {
+        const data = await this.getLocal(CONFIG.STORAGE_KEYS.PACKET_IMAGES);
+        return data[CONFIG.STORAGE_KEYS.PACKET_IMAGES] || {};
+    },
+    async getPacketImage(imageId) {
+        const images = await this.getPacketImages();
+        return images[imageId] || null;
+    },
+    async savePacketImage(image) {
+        const images = await this.getPacketImages();
+        images[image.id] = image;
+        await this.setLocal({ [CONFIG.STORAGE_KEYS.PACKET_IMAGES]: images });
+        return true;
+    },
+    async deletePacketImage(imageId) {
+        const images = await this.getPacketImages();
+        if (images[imageId]) {
+            delete images[imageId];
+            await this.setLocal({ [CONFIG.STORAGE_KEYS.PACKET_IMAGES]: images });
+            return true;
+        }
+        return false;
+    },
+    async getPacketInstances() {
+        const data = await this.getLocal(CONFIG.STORAGE_KEYS.PACKET_INSTANCES);
+        return data[CONFIG.STORAGE_KEYS.PACKET_INSTANCES] || {};
+    },
+    async getPacketInstance(instanceId) {
+        const instances = await this.getPacketInstances();
+        return instances[instanceId] || null;
+    },
+    async savePacketInstance(instance) {
+        const instances = await this.getPacketInstances();
+        instances[instance.instanceId] = instance;
+        await this.setLocal({ [CONFIG.STORAGE_KEYS.PACKET_INSTANCES]: instances });
+        return true;
+    },
+    async deletePacketInstance(instanceId) {
+        const instances = await this.getPacketInstances();
+        if (instances[instanceId]) {
+            delete instances[instanceId];
+            await this.setLocal({ [CONFIG.STORAGE_KEYS.PACKET_INSTANCES]: instances });
+            return true;
+        }
+        return false;
+    },
     async getInstanceCountForImage(imageId) {
-       const instances = await this.getPacketInstances();
-       return Object.values(instances).filter(inst => inst.imageId === imageId).length;
-  },
-  async getAllPacketBrowserStates() {
-    const data = await this.getLocal(CONFIG.STORAGE_KEYS.PACKET_BROWSER_STATES);
-    return data[CONFIG.STORAGE_KEYS.PACKET_BROWSER_STATES] || {};
-  },
-  async getPacketBrowserState(instanceId) {
-      const states = await this.getAllPacketBrowserStates();
-      return states[instanceId] || null;
-  },
-  async savePacketBrowserState(state) {
-      const states = await this.getAllPacketBrowserStates();
-      states[state.instanceId] = state;
-      await this.setLocal({ [CONFIG.STORAGE_KEYS.PACKET_BROWSER_STATES]: states });
-      return true;
-  },
-  async deletePacketBrowserState(instanceId) {
-       const states = await this.getAllPacketBrowserStates();
-       if (states[instanceId]) {
-           delete states[instanceId];
-           await this.setLocal({ [CONFIG.STORAGE_KEYS.PACKET_BROWSER_STATES]: states });
-           return true;
-       }
-       return false;
-  },
-  async getSettings() {
-    const data = await this.getLocal(CONFIG.STORAGE_KEYS.SETTINGS);
-    const storedSettings = data[CONFIG.STORAGE_KEYS.SETTINGS] || {};
-    return { ...CONFIG.DEFAULT_SETTINGS, ...storedSettings };
-  },
-  async saveSettings(settings) {
-    await this.setLocal({ [CONFIG.STORAGE_KEYS.SETTINGS]: settings });
-    return true;
-  },
-  async getActiveModelConfig() {
-    const settings = await this.getSettings();
-    return settings.llmModels.find(model => model.id === settings.selectedModelId) || null;
-  },
-  async isCloudStorageEnabled() {
-    const settings = await this.getSettings();
-    const config = settings.storageConfigs.find(c => c.id === settings.activeStorageId);
-    return !!(config?.credentials?.accessKey && config?.credentials?.secretKey);
-  },
-  async getActiveCloudStorageConfig() {
-    const settings = await this.getSettings();
-    return settings.storageConfigs.find(c => c.id === settings.activeStorageId) || null;
-  },
-  async getSession(key) {
-    return new Promise(resolve => {
-      if (!chrome.storage?.session) return resolve({});
-      chrome.storage.session.get(key, result => resolve(result || {}));
-    });
-  },
-  async setSession(data) {
-    return new Promise(resolve => {
-      if (!chrome.storage?.session) return resolve(false);
-      chrome.storage.session.set(data, () => resolve(!chrome.runtime.lastError));
-    });
-  },
-  async removeSession(key) {
-    return new Promise(resolve => {
-      if (!chrome.storage?.session) return resolve();
-      chrome.storage.session.remove(key, () => resolve());
-    });
-  },
-  async clearAllPacketData() {
-    logger.log('Storage:clearAllPacketData', 'Clearing all packet images, instances, browser states, and cached content.');
-    await Promise.all([
-      this.setLocal({
-        [CONFIG.STORAGE_KEYS.PACKET_IMAGES]: {},
-        [CONFIG.STORAGE_KEYS.PACKET_INSTANCES]: {},
-        [CONFIG.STORAGE_KEYS.PACKET_BROWSER_STATES]: {}
-      }),
-      indexedDbStorage.clearAllContent()
-    ]);
-    logger.log('Storage:clearAllPacketData', 'All packet data has been cleared.');
-  }
+        const instances = await this.getPacketInstances();
+        return Object.values(instances).filter(inst => inst.imageId === imageId).length;
+    },
+    async getAllPacketBrowserStates() {
+        const data = await this.getLocal(CONFIG.STORAGE_KEYS.PACKET_BROWSER_STATES);
+        return data[CONFIG.STORAGE_KEYS.PACKET_BROWSER_STATES] || {};
+    },
+    async getPacketBrowserState(instanceId) {
+        const states = await this.getAllPacketBrowserStates();
+        return states[instanceId] || null;
+    },
+    async savePacketBrowserState(state) {
+        const states = await this.getAllPacketBrowserStates();
+        states[state.instanceId] = state;
+        await this.setLocal({ [CONFIG.STORAGE_KEYS.PACKET_BROWSER_STATES]: states });
+        return true;
+    },
+    async deletePacketBrowserState(instanceId) {
+        const states = await this.getAllPacketBrowserStates();
+        if (states[instanceId]) {
+            delete states[instanceId];
+            await this.setLocal({ [CONFIG.STORAGE_KEYS.PACKET_BROWSER_STATES]: states });
+            return true;
+        }
+        return false;
+    },
+    async getSettings() {
+        const data = await this.getLocal(CONFIG.STORAGE_KEYS.SETTINGS);
+        const storedSettings = data[CONFIG.STORAGE_KEYS.SETTINGS] || {};
+        return { ...CONFIG.DEFAULT_SETTINGS, ...storedSettings };
+    },
+    async saveSettings(settings) {
+        await this.setLocal({ [CONFIG.STORAGE_KEYS.SETTINGS]: settings });
+        return true;
+    },
+    async getActiveModelConfig() {
+        const settings = await this.getSettings();
+        return settings.llmModels.find(model => model.id === settings.selectedModelId) || null;
+    },
+    async isCloudStorageEnabled() {
+        const settings = await this.getSettings();
+        const config = settings.storageConfigs.find(c => c.id === settings.activeStorageId);
+        return !!(config?.credentials?.accessKey && config?.credentials?.secretKey);
+    },
+    async getActiveCloudStorageConfig() {
+        const settings = await this.getSettings();
+        return settings.storageConfigs.find(c => c.id === settings.activeStorageId) || null;
+    },
+    async getSession(key) {
+        return new Promise(resolve => {
+            if (!chrome.storage?.session) return resolve({});
+            chrome.storage.session.get(key, result => resolve(result || {}));
+        });
+    },
+    async setSession(data) {
+        return new Promise(resolve => {
+            if (!chrome.storage?.session) return resolve(false);
+            chrome.storage.session.set(data, () => resolve(!chrome.runtime.lastError));
+        });
+    },
+    async removeSession(key) {
+        return new Promise(resolve => {
+            if (!chrome.storage?.session) return resolve();
+            chrome.storage.session.remove(key, () => resolve());
+        });
+    },
+    async clearAllPacketData() {
+        logger.log('Storage:clearAllPacketData', 'Clearing all packet images, instances, browser states, and cached content.');
+        await Promise.all([
+            this.setLocal({
+                [CONFIG.STORAGE_KEYS.PACKET_IMAGES]: {},
+                [CONFIG.STORAGE_KEYS.PACKET_INSTANCES]: {},
+                [CONFIG.STORAGE_KEYS.PACKET_BROWSER_STATES]: {}
+            }),
+            indexedDbStorage.clearAllContent()
+        ]);
+        logger.log('Storage:clearAllPacketData', 'All packet data has been cleared.');
+    }
 };
 
 const packetUtils = {
@@ -667,7 +667,7 @@ const packetUtils = {
                 if (urlObj.pathname.endsWith('/preview.html')) {
                     const urlInstanceId = urlObj.searchParams.get('instanceId');
                     const urlLrl = urlObj.searchParams.get('lrl');
-                    
+
                     if (urlInstanceId === instance.instanceId && urlLrl) {
                         const matchedItem = instance.contents.find(item => item.lrl === decodeURIComponent(urlLrl));
                         if (matchedItem) {
@@ -693,14 +693,14 @@ const packetUtils = {
 
             if (decodedItemUrl) {
                 const renderedItemUrl = this.renderPacketUrl(decodedItemUrl, instance.variables);
-                
+
                 const isWildcard = renderedItemUrl.includes('*');
                 const urlPattern = isWildcard ? new RegExp('^' + renderedItemUrl.replace(/\*/g, '[^/]+') + '$') : null;
 
                 if ((!isWildcard && renderedItemUrl === decodedLoadedUrl) || (isWildcard && urlPattern.test(decodedLoadedUrl))) {
                     return options.returnItem ? item : true;
                 }
-                
+
                 if (item.captures && item.captures.fromPath) {
                     try {
                         const itemUrlObject = new URL(item.url);
@@ -724,7 +724,7 @@ const packetUtils = {
                 if (decodedItemUrl === decodedLoadedUrl) {
                     return options.returnItem ? item : true;
                 }
-                
+
                 if (item.publishContext) {
                     try {
                         const loadedUrlObj = new URL(loadedUrl);
@@ -732,7 +732,7 @@ const packetUtils = {
                         let expectedPathname = (publishContext.provider === 'google')
                             ? `/${publishContext.bucket}/${item.url}`
                             : `/${item.url}`;
-                        
+
                         if (decodeURIComponent(loadedUrlObj.pathname) === decodeURIComponent(expectedPathname)) {
                             return options.returnItem ? item : true;
                         }
@@ -742,7 +742,7 @@ const packetUtils = {
         }
         return options.returnItem ? null : false;
     },
-  
+
     _updateCheckpointsOnVisit(instance) {
         if (!instance || !Array.isArray(instance.checkpoints) || !Array.isArray(instance.checkpointsTripped)) {
             return false;
@@ -771,7 +771,7 @@ const packetUtils = {
         if (!instance) {
             return { visitedCount: 0, totalCount: 0, progressPercentage: 0 };
         }
-        
+
         if (Array.isArray(instance.checkpoints) && instance.checkpoints.length > 0 && Array.isArray(instance.checkpointsTripped)) {
             const totalCount = instance.checkpoints.length;
             const visitedCount = instance.checkpointsTripped.filter(c => c === 1).length;
@@ -786,9 +786,9 @@ const packetUtils = {
         if (!Array.isArray(instance.contents)) {
             return { visitedCount: 0, totalCount: 0, progressPercentage: 0 };
         }
-        
-        const trackableItems = instance.contents.filter(item => 
-            item.url || item.format === 'interactive-input'
+
+        const trackableItems = instance.contents.filter(item =>
+            item && (item.url || item.format === 'interactive-input')
         );
 
         const totalCount = trackableItems.length;
@@ -796,12 +796,12 @@ const packetUtils = {
             return { visitedCount: 0, totalCount: 0, progressPercentage: 100 };
         }
         const visitedUrlsSet = new Set(instance.visitedUrls || []);
-        
+
         const visitedCount = trackableItems.filter(item => {
-            return (item.url && visitedUrlsSet.has(item.url)) || 
-                   (item.format === 'interactive-input' && item.lrl && visitedUrlsSet.has(item.lrl));
+            return (item.url && visitedUrlsSet.has(item.url)) ||
+                (item.format === 'interactive-input' && item.lrl && visitedUrlsSet.has(item.lrl));
         }).length;
-        
+
         return {
             visitedCount: visitedCount,
             totalCount,
@@ -815,7 +815,7 @@ const packetUtils = {
         return progressPercentage >= 100;
     },
 
-async markUrlAsVisited(instance, url) {
+    async markUrlAsVisited(instance, url) {
         if (!instance) {
             logger.warn('markUrlAsVisited', 'Packet instance not found');
             return { success: false, error: 'Packet instance not found' };
@@ -823,7 +823,7 @@ async markUrlAsVisited(instance, url) {
 
         // [NEW] Guard against missing URL
         if (!url) {
-             return { success: true, notTrackable: true, instance: instance };
+            return { success: true, notTrackable: true, instance: instance };
         }
 
         const wasCompletedBefore = await this.isPacketInstanceCompleted(instance);
@@ -832,23 +832,23 @@ async markUrlAsVisited(instance, url) {
         if (!foundItem) {
             return { success: true, notTrackable: true, instance: instance };
         }
-        
+
         // Prioritize LRL as the canonical identifier for visit tracking if it exists.
         const canonicalIdentifier = foundItem.lrl || foundItem.url;
 
         // [NEW] Double-check we have a valid identifier
         if (!canonicalIdentifier) {
-             return { success: true, notTrackable: true, instance: instance };
+            return { success: true, notTrackable: true, instance: instance };
         }
 
         if ((instance.visitedUrls || []).includes(canonicalIdentifier)) {
             return { success: true, alreadyVisited: true, instance: instance };
         }
-        
+
         instance.visitedUrls = [...(instance.visitedUrls || []), canonicalIdentifier];
         this._updateCheckpointsOnVisit(instance);
         const justCompleted = !wasCompletedBefore && await this.isPacketInstanceCompleted(instance);
-        
+
         return { success: true, modified: true, instance, justCompleted };
     },
 
@@ -915,7 +915,7 @@ function isTabGroupsAvailable() { return typeof chrome?.tabGroups?.update === 'f
 function isSidePanelAvailable() { return typeof chrome?.sidePanel?.open === 'function'; }
 
 function isChromeAiAvailable() {
-  return typeof globalThis.LanguageModel?.create === 'function';
+    return typeof globalThis.LanguageModel?.create === 'function';
 }
 
 let currentThemeListener = null;
@@ -973,29 +973,29 @@ async function base64Decode(base64) {
 }
 
 function sanitizeForFileName(input) {
-  // Use encodeURIComponent to ensure uniqueness and prevent collisions (e.g., "file.name" vs "file_name")
-  // while making the string safe for IDB keys.
-  return encodeURIComponent(input || '');
+    // Use encodeURIComponent to ensure uniqueness and prevent collisions (e.g., "file.name" vs "file_name")
+    // while making the string safe for IDB keys.
+    return encodeURIComponent(input || '');
 }
 
 
 export {
-  CONFIG,
-  logger,
-  storage,
-  indexedDbStorage,
-  packetUtils,
-  isTabGroupsAvailable,
-  isSidePanelAvailable,
-  getPacketContext,
-  setPacketContext,
-  clearPacketContext,
-  getDb,
-  shouldUseTabGroups,
-  shouldShowOverlay,
-  arrayBufferToBase64,
-  base64Decode,
-  sanitizeForFileName,
-  isChromeAiAvailable,
-  applyThemeMode,
+    CONFIG,
+    logger,
+    storage,
+    indexedDbStorage,
+    packetUtils,
+    isTabGroupsAvailable,
+    isSidePanelAvailable,
+    getPacketContext,
+    setPacketContext,
+    clearPacketContext,
+    getDb,
+    shouldUseTabGroups,
+    shouldShowOverlay,
+    arrayBufferToBase64,
+    base64Decode,
+    sanitizeForFileName,
+    isChromeAiAvailable,
+    applyThemeMode,
 };

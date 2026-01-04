@@ -455,55 +455,89 @@ export async function updateCardVisibility(instance, browserState) {
         }
 
         card.classList.toggle('visited', isVisited);
-        // --- END OF FIX ---
 
-        if (isCompleted) {
-            card.dataset.completed = 'true';
-        } else {
-            delete card.dataset.completed;
-        }
-
+        // --- Moment Visibility Logic ---
         const momentIndices = card.dataset.momentIndices ? JSON.parse(card.dataset.momentIndices) : [];
         if (momentIndices.length > 0) {
             const isRevealedByMoment = momentIndices.some(index => instance.momentsTripped && instance.momentsTripped[index] === 1);
             const isOpenInTab = cardUrl && openTabUrls.has(cardUrl);
-
             const isRevealed = isRevealedByMoment || isVisited || isOpenInTab;
-
-            const wasHidden = card.classList.contains('hidden-by-rule');
             card.classList.toggle('hidden-by-rule', !isRevealed);
+        }
 
-            if (card.dataset.format === 'interactive-input') {
-                if (isCompleted) {
+        // --- Interactive Input Logic (Locking/Reset) ---
+        if (card.dataset.format === 'interactive-input') {
+            const isHidden = card.classList.contains('hidden-by-rule');
+
+            if (isCompleted) {
+                // Global Completion State
+                card.classList.remove('drop-zone-active', 'clickable', 'listening-for-input');
+                card.style.opacity = '0.6';
+                const cardUrlEl = card.querySelector('.card-url');
+                if (cardUrlEl) cardUrlEl.textContent = "Input disabled (Packet Completed)";
+            } else if (!isHidden) {
+                // If visible, check if locked (visited) or active
+                if (isVisited) {
+                    // LOCKED STATE
                     card.classList.remove('drop-zone-active', 'clickable', 'listening-for-input');
-                    card.style.opacity = '0.6';
+                    card.style.opacity = '0.8';
+
                     const cardUrlEl = card.querySelector('.card-url');
-                    if (cardUrlEl) cardUrlEl.textContent = "Input disabled (Packet Completed)";
-                } else if (isRevealed) {
+                    if (cardUrlEl) cardUrlEl.textContent = "Data Captured";
+
+                    // Add Reset Button if needed
+                    let resetBtn = card.querySelector('.input-reset-btn');
+                    if (!resetBtn) {
+                        resetBtn = document.createElement('div');
+                        resetBtn.className = 'input-reset-btn';
+                        resetBtn.title = "Reset / Clip Again";
+                        resetBtn.innerHTML = '↺';
+                        // Simple reset handler
+                        resetBtn.onclick = (e) => {
+                            e.stopPropagation();
+                            card.classList.remove('visited'); // Unlock locally
+                            // Find key and optionally remove from visitedUrlsSet for immediate consistency if needed, 
+                            // but simpler is to just visually unlock so they can click again.
+                            // Triggering a refresh might re-lock it if we don't clear data, 
+                            // but user wants to "change what they captured", implying overwrite.
+                            // We'll just let them click it again.
+                            card.querySelector('.card-url').textContent = "Click to Activate Input Capture";
+                            card.classList.add('clickable', 'drop-zone-active');
+                            resetBtn.remove();
+
+                            // Re-attach handlers if needed (they should persist, but we need to ensure state is right)
+                            const contentItem = instance.contents.find(i => i.lrl === cardLrl);
+                            if (contentItem) {
+                                attachInteractiveCardHandlers(card, contentItem, instance);
+                            }
+                        };
+                        card.appendChild(resetBtn);
+                    }
+                } else {
+                    // UNLOCKED / ACTIVE STATE
                     card.style.opacity = '1.0';
                     card.classList.add('drop-zone-active', 'clickable');
 
-                    if (wasHidden && !card.classList.contains('listening-for-input')) {
+                    // Remove reset button if it exists (e.g. if we just reset)
+                    const resetBtn = card.querySelector('.input-reset-btn');
+                    if (resetBtn) resetBtn.remove();
+
+                    if (!card.classList.contains('listening-for-input')) {
                         const cardUrlEl = card.querySelector('.card-url');
                         if (cardUrlEl) cardUrlEl.textContent = "Click to Activate Input Capture";
                     }
 
-                    if (wasHidden) {
-                        const contentItem = instance.contents.find(item => item.lrl === cardLrl);
-                        if (contentItem) {
-                            attachInteractiveCardHandlers(card, contentItem, instance);
-                        }
+                    // Ensure handlers are attached
+                    const contentItem = instance.contents.find(item => item.lrl === cardLrl);
+                    if (contentItem) {
+                        attachInteractiveCardHandlers(card, contentItem, instance);
                     }
-                } else {
-                    card.style.opacity = '0.7';
-                    card.classList.remove('drop-zone-active', 'listening-for-input');
                 }
+            } else {
+                // Hidden
+                card.style.opacity = '0.7';
+                card.classList.remove('drop-zone-active', 'listening-for-input');
             }
-        } else if (card.dataset.format === 'interactive-input' && isCompleted) {
-            card.classList.remove('drop-zone-active', 'clickable', 'listening-for-input');
-            card.style.opacity = '0.6';
-            const cardUrlEl = card.querySelector('.card-url');
-            if (cardUrlEl) cardUrlEl.textContent = "Input disabled (Packet Completed)";
         }
     });
 }
@@ -902,6 +936,7 @@ function attachInteractiveCardHandlers(card, contentItem, instance) {
 
     card.addEventListener('click', () => {
         if (card.dataset.completed === 'true') return;
+        if (card.classList.contains('visited')) return; // Locked
 
         const wasActive = card.classList.contains('listening-for-input');
 
@@ -922,7 +957,7 @@ function attachInteractiveCardHandlers(card, contentItem, instance) {
             sendMessageToBackground({ action: 'deactivate_selector_tool_global' });
         } else {
             card.classList.add('listening-for-input');
-            if (cardUrlEl) cardUrlEl.textContent = "Listening... Drag & Drop";
+            if (cardUrlEl) cardUrlEl.textContent = "Listening... Clip Data";
 
             let toolType = 'region';
             // Default to OCR for interactive inputs, unless explicitly image
