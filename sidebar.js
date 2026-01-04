@@ -60,7 +60,16 @@ async function initialize() {
     setupGlobalListeners();
 
     try {
-        await sendMessageToBackground({ action: 'sidebar_ready' });
+        // [FIX] Add timeouts to prevent hanging if background is slow/unresponsive
+        const timeout = (ms) => new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), ms));
+        const sendWithTimeout = (msg, ms = 2000) => Promise.race([sendMessageToBackground(msg), timeout(ms)]);
+
+        try {
+            await sendWithTimeout({ action: 'sidebar_ready' });
+        } catch (e) {
+            logger.warn('Sidebar', 'Sidebar ready acknowledgment timed out or failed', e);
+        }
+
         const sessionData = await storage.getSession(PENDING_VIEW_KEY);
         const pendingViewData = sessionData?.[PENDING_VIEW_KEY];
 
@@ -68,7 +77,14 @@ async function initialize() {
             navigateTo(pendingViewData.targetView, pendingViewData.instanceId);
             await storage.removeSession(PENDING_VIEW_KEY);
         } else {
-            const response = await sendMessageToBackground({ action: 'get_initial_sidebar_context' });
+            let response;
+            try {
+                response = await sendWithTimeout({ action: 'get_initial_sidebar_context' });
+            } catch (e) {
+                logger.warn('Sidebar', 'Initial context fetch timed out', e);
+                // Fallback will naturally occur below
+            }
+
             if (response?.success) {
                 await updateSidebarContext(response);
                 if (!response.instanceId) {
