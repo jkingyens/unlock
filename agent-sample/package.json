@@ -12,5 +12,8 @@
   "license": "ISC",
   "dependencies": {
     "@bytecodealliance/componentize-js": "^0.19.3"
+  },
+  "devDependencies": {
+    "@bytecodealliance/jco": "^1.15.4"
   }
 }
