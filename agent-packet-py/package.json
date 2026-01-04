@@ -1,0 +1,11 @@
+{
+    "name": "agent-python",
+    "version": "1.0.0",
+    "description": "Python Wasm Agent",
+    "main": "index.js",
+    "scripts": {
+        "test": "echo \"Error: no test specified\" && exit 1"
+    },
+    "author": "",
+    "license": "ISC"
+}

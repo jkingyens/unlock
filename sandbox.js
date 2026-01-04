@@ -78,15 +78,10 @@ async function executeAgentCode(codeString, payload) {
             // Better: update executeAgentCode signature.
 
             const userScript = payload.args?.code || "return 'No code provided'";
-            const result = await agentModule.runCode(userScript);
-            window.parent.postMessage({ type: 'AGENT_EXECUTION_COMPLETE', result }, '*');
-        } else if (agentModule.run) {
-            // Backward compat
-            console.log("[Sandbox] Running Agent (Standard Mode)...");
-            const result = await agentModule.run();
+            const result = await agentModule.run(userScript);
             window.parent.postMessage({ type: 'AGENT_EXECUTION_COMPLETE', result }, '*');
         } else {
-            throw new Error("Agent module does not export 'run' or 'runCode'.");
+            throw new Error("Agent module does not export 'run'.");
         }
 
         URL.revokeObjectURL(url);
