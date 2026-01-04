@@ -1,0 +1,15 @@
+package component:agent;
+
+interface host-capabilities {
+  ask: func(prompt: string) -> string;
+}
+
+interface host-console {
+  log: func(msg: string);
+}
+
+world agent-v1 {
+  import host-capabilities;
+  import host-console;
+  export run: func(code: string) -> string;
+}

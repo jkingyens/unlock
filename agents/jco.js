@@ -48,6 +48,7 @@ var InputStream = class {
   }
   subscribe() {
     console.log(`[streams] Subscribe to input stream ${this.id}`);
+    return new Pollable();
   }
   [symbolDispose]() {
     if (this.handler.drop) {
@@ -113,12 +114,15 @@ var OutputStream = class {
   }
   subscribe() {
     console.log(`[streams] Subscribe to output stream ${this.id}`);
+    return new Pollable();
   }
   [symbolDispose]() {
   }
 };
 var error = { Error: IoError };
 var streams = { InputStream, OutputStream };
+var Pollable = class {
+};
 
 // node_modules/@bytecodealliance/preview2-shim/lib/browser/config.js
 var _cwd = "/";
@@ -506,8 +510,101 @@ var preopens = {
 };
 var types = {
   Descriptor,
-  DirectoryEntryStream
+  DirectoryEntryStream,
+  filesystemErrorCode(err) {
+    return convertFsError(err.payload);
+  }
 };
+function convertFsError(e) {
+  switch (e.code) {
+    case "EACCES":
+      return "access";
+    case "EAGAIN":
+    case "EWOULDBLOCK":
+      return "would-block";
+    case "EALREADY":
+      return "already";
+    case "EBADF":
+      return "bad-descriptor";
+    case "EBUSY":
+      return "busy";
+    case "EDEADLK":
+      return "deadlock";
+    case "EDQUOT":
+      return "quota";
+    case "EEXIST":
+      return "exist";
+    case "EFBIG":
+      return "file-too-large";
+    case "EILSEQ":
+      return "illegal-byte-sequence";
+    case "EINPROGRESS":
+      return "in-progress";
+    case "EINTR":
+      return "interrupted";
+    case "EINVAL":
+      return "invalid";
+    case "EIO":
+      return "io";
+    case "EISDIR":
+      return "is-directory";
+    case "ELOOP":
+      return "loop";
+    case "EMLINK":
+      return "too-many-links";
+    case "EMSGSIZE":
+      return "message-size";
+    case "ENAMETOOLONG":
+      return "name-too-long";
+    case "ENODEV":
+      return "no-device";
+    case "ENOENT":
+      return "no-entry";
+    case "ENOLCK":
+      return "no-lock";
+    case "ENOMEM":
+      return "insufficient-memory";
+    case "ENOSPC":
+      return "insufficient-space";
+    case "ENOTDIR":
+    case "ERR_FS_EISDIR":
+      return "not-directory";
+    case "ENOTEMPTY":
+      return "not-empty";
+    case "ENOTRECOVERABLE":
+      return "not-recoverable";
+    case "ENOTSUP":
+      return "unsupported";
+    case "ENOTTY":
+      return "no-tty";
+    case -4094:
+    case "ENXIO":
+      return "no-such-device";
+    case "EOVERFLOW":
+      return "overflow";
+    case "EPERM":
+      return "not-permitted";
+    case "EPIPE":
+      return "pipe";
+    case "EROFS":
+      return "read-only";
+    case "ESPIPE":
+      return "invalid-seek";
+    case "ETXTBSY":
+      return "text-file-busy";
+    case "EXDEV":
+      return "cross-device";
+    case "UNKNOWN":
+      switch (e.errno) {
+        case -4094:
+          return "no-such-device";
+        default:
+          throw e;
+      }
+    default:
+      throw e;
+  }
+}
 
 // node_modules/@bytecodealliance/preview2-shim/lib/browser/random.js
 var MAX_BYTES = 65536;
