@@ -28,7 +28,9 @@ async function build() {
 
   await fs.mkdir('dist', { recursive: true });
   for (const [filename, source] of Object.entries(transpileResult.files)) {
-    await fs.writeFile(path.join('dist', filename), source);
+    const filePath = path.join('dist', filename);
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    await fs.writeFile(filePath, source);
   }
   console.log('3. Transpile Complete.');
 }
