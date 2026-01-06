@@ -93,8 +93,16 @@ class PacketRuntime {
                             args: { code: 'init' } // Optional init args
                         }
                     }, (response) => {
-                        if (!response?.success) {
-                            logger.error(this.logPrefix, 'Failed to start Wasm Agent:', response?.error);
+                        if (chrome.runtime.lastError) {
+                            logger.error(this.logPrefix, 'Message Error (offscreen):', chrome.runtime.lastError.message);
+                            return;
+                        }
+                        if (!response) {
+                            logger.error(this.logPrefix, 'Failed to start Wasm Agent: No response received (undefined).');
+                            return;
+                        }
+                        if (!response.success) {
+                            logger.error(this.logPrefix, 'Failed to start Wasm Agent:', response.error || 'Unknown Error');
                         } else {
                             logger.log(this.logPrefix, 'Wasm Agent started successfully.');
                         }
