@@ -57,28 +57,16 @@ async function executeAgentCode(codeString, payload) {
         const agentModule = await import(url);
 
         // 3. Run
-        if (agentModule.runCode) {
+        // 3. Run
+        if (agentModule.run) {
             console.log("[Sandbox] Running Agent (Eval Mode)...");
-            // Pass the code string to the agent. Ideally this comes from payload.code but 
-            // the current flow instantiates the blob URL *containing* the agent. 
-            // Wait, the Architecture is: 
-            // 1. debug_run_remote_agent fetches `agents/agent.js`
-            // 2. sends it to sandbox.
-            // 3. sandbox loads it.
-            // 
-            // Use Case: "Universal Eval Agent"
-            // The agent.js we just built is GENERIC. It expects `runCode(userCode)`.
-            // But currently `executeAgentCode` assumes the loaded module *starts* the work.
-            //
-            // FIX: We need to separate the "Agent Runtime" from the "User Code".
-            // For now, let's assume the `codeString` passed to `executeAgentCode` IS the `agent.js` bundle.
-            // But we need the *User's script* to pass to `runCode`.
-            //
-            // Hack for now: We will execute a hardcoded "Hello World" or accept a secondary payload.
-            // Better: update executeAgentCode signature.
-
             const userScript = payload.args?.code || "return 'No code provided'";
             const result = await agentModule.run(userScript);
+            window.parent.postMessage({ type: 'AGENT_EXECUTION_COMPLETE', result }, '*');
+        } else if (agentModule.runCode) {
+            console.log("[Sandbox] Running Agent (Legacy Mode)...");
+            const userScript = payload.args?.code || "return 'No code provided'";
+            const result = await agentModule.runCode(userScript);
             window.parent.postMessage({ type: 'AGENT_EXECUTION_COMPLETE', result }, '*');
         } else {
             throw new Error("Agent module does not export 'run'.");
@@ -97,14 +85,16 @@ async function executeAgentFromUrl(url, payload) {
         // Import module directly from the URL (host must support CORS or be same-origin/extension-scheme)
         const agentModule = await import(url);
 
-        if (agentModule.runCode) {
-            console.log("[Sandbox] Running Agent (Eval Mode)...");
-            const userScript = payload.args?.code || "return 'No code provided'";
-            const result = await agentModule.runCode(userScript);
-            window.parent.postMessage({ type: 'AGENT_EXECUTION_COMPLETE', result }, '*');
-        } else if (agentModule.run) {
+        if (agentModule.run) {
             console.log("[Sandbox] Running Agent (Standard Mode)...");
-            const result = await agentModule.run();
+            const userScript = payload.args?.code || "print('Hello from Agent')";
+            const result = await agentModule.run(userScript);
+            window.parent.postMessage({ type: 'AGENT_EXECUTION_COMPLETE', result }, '*');
+        } else if (agentModule.runCode) {
+            // Backward compatibility for older packets
+            console.log("[Sandbox] Running Agent (Legacy Mode)...");
+            const userScript = payload.args?.code || "print('Hello from Agent')";
+            const result = await agentModule.runCode(userScript);
             window.parent.postMessage({ type: 'AGENT_EXECUTION_COMPLETE', result }, '*');
         } else {
             throw new Error("Agent module does not export 'run' or 'runCode'.");
@@ -112,6 +102,7 @@ async function executeAgentFromUrl(url, payload) {
     } catch (e) {
         console.error("[Sandbox] URL Execution Error:", e);
         window.parent.postMessage({ type: 'AGENT_EXECUTION_COMPLETE', result: `Error: ${e.message}` }, '*');
+        throw e;
     }
 }
 
@@ -129,7 +120,7 @@ window.addEventListener('message', async (event) => {
     } else if (type === 'EXECUTE_AGENT_FROM_URL') {
         executeAgentFromUrl(payload.url, payload);
     } else if (type === 'EXECUTE_AGENT_FROM_SOURCE') {
-        const { code, shims } = payload;
+        const { code, shims, wasmFiles } = payload;
 
         // 0. Pre-process Shims to Replace Relative Imports
         // Shims import each other using relative paths like './io.js'
@@ -142,16 +133,26 @@ window.addEventListener('message', async (event) => {
                 let shimCode = shims[name];
                 // Replace relative imports of other shims
                 Object.keys(shims).forEach(otherName => {
-                    // Match: from './otherName.js' or from "./otherName.js"
-                    // We assume shims are flat in the same dir
                     const importRegex = new RegExp(`['"]\\.\\/${otherName}\\.js['"]`, 'g');
                     const placeholder = `__SHIM_${otherName.toUpperCase()}__`;
-                    shimCode = shimCode.replace(importRegex, `"${placeholder}"`); // Use quotes for valid syntax during intermediate step? 
-                    // Actually, we want the final code to be `from "blob:..."`
-                    // So we put the placeholder string alone.
-                    // But the placeholder is just a string token.
+                    shimCode = shimCode.replace(importRegex, `"${placeholder}"`);
                 });
                 processedShims[name] = shimCode;
+            });
+        }
+
+        const shimUrls = {};
+        const createdUrls = []; // Track for cleanup
+
+        // Handle Wasm Files
+        if (wasmFiles) {
+            console.log("[Sandbox] Wasm Files received:", Object.keys(wasmFiles));
+            Object.entries(wasmFiles).forEach(([filename, content]) => {
+                const blob = new Blob([content], { type: 'application/wasm' });
+                const url = URL.createObjectURL(blob);
+                shimUrls[filename] = url; // Store in map for replacement
+                createdUrls.push(url);
+                console.log(`[Sandbox] Created Blob for Wasm: ${filename} -> ${url}`);
             });
         }
 
@@ -195,8 +196,8 @@ window.addEventListener('message', async (event) => {
 
         // Does Chrome Extension Sandbox support Import Maps? It should (Chrome 89+).
 
-        const shimUrls = {};
-        const createdUrls = []; // Track for cleanup
+        // const shimUrls = {}; // MOVED UP
+        // const createdUrls = []; // MOVED UP
 
         // Rewrite imports in Shims to be Map-friendly keys
         // We'll use bare specifiers like "shim/io"
@@ -390,6 +391,40 @@ window.addEventListener('message', async (event) => {
         while ((importMatch = importRegex.exec(code)) !== null) {
             const [fullStr, distinctImports, specifier] = importMatch;
 
+            if (specifier.startsWith('component:agent/')) {
+                console.log(`[Sandbox] Found Host Component import: ${specifier}`);
+                const parts = specifier.split('/');
+                const name = parts[1]; // host-capabilities or host-console
+                let adapterCode = '';
+                if (name === 'host-capabilities') {
+                    adapterCode = `
+                        export const ask = async (prompt) => {
+                            return await globalThis.JCO_BRIDGE.ask(prompt);
+                        };
+                    `;
+                } else if (name === 'host-console') {
+                    adapterCode = `
+                        export const log = (msg) => {
+                            globalThis.JCO_BRIDGE.log(msg);
+                        };
+                    `;
+                }
+                if (adapterCode) {
+                    const blob = new Blob([adapterCode], { type: 'text/javascript' });
+                    const url = URL.createObjectURL(blob);
+                    adapterUrls.push(url);
+
+                    // Safer Replacement for Host Components too
+                    finalAgentCode = finalAgentCode.replaceAll(`from '${specifier}'`, `from '${url}'`);
+                    finalAgentCode = finalAgentCode.replaceAll(`from "${specifier}"`, `from '${url}'`);
+                    finalAgentCode = finalAgentCode.replaceAll(`import('${specifier}')`, `import('${url}')`);
+                    finalAgentCode = finalAgentCode.replaceAll(`import("${specifier}")`, `import('${url}')`);
+
+                    console.log(`[Sandbox] Mocked Host Component ${specifier} -> ${url}`);
+                }
+                continue;
+            }
+
             if (!specifier.startsWith('wasi:')) {
                 continue;
             }
@@ -434,17 +469,19 @@ window.addEventListener('message', async (event) => {
             // import { stderr } from 'blob:...';
             // export const getStderr = stderr.getStderr;
 
-            let adapterCode = `import { ${resourceName} } from '${shimUrl}';\n`;
+            // FIX: Alias the import to avoid collision if the exported member has the same name as the resource
+            // e.g. import { poll as _poll } ... export const poll = _poll.poll;
+
+            let adapterCode = `import { ${resourceName} as _${resourceName} } from '${shimUrl}';\n`;
             members.forEach(member => {
-                // Handle alias "foo as bar"
+                // Handle alias "foo as bar" in the *importing* code (agent)
+                // member string is like "poll as poll$1"
                 const parts = member.split(/\s+as\s+/);
                 const localName = parts[0];
-                const exportName = parts[1] || localName;
+                // The adapter must export `localName` because that's what the agent module asks for.
+                // The agent might rename it locally to `poll$1`, but it executes `import { poll }` against our adapter.
 
-                // If the member is TitleCase (e.g. TerminalInput), it might be a Class on the resource object.
-                // If it is camelCase (getTerminalStdin), it might be a method.
-                // In ANY case, it is a property of the resource object.
-                adapterCode += `export const ${exportName} = ${resourceName}.${localName};\n`;
+                adapterCode += `export const ${localName} = _${resourceName}.${localName};\n`;
             });
 
             console.log(`[Sandbox] Created Adapter for ${specifier}:\n${adapterCode}`);
@@ -453,14 +490,41 @@ window.addEventListener('message', async (event) => {
             adapterUrls.push(url);
 
             // Replace in Agent Code
-            // Use global replace for this specifier
-            // Note: Specifier might appear in multiple import statements?
-            // "import { a } from 's'; import { b } from 's';"
-            // We replace the specifier string.
-            // Escape literal specifier?
-            const specRegex = new RegExp(`['"]${specifier}['"]`, 'g');
-            finalAgentCode = finalAgentCode.replace(specRegex, `'${url}'`);
+            // Safer Replacement: Only replace 'from "specifier"' or 'import("specifier")'
+            // We use replaceAll with specific patterns to avoid breaking strings inside error messages or debug logs
+
+            // 1. Static Imports: from "specifier"
+            finalAgentCode = finalAgentCode.replaceAll(`from '${specifier}'`, `from '${url}'`);
+            finalAgentCode = finalAgentCode.replaceAll(`from "${specifier}"`, `from '${url}'`);
+
+            // 2. Dynamic Imports: import("specifier")
+            finalAgentCode = finalAgentCode.replaceAll(`import('${specifier}')`, `import('${url}')`);
+            finalAgentCode = finalAgentCode.replaceAll(`import("${specifier}")`, `import('${url}')`);
         }
+        // Replace Wasm file references in the code
+        // IMPORTANT: JCO generates `new URL('./agent.core.wasm', import.meta.url)`
+        // We need to replace this pattern with the Blob URL string.
+        if (wasmFiles) {
+            Object.keys(wasmFiles).forEach(filename => {
+                const url = shimUrls[filename];
+                if (url) {
+                    const escapedFilename = filename.replace(/\./g, '\\.');
+                    // Regex to match `new URL('./filename', import.meta.url)` 
+                    const pattern = `new\\s+URL\\(\\s*(['"])(\\.?\\/)?${escapedFilename}\\1\\s*,\\s*import\\.meta\\.url\\s*\\)`;
+                    const re = new RegExp(pattern, 'g');
+
+                    if (re.test(finalAgentCode)) {
+                        console.log(`[Sandbox] Replacing Wasm new URL(...) for ${filename}`);
+                        finalAgentCode = finalAgentCode.replace(re, `'${url}'`);
+                    } else {
+                        // Fallback
+                        const reLiteral = new RegExp(`(['"])(\\.?\\/)?${escapedFilename}\\1`, 'g');
+                        finalAgentCode = finalAgentCode.replace(reLiteral, `'${url}'`);
+                    }
+                }
+            });
+        }
+
         createdUrls.push(...adapterUrls);
 
         if (shims) {
@@ -481,6 +545,26 @@ window.addEventListener('message', async (event) => {
         // No Import Map needed!
         try {
             await executeAgentFromUrl(agentUrl, payload);
+        } catch (e) {
+            console.error("[Sandbox] Execution Failed:", e);
+            if (e instanceof SyntaxError) {
+                // Attempt to find line number from stack trace or error
+                // Format often: ... (at blob:url:Line:Col)
+                const match = e.stack?.match(/:(\d+):(\d+)\)/);
+                if (match) {
+                    const line = parseInt(match[1], 10);
+                    const lines = finalAgentCode.split('\n');
+                    const start = Math.max(0, line - 10);
+                    const end = Math.min(lines.length, line + 10);
+                    console.log(`[Sandbox] Syntax Error Context (Lines ${start}-${end}):`);
+                    console.log(lines.slice(start, end).map((l, i) => `${start + i + 1}: ${l}`).join('\n'));
+                } else {
+                    console.log("[Sandbox] Code excerpt (lines 5400-5450):");
+                    const lines = finalAgentCode.split('\n');
+                    console.log(lines.slice(5400, 5450).map((l, i) => `${5400 + i + 1}: ${l}`).join('\n'));
+                }
+            }
+            throw e;
         } finally {
             createdUrls.forEach(u => URL.revokeObjectURL(u));
         }
