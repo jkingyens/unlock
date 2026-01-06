@@ -2,6 +2,9 @@ import { ask } from 'component:agent/host-capabilities';
 import { log } from 'component:agent/host-console';
 
 export async function run(code) {
+  if (code === 'init') {
+    return "JS Agent Initialized";
+  }
   log(`[Agent] Evaluating code length: ${code.length}`);
   try {
     // 1. Basic Eval
