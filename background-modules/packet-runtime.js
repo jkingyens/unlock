@@ -33,7 +33,45 @@ class PacketRuntime {
     }
 
     async start() {
+        if (this.instance.completed) {
+            logger.log(this.logPrefix, 'Packet already completed. Skipping agent execution.');
+            return;
+        }
+
         await ruleManager.addOrUpdatePacketRules(this.instance);
+
+        // Check for JS Module Agents (Pre-transpiled)
+        const moduleItem = this.orderedContent.find(item => item.format === 'module');
+        if (moduleItem) {
+            logger.log(this.logPrefix, 'Found JS Module Agent, initializing...', moduleItem);
+            try {
+                await setupOffscreenDocument();
+                let agentCode = moduleItem.content || '';
+
+                // If content is base64 (unlikely for module but possible if generic), decode it?
+                // But typically 'module' format implies text content in 'content' field.
+                // If it uses contentB64, we decode.
+                if (!agentCode && moduleItem.contentB64) {
+                    const bin = Uint8Array.from(atob(moduleItem.contentB64), c => c.charCodeAt(0));
+                    agentCode = new TextDecoder().decode(bin);
+                }
+
+                if (agentCode) {
+                    chrome.runtime.sendMessage({
+                        target: 'offscreen',
+                        type: 'execute_js_agent',
+                        data: {
+                            instanceId: this.instance.instanceId,
+                            code: agentCode,
+                            args: { code: 'init' }
+                        }
+                    });
+                }
+            } catch (e) {
+                logger.error(this.logPrefix, 'Failed to launch JS Agent:', e);
+            }
+            return;
+        }
 
         // Check for Wasm Agents to execute
         const wasmItem = this.orderedContent.find(item => item.format === 'wasm');
@@ -89,6 +127,7 @@ class PacketRuntime {
                         target: 'offscreen',
                         type: 'execute_raw_wasm',
                         data: {
+                            instanceId: this.instance.instanceId,
                             wasmB64: agentUrl,
                             args: { code: 'init' } // Optional init args
                         }
@@ -186,7 +225,9 @@ class PacketRuntime {
             await this._updateBrowserState(tabId, url);
 
             const itemForVisitTimer = this.orderedContent.find(i => i.url === finalContext.canonicalPacketUrl);
-            if (itemForVisitTimer && !itemForVisitTimer.interactionBasedCompletion) {
+            // [FIX] Wasm/Module agents manage their own completion via Quest API.
+            // Do NOT start visit timer for them.
+            if (itemForVisitTimer && !itemForVisitTimer.interactionBasedCompletion && itemForVisitTimer.format !== 'wasm' && itemForVisitTimer.format !== 'module') {
                 startVisitTimer(tabId, this.instance.instanceId, itemForVisitTimer.url, this.logPrefix);
             }
 
@@ -292,6 +333,24 @@ class PacketRuntime {
         await storage.deletePacketBrowserState(this.instance.instanceId);
     }
 
+    async sendNavigationEvent(url) {
+        // Only valid if we have a Wasm/JS agent running
+        const agentItem = this.orderedContent.find(item => item.format === 'wasm' || item.format === 'module');
+        if (!agentItem) return;
+
+        logger.log(this.logPrefix, `Dispatching Navigation Event to Agent: ${url}`);
+
+        chrome.runtime.sendMessage({
+            target: 'offscreen',
+            type: 'dispatch_navigate', // Handled by offscreen.js -> forwards to sandbox
+            data: { url }
+        }, (response) => {
+            if (chrome.runtime.lastError) {
+                // Ignore, offscreen might not be ready or agent not listening
+            }
+        });
+    }
+
     async _updateBrowserState(tabId, currentUrl) {
         const browserState = await storage.getPacketBrowserState(this.instance.instanceId) || { instanceId: this.instance.instanceId, tabGroupId: null, activeTabIds: [], lastActiveUrl: null };
         let stateModified = false;
@@ -315,6 +374,8 @@ class PacketRuntime {
         }
         if (stateModified) {
             await storage.savePacketBrowserState(browserState);
+            // Notify the agent about the navigation/state update
+            this.sendNavigationEvent(currentUrl);
         }
     }
 }

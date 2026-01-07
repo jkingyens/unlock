@@ -439,13 +439,20 @@ async function handleBackgroundMessage(message) {
         case 'packet_instance_updated':
             if (currentView === 'root') {
                 rootView.updateInstanceRowUI(data.instance);
-            } else if (currentView === 'packet-detail' && currentInstanceId === data.instance.instanceId) {
-                // Ensure local state is updated with authoritative source
-                currentInstanceData = data.instance;
+            } else if (currentView === 'packet-detail') {
+                // Update if: 1) IDs match, OR 2) we're in detail view but ID not set yet (initialization race)
+                const shouldUpdate = currentInstanceId === data.instance.instanceId ||
+                    (!currentInstanceId && data.instance.instanceId);
 
-                storage.getPacketBrowserState(data.instance.instanceId).then(browserState => {
-                    detailView.displayPacketContent(data.instance, browserState, currentPacketUrl);
-                });
+                if (shouldUpdate) {
+                    // Ensure local state is updated with authoritative source
+                    currentInstanceData = data.instance;
+                    currentInstanceId = data.instance.instanceId;
+
+                    storage.getPacketBrowserState(data.instance.instanceId).then(browserState => {
+                        detailView.displayPacketContent(data.instance, browserState, currentPacketUrl);
+                    });
+                }
             }
             break;
         case 'packet_instance_deleted':

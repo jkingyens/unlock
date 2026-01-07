@@ -9,8 +9,8 @@ async function build() {
     await fs.readFile('agent.js', 'utf8'),
     {
       witPath: '../agent.wit',
-      worldName: 'agent-v1',
-      disable: ['clocks', 'http', 'random', 'stdio']
+      worldName: 'quest-agent', // Updated World Name
+      outDir: 'dist'
     }
   );
   await fs.writeFile('component.wasm', component);

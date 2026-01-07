@@ -11,12 +11,11 @@ pip install componentize-py
 
 
 echo "3. Building Component..."
-mkdir -p wit
+mkdir -p wit dist
 cp ../agent.wit wit/
-componentize-py -d wit -w agent-v1 componentize agent -o component.wasm
+componentize-py -d ../agent.wit -w quest-agent componentize agent -o dist/agent.wasm
 
 echo "4. Packaging Packet..."
-rm -rf dist
 node package-packet.mjs
 
 echo "✅ Success! Packet created in 'dist/packet.json'."

@@ -1106,6 +1106,82 @@ const actionHandlers = {
     'apply_proposed_settings': (data, s, r) => handleApplyProposedSettings(data, s, r),
     'expand_tab_group_for_instance': (data, s, r) => tabGroupHandler.setGroupCollapsedState(data.instanceId, false).then(r),
     'collapse_tab_group_for_instance': (data, s, r) => tabGroupHandler.setGroupCollapsedState(data.instanceId, true).then(r),
+
+    // Quest API Handlers
+    'quest_register_item': async (data, sender, sendResponse) => {
+        const { instanceId, id, url, title, type } = data;
+        try {
+            const instance = await storage.getPacketInstance(instanceId);
+            if (!instance) {
+                return sendResponse({ success: false, error: 'Instance not found' });
+            }
+
+            // Add item to instance contents
+            const newItem = {
+                id,
+                url,
+                title: title || url,
+                format: type || 'webpage',
+                origin: 'agent-generated'
+            };
+
+            instance.contents = instance.contents || [];
+            instance.contents.push(newItem);
+
+            await storage.savePacketInstance(instance);
+            sidebarHandler.notifySidebar('packet_instance_updated', { instance });
+            sendResponse({ success: true });
+        } catch (error) {
+            sendResponse({ success: false, error: error.message });
+        }
+    },
+
+    'quest_register_task': async (data, sender, sendResponse) => {
+        const { instanceId, id, title, desc } = data;
+        logger.log('QuestAPI', `Task registered: ${id} - ${title}`);
+        // Tasks are stored in sidebar state, not persistent storage
+        sidebarHandler.notifySidebar('quest_task_registered', { instanceId, id, title, desc });
+        sendResponse({ success: true });
+    },
+
+    'quest_update_task': async (data, sender, sendResponse) => {
+        const { instanceId, id, taskId, status } = data;
+        logger.log('QuestAPI', `Task updated: ${taskId} -> ${status}`);
+
+        // If task is completed, mark the instance as completed
+        if (status === 'completed') {
+            try {
+                const instance = await storage.getPacketInstance(instanceId);
+                if (instance) {
+                    instance.completed = true;
+                    await storage.savePacketInstance(instance);
+                    sidebarHandler.notifySidebar('packet_instance_updated', { instance });
+                }
+            } catch (error) {
+                logger.error('QuestAPI', 'Error marking instance complete:', error);
+            }
+        }
+
+        sidebarHandler.notifySidebar('quest_task_updated', { instanceId, id, taskId, status });
+        sendResponse({ success: true });
+    },
+
+    'quest_notify': async (data, sender, sendResponse) => {
+        const { instanceId, message } = data;
+        logger.log('QuestAPI', `Notification: ${message}`);
+        sidebarHandler.notifySidebar('quest_notification', { instanceId, message });
+        sendResponse({ success: true });
+    },
+
+    'quest_get_url': async (data, sender, sendResponse) => {
+        // Return the current active tab URL
+        try {
+            const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+            sendResponse({ success: true, data: activeTab?.url || '' });
+        } catch (error) {
+            sendResponse({ success: false, error: error.message });
+        }
+    },
 };
 
 export function handleMessage(message, sender, sendResponse) {

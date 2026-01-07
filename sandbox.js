@@ -2,27 +2,38 @@
 console.log("[Sandbox] Initialized. SharedArrayBuffer:", typeof SharedArrayBuffer !== 'undefined', "WebAssembly.promising:", typeof WebAssembly.promising);
 
 const pendingRequests = new Map();
+let requestIdCounter = 0;
+let currentInstanceId = null;
 
-function bridgeCall(type, data) {
-    const requestId = crypto.randomUUID();
+function callHost(type, data) {
     return new Promise((resolve, reject) => {
+        const requestId = requestIdCounter++;
         pendingRequests.set(requestId, { resolve, reject });
-        window.parent.postMessage({ type, requestId, ...data }, '*');
+        window.parent.postMessage({ type, requestId, data: { ...data, instanceId: currentInstanceId } }, '*');
     });
 }
 
 // 1. Define Global Bridge (Accessed by the bundled bridge-impl.js)
 globalThis.JCO_BRIDGE = {
     ask: async (prompt) => {
-        console.log("[Sandbox] Asking AI:", prompt);
+        console.log('[Sandbox] Asking AI:', prompt);
         try {
-            const result = await bridgeCall('BRIDGE_AI_REQUEST', { prompt });
+            const result = await callHost('BRIDGE_AI_REQUEST', { prompt });
             return String(result);
         } catch (e) {
-            return `Error: ${e.message}`;
+            return 'Error: ' + (e.message || String(e));
         }
     },
-    log: (msg) => console.log(`[Sandbox Agent] ${msg}`)
+    log: (msg) => {
+        console.log('[Sandbox Agent]', msg);
+    },
+    quest: {
+        registerTask: (id, title, desc) => callHost('quest_register_task', { id, title, desc }),
+        updateTask: (id, taskId, status) => callHost('quest_update_task', { id, taskId, status }),
+        notifyPlayer: (message) => callHost('quest_notify', { message }),
+        getCurrentUrl: () => callHost('quest_get_url', {}),
+        registerItem: (id, url, title, type) => callHost('quest_register_item', { id, url, title, type })
+    }
 };
 
 window.addEventListener('message', (event) => {
@@ -31,7 +42,7 @@ window.addEventListener('message', (event) => {
     if (type === 'BRIDGE_AI_RESPONSE') {
         const resolver = pendingRequests.get(requestId);
         if (resolver) {
-            resolver.resolve(success ? data : `Error: ${data}`);
+            resolver.resolve(success ? data : `Error: ${data} `);
             pendingRequests.delete(requestId);
         }
     }
@@ -47,45 +58,43 @@ window.addEventListener('message', (event) => {
 
 async function executeAgentCode(codeString, payload) {
     try {
-        console.log("[Sandbox] Loading Agent...");
+        console.log("[Sandbox] Loading Agent (Eval Code)...");
         const blob = new Blob([codeString], { type: 'text/javascript' });
         const url = URL.createObjectURL(blob);
-
-        // 2. Import the Bundled Module
-        // This module self-instantiates because we inlined the Wasm.
-        // It self-wires because we bundled the bridge.
-        const agentModule = await import(url);
-
-        // 3. Run
-        // 3. Run
-        if (agentModule.run) {
-            console.log("[Sandbox] Running Agent (Eval Mode)...");
-            const userScript = payload.args?.code || "return 'No code provided'";
-            const result = await agentModule.run(userScript);
-            window.parent.postMessage({ type: 'AGENT_EXECUTION_COMPLETE', result }, '*');
-        } else if (agentModule.runCode) {
-            console.log("[Sandbox] Running Agent (Legacy Mode)...");
-            const userScript = payload.args?.code || "return 'No code provided'";
-            const result = await agentModule.runCode(userScript);
-            window.parent.postMessage({ type: 'AGENT_EXECUTION_COMPLETE', result }, '*');
-        } else {
-            throw new Error("Agent module does not export 'run'.");
+        try {
+            await executeAgentFromUrl(url, payload);
+        } finally {
+            URL.revokeObjectURL(url);
         }
-
-        URL.revokeObjectURL(url);
     } catch (e) {
         console.error("[Sandbox] Execution Error:", e);
-        window.parent.postMessage({ type: 'AGENT_EXECUTION_COMPLETE', result: `Error: ${e.message}` }, '*');
+        window.parent.postMessage({ type: 'AGENT_EXECUTION_COMPLETE', result: `Error: ${e.message} ` }, '*');
     }
 }
 
 async function executeAgentFromUrl(url, payload) {
     try {
         console.log("[Sandbox] Loading Agent from URL:", url);
+        currentInstanceId = payload.instanceId; // Set current Instance ID
         // Import module directly from the URL (host must support CORS or be same-origin/extension-scheme)
         const agentModule = await import(url);
 
-        if (agentModule.run) {
+        activeAgentModule = agentModule;
+
+        // Debug: Log all available exports
+        console.log("[Sandbox] Agent exports:", Object.keys(agentModule));
+
+        // Python componentize-py wraps exports in an 'exports' object
+        if (agentModule.init) {
+            console.log("[Sandbox] Initializing Quest Agent (JavaScript)...");
+            await agentModule.init();
+            window.parent.postMessage({ type: 'AGENT_EXECUTION_COMPLETE', result: "Quest Initialized" }, '*');
+        } else if (agentModule.exports && agentModule.exports.init) {
+            console.log("[Sandbox] Initializing Quest Agent (Python)...");
+            activeAgentModule = agentModule.exports;
+            await agentModule.exports.init();
+            window.parent.postMessage({ type: 'AGENT_EXECUTION_COMPLETE', result: "Quest Initialized" }, '*');
+        } else if (agentModule.run) {
             console.log("[Sandbox] Running Agent (Standard Mode)...");
             const userScript = payload.args?.code || "print('Hello from Agent')";
             const result = await agentModule.run(userScript);
@@ -97,23 +106,37 @@ async function executeAgentFromUrl(url, payload) {
             const result = await agentModule.runCode(userScript);
             window.parent.postMessage({ type: 'AGENT_EXECUTION_COMPLETE', result }, '*');
         } else {
-            throw new Error("Agent module does not export 'run' or 'runCode'.");
+            throw new Error("Agent module does not export 'init', 'run', or 'runCode'.");
         }
     } catch (e) {
         console.error("[Sandbox] URL Execution Error:", e);
-        window.parent.postMessage({ type: 'AGENT_EXECUTION_COMPLETE', result: `Error: ${e.message}` }, '*');
+        window.parent.postMessage({ type: 'AGENT_EXECUTION_COMPLETE', result: `Error: ${e.message} ` }, '*');
         throw e;
     }
 }
 
+// Store active agent module to dispatch events
+let activeAgentModule = null;
+
 window.addEventListener('message', async (event) => {
     const { type, requestId, success, data, payload } = event.data;
 
-    if (type === 'BRIDGE_AI_RESPONSE') {
+    // Handle generic Host Responses (for callHost)
+    if (type === 'HOST_RESPONSE' || type === 'BRIDGE_AI_RESPONSE') {
         const resolver = pendingRequests.get(requestId);
         if (resolver) {
-            resolver.resolve(success ? data : `Error: ${data}`);
+            resolver.resolve(success ? data : `Error: ${data} `);
             pendingRequests.delete(requestId);
+        }
+    } else if (type === 'NAVIGATE') {
+        // Dispatch navigation event to the agent
+        if (activeAgentModule && activeAgentModule.onVisit) {
+            console.log(`[Sandbox] Dispatching onVisit('${payload.url}')`);
+            try {
+                activeAgentModule.onVisit(payload.url);
+            } catch (e) {
+                console.error("[Sandbox] onVisit error:", e);
+            }
         }
     } else if (type === 'EXECUTE_AGENT') {
         executeAgentCode(payload.code, payload);
@@ -391,11 +414,13 @@ window.addEventListener('message', async (event) => {
         while ((importMatch = importRegex.exec(code)) !== null) {
             const [fullStr, distinctImports, specifier] = importMatch;
 
+            let adapterCode = '';
+
             if (specifier.startsWith('component:agent/')) {
                 console.log(`[Sandbox] Found Host Component import: ${specifier}`);
                 const parts = specifier.split('/');
                 const name = parts[1]; // host-capabilities or host-console
-                let adapterCode = '';
+
                 if (name === 'host-capabilities') {
                     adapterCode = `
                         export const ask = async (prompt) => {
@@ -409,21 +434,50 @@ window.addEventListener('message', async (event) => {
                         };
                     `;
                 }
-                if (adapterCode) {
-                    const blob = new Blob([adapterCode], { type: 'text/javascript' });
-                    const url = URL.createObjectURL(blob);
-                    adapterUrls.push(url);
-
-                    // Safer Replacement for Host Components too
-                    finalAgentCode = finalAgentCode.replaceAll(`from '${specifier}'`, `from '${url}'`);
-                    finalAgentCode = finalAgentCode.replaceAll(`from "${specifier}"`, `from '${url}'`);
-                    finalAgentCode = finalAgentCode.replaceAll(`import('${specifier}')`, `import('${url}')`);
-                    finalAgentCode = finalAgentCode.replaceAll(`import("${specifier}")`, `import('${url}')`);
-
-                    console.log(`[Sandbox] Mocked Host Component ${specifier} -> ${url}`);
+            } else if (specifier.startsWith('component:quest-v1/')) {
+                console.log(`[Sandbox] Found Quest V1 import: ${specifier}`);
+                const parts = specifier.split('/');
+                const name = parts[1]; // host-quest-manager or host-events
+                if (name === 'host-quest-manager') {
+                    // We need to alias the imports to avoid collisions if multiple things are imported
+                    adapterCode = `
+                         export const registerTask = (qid, tid, desc) => globalThis.JCO_BRIDGE.quest.registerTask(qid, tid, desc);
+                         export const updateTask = (qid, tid, s) => globalThis.JCO_BRIDGE.quest.updateTask(qid, tid, s);
+                         export const notifyPlayer = (msg) => globalThis.JCO_BRIDGE.quest.notifyPlayer(msg);
+                         export const status = { locked: 'locked', active: 'active', completed: 'completed', failed: 'failed' };
+                     `;
+                } else if (name === 'host-events') {
+                    adapterCode = `
+                         export const getCurrentUrl = () => globalThis.JCO_BRIDGE.quest.getCurrentUrl();
+                      `;
+                } else if (name === 'host-console') {
+                    adapterCode = `
+                          export const log = (msg) => globalThis.JCO_BRIDGE.log(msg);
+                       `;
+                } else if (name === 'host-content') {
+                    adapterCode = `
+                         export const registerItem = (id, url, title, type) => globalThis.JCO_BRIDGE.quest.registerItem(id, url, title, type);
+                      `;
                 }
+            }
+
+            if (adapterCode) {
+                const blob = new Blob([adapterCode], { type: 'text/javascript' });
+                const url = URL.createObjectURL(blob);
+                adapterUrls.push(url);
+
+                // Safer Replacement for Host Components too
+                finalAgentCode = finalAgentCode.replaceAll(`from '${specifier}'`, `from '${url}'`);
+                finalAgentCode = finalAgentCode.replaceAll(`from "${specifier}"`, `from '${url}'`);
+                finalAgentCode = finalAgentCode.replaceAll(`import('${specifier}')`, `import('${url}')`);
+                finalAgentCode = finalAgentCode.replaceAll(`import("${specifier}")`, `import('${url}')`);
+
+                console.log(`[Sandbox] Mocked Host Component ${specifier} -> ${url}`);
+                console.log(`[Sandbox] Mocked Host Component ${specifier} -> ${url}`);
                 continue;
             }
+
+
 
             if (!specifier.startsWith('wasi:')) {
                 continue;

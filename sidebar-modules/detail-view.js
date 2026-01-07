@@ -596,11 +596,27 @@ async function createCardsSection(instance) {
     cardsWrapper.id = 'detail-cards-container';
 
     if (instance.contents && instance.contents.length > 0) {
-        const cardPromises = instance.contents.map(item => createContentCard(item, instance));
-        const cards = await Promise.all(cardPromises);
-        cards.forEach(card => {
-            if (card) cardsWrapper.appendChild(card);
-        });
+        // Filter out wasm/module items - they run in background and shouldn't be displayed
+        const displayableItems = instance.contents.filter(item =>
+            item.format !== 'wasm' && item.format !== 'module'
+        );
+
+        if (displayableItems.length > 0) {
+            const cardPromises = displayableItems.map(item => createContentCard(item, instance));
+            const cards = await Promise.all(cardPromises);
+            cards.forEach(card => {
+                if (card) cardsWrapper.appendChild(card);
+            });
+        } else {
+            // Check if there are Wasm/Module items (agent is initializing)
+            const hasAgent = instance.contents.some(item =>
+                item.format === 'wasm' || item.format === 'module'
+            );
+            const message = hasAgent
+                ? 'Agent is initializing...'
+                : 'This packet has no content items.';
+            cardsWrapper.innerHTML = `<div class="empty-state">${message}</div>`;
+        }
     } else {
         cardsWrapper.innerHTML = '<div class="empty-state">This packet has no content items.</div>';
     }
@@ -725,11 +741,17 @@ async function createContentCard(contentItem, instance) {
                 <div class="card-url">Click to Activate Input Capture</div>
             </div>`;
         isClickable = true;
-    } else if (format === 'wasm') {
-        let iconHTML = '🤖';
-        card.innerHTML = `<div class="card-icon">${iconHTML}</div><div class="card-text"><div class="card-title">${title}</div><div class="card-url">Background Agent</div></div>`;
-        card.style.opacity = '1.0';
-        isClickable = false; // Wasm agents run automatically, not clickable by user
+    } else if (format === 'wasm' || format === 'module') {
+        // Wasm/Module items are filtered out in createCardsSection, but keep this for safety
+        return null;
+    } else if (format === 'webpage') {
+        // Agent-generated webpage items
+        let iconHTML = '🌐';
+        let displayUrl = '';
+        try { displayUrl = new URL(url).hostname.replace(/^www\./, ''); } catch (e) { displayUrl = url || '(URL missing)'; }
+
+        card.innerHTML = `<div class="card-icon">${iconHTML}</div><div class="card-text"><div class="card-title">${title}</div><div class="card-url">${displayUrl}</div>${context ? `<div class="card-relevance">${context}</div>` : ''}</div>`;
+        isClickable = true;
     } else {
         card.innerHTML = `<div class="card-icon">❓</div><div class="card-text"><div class="card-title">${title}</div><div class="card-url">Unknown item type: ${format}</div></div>`;
         card.style.opacity = '0.6';

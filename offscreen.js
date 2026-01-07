@@ -212,6 +212,54 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
 
 
 
+            case 'execute_js_agent':
+                (async () => {
+                    console.log("[Offscreen] Received execute_js_agent request");
+                    try {
+                        let jsSource = request.data.code;
+                        console.log("[Offscreen] JS Source length:", jsSource.length);
+
+                        // 1. Fetch Shim Content (Needed for Sandbox Import Map)
+                        const shimNames = ['cli', 'clocks', 'filesystem', 'http', 'io', 'random', 'sockets', 'environment', 'config'];
+                        const shims = {};
+
+                        // We fetch shims because the Agent (even pre-bundled) might rely on the Sandbox 
+                        // to provide specific environment bindings via import map, or simply 'component-runtime'.
+                        console.log("[Offscreen] Fetching shim sources...");
+                        await Promise.all(shimNames.map(async (name) => {
+                            const url = chrome.runtime.getURL(`agents/shims/${name}.js`);
+                            const res = await fetch(url);
+                            const text = await res.text();
+                            shims[name] = text;
+                        }));
+                        console.log("[Offscreen] Fetched shims:", Object.keys(shims));
+
+                        // 2. Send to Sandbox
+                        const sandboxFrame = document.getElementById('sandbox-frame');
+                        if (sandboxFrame && sandboxFrame.contentWindow) {
+                            if (!isSandboxReady) await new Promise(r => setTimeout(r, 1000));
+
+                            sandboxFrame.contentWindow.postMessage({
+                                type: 'EXECUTE_AGENT_FROM_SOURCE',
+                                payload: {
+                                    ...request.data,
+                                    code: jsSource,
+                                    shims: shims,
+                                    wasmFiles: {} // No separate Wasm files (inlined)
+                                }
+                            }, '*');
+                            console.log("[Offscreen] Pre-transpiled Agent sent to sandbox.");
+                            sendResponse({ success: true });
+                        } else {
+                            throw new Error("Sandbox frame not ready");
+                        }
+                    } catch (e) {
+                        console.error("[Offscreen] Error executing JS Agent:", e);
+                        sendResponse({ success: false, error: e.toString() });
+                    }
+                })();
+                return true;
+
             case 'execute_raw_wasm':
                 (async () => {
                     console.log("[Offscreen] Received execute_raw_wasm request");
@@ -404,16 +452,30 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
                             sendResponse({ success: true, text: result.data.text });
                         } catch (error) {
                             console.error('[Offscreen-OCR] Error:', error);
-                            // Ensure error is a string
                             const errorMessage = error ? (error.message || error.toString()) : "Unknown OCR Error";
                             sendResponse({ success: false, error: errorMessage });
                         }
                     })();
                     return true;
-                } else {
-                    sendResponse({ success: false, error: 'No image data provided.' });
-                    return false;
                 }
+                sendResponse({ success: false, error: 'No image data provided.' });
+                return false;
+
+            case 'dispatch_navigate':
+                const sandbox = document.getElementById('sandbox-frame');
+                if (sandbox && sandbox.contentWindow) {
+                    sandbox.contentWindow.postMessage({
+                        type: 'NAVIGATE',
+                        requestId: request.requestId || Date.now(),
+                        payload: { url: request.data.url }
+                    }, '*');
+                    console.log(`[Offscreen] Forwarded NAVIGATE to sandbox: ${request.data.url}`);
+                    sendResponse({ success: true });
+                } else {
+                    console.warn("[Offscreen] No sandbox frame found to dispatch NAVIGATE.");
+                    sendResponse({ success: false, error: 'Sandbox not found' });
+                }
+                return false;
             case 'normalize-audio':
                 if (request.data && request.data.base64) {
                     normalizeAudioAndGetDuration(base64ToAb(request.data.base64)).then(result => {
@@ -452,6 +514,26 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
                 const payload = sandboxMessageQueue.shift();
                 sandboxFrame.contentWindow.postMessage(payload, '*');
             }
+            return;
+        }
+
+        // --- QUEST / HOST BRIDGE ---
+        if (type.startsWith('quest_')) {
+            console.log(`[Offscreen] Bridging ${type} to Background`);
+            // Map 'type' to 'action' for the background message handler
+            chrome.runtime.sendMessage({
+                action: type,
+                data: event.data.data // Pass the inner data object (includes instanceId)
+            }, (response) => {
+                const result = response ? response.result : null;
+                const error = response ? response.error : chrome.runtime.lastError?.message;
+                sandboxFrame.contentWindow.postMessage({
+                    type: 'HOST_RESPONSE',
+                    requestId,
+                    success: !error,
+                    data: error || result
+                }, '*');
+            });
             return;
         }
 
@@ -528,77 +610,162 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
     function patchAgentSource(code) {
         console.log("[Patch] Starting JSPI Patch on code length:", code.length);
 
-        // 1. Find trampoline for 'ask' and patch it
-        const trampolineRegex = /function\s+(trampoline\d+)\(([^)]+)\)\s*\{[^}]*ask\(result0\)[^}]*\}/s;
-        const match = code.match(trampolineRegex);
+        const hostFunctions = ['log', 'registerTask', 'updateTask', 'notifyPlayer', 'getCurrentUrl', 'registerItem', 'ask'];
 
-        if (match) {
-            console.log("[Patch] Found trampoline:", match[1]);
-            const funcName = match[1];
-            const args = match[2];
+        for (const func of hostFunctions) {
+            // Regex to find ANY trampoline that calls this function
+            // We search for: function trampolineXX(...) { ... func( ... }
+            // NOTE: We use a simplified regex that finds the trampoline name, then checks content
 
-            // Make trampoline async
-            code = code.replace(
-                `function ${funcName}(${args}) {`,
-                `async function ${funcName}(${args}) {`
-            );
+            // We'll scan for all trampoline definitions first? 
+            // Better: Scan specifically for the ones calling our function.
+            // Regex: function\s+(trampoline\d+)\(([^)]+)\)\s*\{[^}]*\bfunc\(
+            const trampolineRegex = new RegExp(`function\\s+(trampoline\\d+)\\(([^)]+)\\)\\s*\\{[^}]*\\b${func}\\(`, 's');
+            const match = code.match(trampolineRegex);
 
-            // Await ask()
-            code = code.replace(
-                'const ret = ask(result0);',
-                'const ret = await ask(result0);'
-            );
+            if (match) {
+                const trampolineName = match[1];
+                const args = match[2];
+                console.log(`[Patch] Found trampoline for '${func}': ${trampolineName}`);
 
-            // Wrap in Suspending
-            const importRegex = new RegExp(`'\\d+':\\s*${funcName},`, 'g');
-            code = code.replace(importRegex, (m) => {
-                return m.replace(funcName, `new WebAssembly.Suspending(${funcName})`);
-            });
-        } else {
-            console.warn("[Patch] Trampoline NOT found");
-        }
+                // 1. Make trampoline async
+                const decl = `function ${trampolineName}(${args}) {`;
+                const asyncDecl = `async ${decl}`;
 
-        // 2. Wrap internal Wasm export 'run' (generated by JCO)
-        // Look for assignment: varName = exportsX.run;
-        // Regex needs to capture the exports variable name (exports0, exports1, etc)
-        const exportAssignRegex = /([a-zA-Z0-9_$]+)\s*=\s*(exports\d+)\.run;/;
-        const exportMatch = code.match(exportAssignRegex);
+                if (!code.includes(asyncDecl)) {
+                    code = code.replace(decl, asyncDecl);
+                    console.log(`  - Made ${trampolineName} async`);
+                }
 
-        if (exportMatch) {
-            const varName = exportMatch[1];
-            const exportsObj = exportMatch[2];
-            console.log("[Patch] Found export variable:", varName, "on object:", exportsObj);
+                // 2. Await the function call
+                // Replace "func(" with "await func("
+                // Use lookbehind to avoid double await
+                const callRegex = new RegExp(`(?<!await\\s)\\b${func}\\(`, 'g');
+                if (code.match(callRegex)) {
+                    code = code.replace(callRegex, `await ${func}(`);
+                    console.log(`  - Added await to ${func}() call(s)`);
+                }
 
-            // Wrap in promising
-            // Use regex replacement to be safe against whitespace
-            const replaceRe = new RegExp(`${varName}\\s*=\\s*${exportsObj}\\.run;`);
-            code = code.replace(
-                replaceRe,
-                `${varName} = WebAssembly.promising(${exportsObj}.run);`
-            );
-
-            // Find call site: const ret = varName(...)
-            const callRegex = new RegExp(`const ret = ${varName}\\(`);
-            if (code.match(callRegex)) {
-                console.log("[Patch] Found call site for", varName);
-                code = code.replace(
-                    callRegex,
-                    `const ret = await ${varName}(`
-                );
-
-                // Make wrapper async: function run(arg0) {
-                if (code.includes('function run(arg0) {')) {
-                    console.log("[Patch] Making run async");
-                    code = code.replace('function run(arg0) {', 'async function run(arg0) {');
-                } else {
-                    console.warn("[Patch] 'function run(arg0)' NOT found");
+                // 3. Wrap trampoline in Suspending in imports
+                const importRegex = new RegExp(`'\\d+':\\s*${trampolineName},`, 'g');
+                let wrappedCount = 0;
+                code = code.replace(importRegex, (m) => {
+                    wrappedCount++;
+                    return m.replace(trampolineName, `new WebAssembly.Suspending(${trampolineName})`);
+                });
+                if (wrappedCount > 0) {
+                    console.log(`  - Wrapped ${trampolineName} in Suspending (count: ${wrappedCount})`);
                 }
             } else {
-                console.warn("[Patch] Call site NOT found for", varName);
+                // console.log(`[Patch] Trampoline for '${func}' not found.`);
             }
-        } else {
-            console.warn("[Patch] Export assignment NOT found");
         }
+
+        // 4. Wrap exports: 'init' and 'on-visit' (mapped to 'onVisit' in JS wrapper)
+        // JCO generates wrappers: function onVisit(...) { exports1OnVisit(...) }
+        // We need to:
+        //  a) Find the raw export assignment: exports1OnVisit = exports1['on-visit']
+        //  b) Wrap it in Promising: exports1OnVisit = WebAssembly.promising(exports1['on-visit'])
+        //  c) Find the wrapper function: function onVisit(...)
+        //  d) Make it async: async function onVisit(...)
+        //  e) Await the internal call: await exports1OnVisit(...)
+
+        const exportsToPatch = [
+            { witName: 'init', wrapperName: 'init' },
+            { witName: 'on-visit', wrapperName: 'onVisit' }
+        ];
+
+        for (const { witName, wrapperName } of exportsToPatch) {
+            console.log(`[Patch] Processing export: ${witName} (wrapper: ${wrapperName})`);
+
+            // Regex to find assignment: varName = exportsObject['witName'] OR exportsObject.witName
+            // Matches: exports1OnVisit = exports1['on-visit'];
+            // Matches: exports1Init = exports1.init;
+            // Escaping for regex
+            const escapedWitName = witName.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+
+            // This regex handles both dot notation and bracket notation
+            // Group 1: internal var name (e.g. exports1OnVisit)
+            // Group 2: exports object name (e.g. exports1)
+            const assignmentRegex = new RegExp(`([a-zA-Z0-9_$]+)\\s*=\\s*([a-zA-Z0-9_$]+)(?:\\.|\\[['"])${escapedWitName}(?:['"]\\])?;`);
+
+            const match = code.match(assignmentRegex);
+
+            if (match) {
+                const internalVarName = match[1];
+                const exportsObjName = match[2];
+                const fullMatch = match[0];
+
+                console.log(`  - Found assignment: ${internalVarName} = ...`);
+
+                // 1. Wrap assignment in WebAssembly.promising
+                // Reconstruct the right side to be safe (using the match we found)
+                // We replace the WHOLE line to wrap it.
+                // We need to extract the "right side" from the match or reconstruct it.
+                // easier: capture the right side in the regex?
+                // Actually, let's just use the regex to find the right-hand-side start.
+
+                // Construct the Promising wrapper
+                // If it was dot access: exports1.init -> replace with WebAssembly.promising(exports1.init)
+                // If brackets: exports1['on-visit'] -> WebAssembly.promising(exports1['on-visit'])
+
+                // Let's just use the original right-hand side from the capture if we can?
+                // Actually, let's just use the regex to find the right-hand-side start.
+
+                const split = fullMatch.split('=');
+                const leftSide = split[0];
+                const rightSide = split.slice(1).join('=').trim().replace(/;$/, ''); // remove trailing semicolon
+
+                const newAssignment = `${leftSide}= WebAssembly.promising(${rightSide});`;
+                code = code.replace(fullMatch, newAssignment);
+                console.log(`  - Wrapped ${internalVarName} in WebAssembly.promising`);
+
+                // 2. Find wrapper function definition and make async
+                // function onVisit(arg0) {
+                const funcDeclRegex = new RegExp(`function\\s+${wrapperName}\\s*\\(`, 'g');
+                if (code.match(funcDeclRegex)) {
+                    code = code.replace(funcDeclRegex, `async function ${wrapperName}(`);
+                    console.log(`  - Made wrapper function '${wrapperName}' async`);
+                } else {
+                    console.warn(`  - Wrapper function '${wrapperName}' not found.`);
+                }
+
+                // 3. Await the internal call with ret check
+                // const ret = internalVarName(...)  OR  internalVarName(...)
+                // Parsing depends on return type. 'init' might return void, 'on-visit' might match different pattern.
+
+                // Regex for call: internalVarName(
+                // We use a lookahead/behind or just replace.
+
+                // Note: JCO often does: 
+                //    const ret = exports1OnVisit(...); 
+                //    return ret;
+                // OR just: exports1Init();
+
+                const callRegex = new RegExp(`\\b${internalVarName}\\(`, 'g');
+
+                // We want to replace "internalVarName(" with "await internalVarName("
+                // BUT we must avoid double await if already patched (unlikely here but good practice)
+                // AND we only want to patch calls inside the wrapper? 
+                // Actually, patching globally is typically fine in this generated file structure.
+
+                let callCount = 0;
+                code = code.replace(callRegex, (m) => {
+                    callCount++;
+                    return `await ${m}`;
+                });
+
+                if (callCount > 0) {
+                    console.log(`  - Added await to ${callCount} call(s) of ${internalVarName}`);
+                } else {
+                    console.warn(`  - No calls to ${internalVarName} found to await.`);
+                }
+
+            } else {
+                console.warn(`  - Assignment for '${witName}' not found.`);
+            }
+        }
+
         return code;
     }
 }

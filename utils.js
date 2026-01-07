@@ -793,6 +793,12 @@ const packetUtils = {
 
         const totalCount = trackableItems.length;
         if (totalCount === 0) {
+            // [FIX] If this is a Wasm/Module packet, it manages its own completion.
+            // Do NOT auto-complete it just because it has no static URLs.
+            const hasAgent = instance.contents.some(item => item.format === 'wasm' || item.format === 'module');
+            if (hasAgent) {
+                return { visitedCount: 0, totalCount: 0, progressPercentage: 0 };
+            }
             return { visitedCount: 0, totalCount: 0, progressPercentage: 100 };
         }
         const visitedUrlsSet = new Set(instance.visitedUrls || []);

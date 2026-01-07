@@ -1,14 +1,15 @@
-import wit_world as _wit_world
+import wit_world
+from wit_world.imports import host_quest_manager, host_content
 
-class WitWorld(_wit_world.WitWorld):
-    def run(self, code: str) -> str:
-        if code == "init":
-            return "Python Agent Initialized"
+class WitWorld(wit_world.WitWorld):
+    def init(self):
+        # Register the google.com page as a visitable item
+        host_content.register_item("google-item", "https://google.com", "Visit Google", "webpage")
         
-        # Match JS logic: evaluate the code string.
-        scope = {}
-        try:
-            exec(code, scope)
-            return "Python Execution Success" 
-        except Exception as e:
-            return f"Error: {str(e)}"
+        host_quest_manager.register_task("quest-1", "task-1", "Visit https://google.com")
+        host_quest_manager.notify_player("Python Quest Started: Visit Google!")
+
+    def on_visit(self, url: str):
+        if "google.com" in url:
+            host_quest_manager.update_task("quest-1", "task-1", wit_world.engine_types.Status.COMPLETED)
+            host_quest_manager.notify_player("Python Task Complete: Google visited!")
