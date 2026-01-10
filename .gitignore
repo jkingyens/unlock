@@ -29,3 +29,7 @@ coverage/
 .DS_Store
 Thumbs.db
 ehthumbs.db
+
+# WASI SDK (large files)
+packet-c/wasi-sdk*.tar.gz
+packet-c/wasi-sdk-*/
