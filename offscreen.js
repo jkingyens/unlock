@@ -227,7 +227,7 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
                         // to provide specific environment bindings via import map, or simply 'component-runtime'.
                         console.log("[Offscreen] Fetching shim sources...");
                         await Promise.all(shimNames.map(async (name) => {
-                            const url = chrome.runtime.getURL(`agents/shims/${name}.js`);
+                            const url = chrome.runtime.getURL(`packets/shims/${name}.js`);
                             const res = await fetch(url);
                             const text = await res.text();
                             shims[name] = text;
@@ -264,7 +264,7 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
                 (async () => {
                     console.log("[Offscreen] Received execute_raw_wasm request");
                     try {
-                        const { transpile } = await import(chrome.runtime.getURL('agents/jco.js'));
+                        const { transpile } = await import(chrome.runtime.getURL('packets/jco.js'));
                         console.log("[Offscreen] Loaded JCO, processing request...");
 
                         const wasmBuffer = base64ToAb(request.data.wasmB64);
@@ -277,7 +277,7 @@ if (typeof window.unlockOffscreenInitialized === 'undefined') {
 
                         console.log("[Offscreen] Fetching shim sources...");
                         await Promise.all(shimNames.map(async (name) => {
-                            const url = chrome.runtime.getURL(`agents/shims/${name}.js`);
+                            const url = chrome.runtime.getURL(`packets/shims/${name}.js`);
                             const res = await fetch(url);
                             const text = await res.text();
                             shims[name] = text;

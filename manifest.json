@@ -57,7 +57,7 @@
         "page_interceptor.js",
         "selector.js",
         "selector.css",
-        "agents/*"
+        "packets/*"
       ],
       "matches": [
         "<all_urls>"

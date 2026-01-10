@@ -1,0 +1,11 @@
+package test:simple;
+
+interface host-test {
+    log: func(msg: string);
+}
+
+world simple-test {
+    import host-test;
+    
+    export init: func();
+}

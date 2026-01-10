@@ -1,0 +1,16 @@
+{
+  "name": "packet-js",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs && node patch-agent.mjs && node bundle.mjs && node inline-wasm.mjs && cp dist/packet.bundled.js ../packets/packet.js && npm run package",
+    "package": "node package-packet.mjs"
+  },
+  "dependencies": {
+    "@bytecodealliance/componentize-js": "^0.19.3",
+    "@bytecodealliance/jco": "^1.15.4"
+  },
+  "devDependencies": {
+    "esbuild": "^0.20.0"
+  }
+}

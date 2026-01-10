@@ -582,7 +582,7 @@ const actionHandlers = {
         try {
             await ensureOffscreenDocument();
 
-            const agentJsPath = 'agents/agent.js';
+            const agentJsPath = 'packets/packet.js';
             const responseJs = await fetch(chrome.runtime.getURL(agentJsPath));
             if (!responseJs.ok) throw new Error(`Failed to load JS: ${agentJsPath}`);
             const agentCode = await responseJs.text();
