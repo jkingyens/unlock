@@ -1,5 +1,0 @@
-package local:demo;
-
-world calculator {
-  export run: func() -> string;
-}
