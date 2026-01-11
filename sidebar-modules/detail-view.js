@@ -493,16 +493,22 @@ export async function updateCardVisibility(instance, browserState) {
                         resetBtn.title = "Reset / Clip Again";
                         resetBtn.innerHTML = '↺';
                         // Simple reset handler
-                        resetBtn.onclick = (e) => {
+                        resetBtn.onclick = async (e) => {
                             e.stopPropagation();
+
+                            // Clear the collected output data from storage
+                            await sendMessageToBackground({
+                                action: 'clear_packet_output',
+                                data: {
+                                    instanceId: instance.instanceId,
+                                    lrl: cardLrl
+                                }
+                            });
+
                             card.classList.remove('visited'); // Unlock locally
-                            // Find key and optionally remove from visitedUrlsSet for immediate consistency if needed, 
-                            // but simpler is to just visually unlock so they can click again.
-                            // Triggering a refresh might re-lock it if we don't clear data, 
-                            // but user wants to "change what they captured", implying overwrite.
-                            // We'll just let them click it again.
                             card.querySelector('.card-url').textContent = "Click to Activate Input Capture";
                             card.classList.add('clickable', 'drop-zone-active');
+                            card.style.opacity = '1.0';
                             resetBtn.remove();
 
                             // Re-attach handlers if needed (they should persist, but we need to ensure state is right)

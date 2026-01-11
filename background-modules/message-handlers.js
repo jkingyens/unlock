@@ -419,6 +419,43 @@ async function handleSavePacketOutput(data, sender, sendResponse) {
     }
 }
 
+async function handleClearPacketOutput(data, sender, sendResponse) {
+    const { instanceId, lrl } = data;
+    if (!instanceId || !lrl) {
+        return sendResponse({ success: false, error: 'Missing instanceId or lrl for clearing packet output.' });
+    }
+
+    try {
+        const instance = await storage.getPacketInstance(instanceId);
+        if (!instance) {
+            throw new Error(`Instance ${instanceId} not found.`);
+        }
+
+        // Remove the output entry for this lrl from packetOutputs
+        if (Array.isArray(instance.packetOutputs)) {
+            instance.packetOutputs = instance.packetOutputs.filter(
+                output => output.sourceLrl !== lrl
+            );
+        }
+
+        // Remove the lrl from visitedUrls
+        if (Array.isArray(instance.visitedUrls)) {
+            instance.visitedUrls = instance.visitedUrls.filter(url => url !== lrl);
+        }
+
+        await storage.savePacketInstance(instance);
+
+        syncGlobalMediaState(instance);
+
+        sidebarHandler.notifySidebar('packet_instance_updated', { instance });
+        sendResponse({ success: true });
+
+    } catch (error) {
+        logger.error('MessageHandler:handleClearPacketOutput', 'Error clearing packet output', error);
+        sendResponse({ success: false, error: error.message });
+    }
+}
+
 async function handleProposeSettingsUpdate(data, sender, sendResponse) {
     const { instance } = data;
     if (!instance || !instance.packetOutputs || instance.packetOutputs.length === 0) {
@@ -641,6 +678,7 @@ const actionHandlers = {
 
     'create_from_codebase': handleCreateFromCodebase,
     'save_packet_output': handleSavePacketOutput,
+    'clear_packet_output': handleClearPacketOutput,
     'activate_selector_tool': async (data, sender, sendResponse) => {
         const { toolType, sourceUrl } = data;
         let targetTabId = null;
